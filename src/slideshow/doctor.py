@@ -26,7 +26,7 @@ from .encoders import EncoderChoice
 from .errors import PreflightError
 from .logging_setup import console
 from .paths import Project, is_windows, is_wsl, platform_label
-from .proc import have, run, which
+from .proc import have, resolve_tool, run, which
 
 log = logging.getLogger("slideshow.doctor")
 
@@ -48,7 +48,11 @@ _INSTALL = {
                  "sudo apt install -y libimage-exiftool-perl"),
     "magick": ("winget install ImageMagick.ImageMagick",
                "sudo apt install -y imagemagick"),
-    "melt": ("winget install KDE.Kdenlive",
+    # melt kommt als Beigabe von Kdenlive/Shotcut und landet dabei nicht im
+    # PATH; resolve_tool() findet es trotzdem. Der Hinweis nennt deshalb auch
+    # den Override fuer den Fall, dass es woanders liegt.
+    "melt": ("winget install KDE.Kdenlive   # oder: scoop install extras/kdenlive\n"
+             "  # liegt melt woanders: setx SLIDESHOW_MELT \"C:\\Pfad\\zu\\melt.exe\"",
              "sudo apt install -y melt"),
     "nvidia-smi": ("NVIDIA-Treiber >= 550 installieren (GeForce Experience oder nvidia.com)",
                    "Treiber gehoert auf die Windows-Seite; unter WSL nicht noetig"),
@@ -100,7 +104,10 @@ class Capabilities:
     cpu_cores: int = 0
     exiftool: bool = False
     magick: bool = False
-    melt: bool = False
+    #: Pfad zur melt-Binary (nicht nur ein Flag): sie liegt haeufig ausserhalb
+    #: des PATH, ein spaeterer MLT-Renderpfad muss sie also voll qualifiziert
+    #: aufrufen koennen.
+    melt: str = ""
     librosa: bool = False
     aubio: bool = False
     deep: bool = False
@@ -180,16 +187,31 @@ def _version_tuple(text: str) -> list[int]:
 
 
 def _tool_version(exe: str, args: list[str]) -> str | None:
-    """Gibt die erste Ausgabezeile zurueck, oder None wenn das Tool fehlt."""
-    if not have(exe):
+    """Gibt die erste Ausgabezeile zurueck, oder None wenn das Tool fehlt.
+
+    Aufgerufen wird der von :func:`resolve_tool` gefundene Pfad, nicht der
+    blosse Name — sonst scheitert die Abfrage bei allem, was ausserhalb des
+    PATH liegt.
+    """
+    path = resolve_tool(exe)
+    if not path:
         return None
     try:
-        res = run([exe, *args], check=False, timeout=30)
+        res = run([path, *args], check=False, timeout=30)
     except Exception as exc:                       # noqa: BLE001 - Sonde darf nie werfen
         log.debug("Versionsabfrage %s fehlgeschlagen: %s", exe, exc)
         return None
     text = (res.stdout or "") + (res.stderr or "")
     return text.strip().splitlines()[0] if text.strip() else ""
+
+
+#: Die Flagspalte von ``-filters`` ist nicht ueber die ffmpeg-Versionen
+#: stabil: bis 7.x drei Zeichen (``T.C``, mit Command-Support), ab 8.x nur
+#: noch zwei (``TS``). Ein fester Zaehler laesst die Liste bei der jeweils
+#: anderen Version *stumm* leer — und dann meldet der Report zoompan, xfade,
+#: scale und format als fehlend, obwohl ein Full-Build installiert ist.
+_FILTER_PATTERN = r"^\s*[A-Z.]{2,3}\s+(\S+)"
+_ENCODER_PATTERN = r"^\s*[A-Z.]{6}\s+(\S+)"
 
 
 def _ffmpeg_list(ffmpeg: str, what: str, pattern: str) -> list[str]:
@@ -199,7 +221,10 @@ def _ffmpeg_list(ffmpeg: str, what: str, pattern: str) -> list[str]:
         return []
     # re.MULTILINE ist zwingend: ohne das matcht `^` nur den Anfang der
     # gesamten Ausgabe, und die Liste bleibt stumm leer.
-    return sorted(set(re.findall(pattern, res.stdout or "", re.MULTILINE)))
+    names = re.findall(pattern, res.stdout or "", re.MULTILINE)
+    # Die Legende ueber der Tabelle ("T.. = Timeline support") hat dasselbe
+    # Format wie eine Eintragszeile und liefert sonst ein "=" als Namen.
+    return sorted({n for n in names if n[:1].isalnum()})
 
 
 def _probe_zoompan_10bit(ffmpeg: str) -> bool:
@@ -383,6 +408,15 @@ class DoctorReport:
         return max((c.status for c in self.checks), key=lambda s: _ORDER[s], default=OK)
 
 
+#: Hochzaehlen, sobald sich Felder *oder* die Erhebung aendern. Zwei Gruende:
+#: ein alter Cache laedt Werte im alten Typ direkt in die Dataclass (``melt``
+#: war ein bool — Dataclasses konvertieren nicht, der Fehler faellt erst
+#: spaeter und an ganz anderer Stelle auf); und die ffmpeg-Signatur allein
+#: erkennt keine korrigierte Sonde, sodass etwa eine faelschlich leere
+#: Filterliste ohne ``--refresh`` beliebig lange weitergereicht wuerde.
+_CACHE_VERSION = 3
+
+
 def _cache_path(project: Project | None) -> Path | None:
     return (project.cache / "doctor.json") if project else None
 
@@ -398,6 +432,8 @@ def load_capabilities(project: Project | None, *, deep: bool = False,
     if path and path.exists() and not refresh:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("v") != _CACHE_VERSION:
+                raise ValueError("Cache-Version veraltet")
             cached = Capabilities(**data["caps"])
             fresh_sig = _ffmpeg_signature()
             if data.get("sig") == fresh_sig and (cached.deep or not deep):
@@ -408,7 +444,8 @@ def load_capabilities(project: Project | None, *, deep: bool = False,
     if path:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({"sig": _ffmpeg_signature(), "caps": asdict(caps)},
+            path.write_text(json.dumps({"v": _CACHE_VERSION, "sig": _ffmpeg_signature(),
+                                        "caps": asdict(caps)},
                                        indent=1), encoding="utf-8")
         except OSError:
             pass
@@ -432,7 +469,7 @@ def probe_capabilities(*, deep: bool = False, project: Project | None = None) ->
     caps.ffprobe = which("ffprobe") or ""
     caps.exiftool = have("exiftool")
     caps.magick = have("magick") or have("convert")
-    caps.melt = have("melt")
+    caps.melt = resolve_tool("melt") or ""
     caps.librosa = _py_module("librosa")
     caps.aubio = _py_module("aubio")
 
@@ -441,8 +478,8 @@ def probe_capabilities(*, deep: bool = False, project: Project | None = None) ->
 
     line = _tool_version("ffmpeg", ["-version"]) or ""
     caps.ffmpeg_version = _version_tuple(line)
-    caps.encoders = _ffmpeg_list("ffmpeg", "-encoders", r"^\s*[A-Z.]{6}\s+(\S+)")
-    caps.filters = _ffmpeg_list("ffmpeg", "-filters", r"^\s*[A-Z.]{3}\s+(\S+)")
+    caps.encoders = _ffmpeg_list("ffmpeg", "-encoders", _ENCODER_PATTERN)
+    caps.filters = _ffmpeg_list("ffmpeg", "-filters", _FILTER_PATTERN)
     caps.hwaccels = [l.strip() for l in
                      (run(["ffmpeg", "-hide_banner", "-hwaccels"], check=False).stdout or
                       "").splitlines()[1:] if l.strip()]
@@ -621,6 +658,11 @@ def _check_binary(rep: DoctorReport, exe: str, args: list[str],
     detail = line or "vorhanden"
     if note:
         detail = f"{detail}  ({note})"
+    # Ausserhalb des PATH gefunden: kein Mangel, aber der Pfad gehoert in den
+    # Report, sonst ist nicht nachvollziehbar, welche Binary gemessen wurde.
+    path = resolve_tool(exe)
+    if path and not which(exe):
+        detail = f"{detail}  [nicht im PATH: {path}]"
     rep.add(exe, OK, detail)
 
 

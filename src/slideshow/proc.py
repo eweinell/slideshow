@@ -13,6 +13,7 @@ import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .errors import ExternalToolError, SlideshowError
 
@@ -86,6 +87,105 @@ def which(name: str) -> str | None:
 
 def have(name: str) -> bool:
     return shutil.which(name) is not None
+
+
+# --------------------------------------------------------------------------
+# Werkzeugsuche jenseits des PATH
+# --------------------------------------------------------------------------
+
+def _dirs(*names: str) -> list[Path]:
+    """Existierende Verzeichnisse aus Umgebungsvariablen, ohne Duplikate."""
+    out: list[Path] = []
+    for name in names:
+        raw = os.environ.get(name)
+        if raw:
+            p = Path(raw)
+            if p not in out:
+                out.append(p)
+    return out
+
+
+def _scoop_roots() -> list[Path]:
+    roots = _dirs("SCOOP", "SCOOP_GLOBAL")
+    roots.append(Path.home() / "scoop")
+    programdata = _dirs("ProgramData")
+    roots += [p / "scoop" for p in programdata]
+    return roots
+
+
+def _program_dirs() -> list[Path]:
+    dirs = _dirs("ProgramFiles", "ProgramFiles(x86)")
+    dirs += [p / "Programs" for p in _dirs("LOCALAPPDATA")]
+    return dirs
+
+
+def _melt_candidates() -> list[Path]:
+    """Wo ``melt`` liegt, wenn es nicht im PATH steht.
+
+    ``melt`` wird praktisch nie einzeln installiert, sondern kommt als
+    Beigabe von Kdenlive oder Shotcut mit — und beide legen nur ihre
+    Haupt-Exe in den PATH. Bei scoop etwa entsteht ein Shim fuer
+    ``kdenlive.exe``, waehrend ``melt.exe`` unerreichbar in ``bin/`` liegt.
+    """
+    out: list[Path] = []
+    for root in _scoop_roots():
+        out.append(root / "apps" / "kdenlive" / "current" / "bin" / "melt.exe")
+        out.append(root / "apps" / "shotcut" / "current" / "melt.exe")
+    for base in _program_dirs():
+        out.append(base / "kdenlive" / "bin" / "melt.exe")
+        out.append(base / "Shotcut" / "melt.exe")
+    # Linux/WSL: aus dem Distributionspaket, oder ein entpacktes AppImage.
+    out += [Path("/usr/bin/melt"), Path("/usr/local/bin/melt")]
+    return out
+
+
+#: Zusaetzliche Suchorte pro Werkzeug. Lazy, weil die Umgebungsvariablen
+#: erst zur Laufzeit feststehen (und Tests sie umbiegen duerfen).
+_EXTRA_LOCATIONS = {
+    "melt": _melt_candidates,
+}
+
+
+def _usable(path: Path) -> bool:
+    try:
+        return path.is_file() and os.access(path, os.X_OK)
+    except OSError:
+        return False
+
+
+def resolve_tool(name: str) -> str | None:
+    """Vollstaendiger Pfad zu ``name``, oder None.
+
+    Drei Stufen, in dieser Reihenfolge:
+
+    1. ``SLIDESHOW_<NAME>`` — der explizite Override gewinnt immer, sonst
+       liesse sich eine falsche Version im PATH nicht uebersteuern.
+    2. der PATH (``shutil.which``),
+    3. bekannte Installationsorte aus :data:`_EXTRA_LOCATIONS`.
+
+    Stufe 3 existiert, weil ``shutil.which`` allein bei mitgelieferten
+    Werkzeugen wie ``melt`` regelmaessig danebengreift und der Report dann
+    zur Installation von etwas raet, das laengst installiert ist.
+    """
+    override = os.environ.get(f"SLIDESHOW_{name.upper().replace('-', '_')}")
+    if override:
+        if _usable(Path(override)):
+            return str(Path(override))
+        found = shutil.which(override)
+        if found:
+            return found
+        log.warning("SLIDESHOW_%s zeigt auf nichts Ausfuehrbares: %s",
+                    name.upper(), override)
+
+    found = shutil.which(name)
+    if found:
+        return found
+
+    for cand in _EXTRA_LOCATIONS.get(name, list)():
+        if _usable(cand):
+            log.debug("%s ausserhalb des PATH gefunden: %s", name, cand)
+            return str(cand)
+    return None
 
 
 # --------------------------------------------------------------------------

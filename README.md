@@ -71,6 +71,15 @@ können Hochformat-Fotos quer liegen), ImageMagick, `melt` für den MLT-Pfad,
 `librosa` für etwas bessere Onset-Erkennung (es gibt einen gleichwertigen
 numpy-Fallback für perkussisches Material).
 
+Werkzeuge werden nicht nur im `PATH` gesucht. `melt` etwa wird praktisch nie
+einzeln installiert, sondern kommt mit Kdenlive oder Shotcut mit — und beide
+legen nur ihre Haupt-Exe in den `PATH` (scoop shimt `kdenlive.exe`, während
+`melt.exe` in `bin/` liegen bleibt). Die üblichen Installationsorte werden
+deshalb zusätzlich abgesucht; der Report zeigt dann den gefundenen Pfad an.
+Liegt ein Werkzeug woanders, setzt `SLIDESHOW_<NAME>` es fest — etwa
+`SLIDESHOW_MELT=C:\Pfad\zu\melt.exe`. Der Override gewinnt auch gegen den
+`PATH`, falls dort die falsche Version steht.
+
 ## Tests
 
 ```bash
