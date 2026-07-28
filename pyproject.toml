@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slideshow"
+version = "0.1.0"
+description = "Musiksynchroner 4K-Slideshow-Renderer fuer Urlaubsmaterial"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "pyyaml",
+    "pydantic>=2",
+    "pillow",
+    "rich",
+    "soundfile",
+]
+
+[project.optional-dependencies]
+librosa = ["librosa"]
+aubio = ["aubio"]
+dev = ["pytest"]
+
+[project.scripts]
+slideshow = "slideshow.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: laeuft mit echten ffmpeg-Encodes, dauert laenger",
+    "manual: dokumentierter manueller Sichtpruefungs-Check",
+]
