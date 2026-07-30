@@ -112,6 +112,10 @@ out/            master.mp4, timeline.json, project.kdenlive
 logs/           ein Logfile je Subkommando, mit den exakten ffmpeg-Aufrufen
 ```
 
+Sämtliche Schlüssel der Edit-List — Takt, Ken Burns, Übergänge, Präzedenz der
+Dauerangaben und die üblichen Eingriffe von Hand — stehen in
+[`docs/edit-yaml.md`](docs/edit-yaml.md).
+
 ## Installation
 
 ```bash

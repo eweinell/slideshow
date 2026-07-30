@@ -296,8 +296,37 @@ class KBDefaults(BaseModel):
     alternate: bool = True
     #: ``zoompan`` (8 Bit, schnell) oder ``scale16`` (16 Bit, ohne zoompan, 8.1).
     engine: Literal["zoompan", "scale16"] = "zoompan"
-    #: Maximale Auslenkung der Bildmitte beim automatischen Schwenk.
-    pan_amount: float = 0.06
+    #: Schwenkweg pro Sekunde — wie ``zoom_rate``, nur fuer die Bildmitte.
+    pan_rate: float = 0.03
+    #: Klemmung des Gesamt-Schwenkwegs [min, max], normalisiert auf die
+    #: Bildkante. Bei ``pan_rate`` 0,03 gilt die Rate damit zwischen 1,7 s und
+    #: 6,0 s unveraendert — dasselbe Fenster wie beim Zoom.
+    pan_total: tuple[float, float] = (0.05, 0.18)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _pan_amount_uebernehmen(cls, data):
+        """``pan_amount`` aus aelteren Dateien verlustfrei uebersetzen.
+
+        Der alte Wert war eine *feste* Auslenkung je Richtung, also ein
+        Gesamtweg von ``2 * pan_amount`` unabhaengig von der Dauer. Genau das
+        ergibt eine Klemmung, deren Grenzen zusammenfallen: dann liefert sie
+        immer denselben Weg, egal was ``pan_rate`` sagt. Bestehende Projekte
+        rendern damit bitgleich weiter.
+        """
+        if not isinstance(data, dict) or "pan_amount" not in data:
+            return data
+        data = dict(data)
+        alt = float(data.pop("pan_amount"))
+        data.setdefault("pan_total", (2.0 * alt, 2.0 * alt))
+        return data
+
+    @field_validator("zoom_total", "pan_total")
+    @classmethod
+    def _grenzen_geordnet(cls, v, info):
+        if v[0] > v[1]:
+            raise ValueError(f"{info.field_name} muss [min, max] mit min <= max sein")
+        return v
 
 
 class XfadeDefaults(BaseModel):

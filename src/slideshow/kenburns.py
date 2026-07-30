@@ -32,10 +32,21 @@ from dataclasses import dataclass
 
 from .models import KBDefaults, KBSpec
 
+_SQRT_HALF = math.sqrt(0.5)
+
 #: Acht Schwenkrichtungen, deterministisch nach Segmentindex durchgereicht.
 #: Deterministisch heisst: derselbe Index ergibt immer dieselbe Bewegung —
 #: sonst aendert sich der Cache-Key bei jedem Lauf.
-_DIRECTIONS = [(1, 0), (0, 1), (-1, 0), (0, -1), (1, 1), (-1, 1), (-1, -1), (1, -1)]
+#:
+#: Die Vektoren sind auf Laenge 1 normiert. Unnormiert (``(1, 1)``) legte ein
+#: diagonaler Schwenk das ``sqrt(2)``-fache zurueck — vier von acht Richtungen
+#: waeren 41 % schneller gewesen als die anderen vier, ohne dass das jemand
+#: eingestellt haette. Und weil die Auslenkung je Achse dabei genauso gross
+#: blieb wie bei einem geraden Schwenk, liefen die Diagonalen zusaetzlich
+#: frueher in die Klemmung des Bildrands.
+_DIRECTIONS = [(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0),
+               (_SQRT_HALF, _SQRT_HALF), (-_SQRT_HALF, _SQRT_HALF),
+               (-_SQRT_HALF, -_SQRT_HALF), (_SQRT_HALF, -_SQRT_HALF)]
 
 
 @dataclass(frozen=True)
@@ -79,8 +90,15 @@ def plan_motion(index: int, duration: float, defaults: KBDefaults,
     zoom_in = (index % 2 == 0) or not defaults.alternate
     z0, z1 = (1.0, z_end) if zoom_in else (z_end, 1.0)
 
+    # Der Schwenk folgt derselben Regel wie der Zoom: aus der Dauer abgeleitet,
+    # nicht fest. Ein fester Weg war im kurzen Fall ein Ruck und im langen
+    # Stillstand — dieselbe Begruendung wie oben, sie galt fuer den Schwenk
+    # genauso, nur stand sie dort nicht.
+    lo_p, hi_p = defaults.pan_total
+    weg = min(max(defaults.pan_rate * duration, lo_p), hi_p)
+    a = weg / 2.0                       # Auslenkung je Richtung um die Mitte
+
     dx, dy = _DIRECTIONS[index % len(_DIRECTIONS)]
-    a = defaults.pan_amount
     c0 = (0.5 - dx * a, 0.5 - dy * a)
     c1 = (0.5 + dx * a, 0.5 + dy * a)
 

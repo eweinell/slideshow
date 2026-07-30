@@ -13,6 +13,7 @@ es an der Fenstergrenze per Konstruktion keinen Sprung geben.
 from __future__ import annotations
 
 import hashlib
+import math
 import subprocess
 from pathlib import Path
 
@@ -41,6 +42,81 @@ def test_zoom_ergibt_sich_aus_der_dauer():
     assert kurz < lang, "ein laengeres Bild braucht mehr Zoomweg"
     assert zoom_from_duration(0.5, d) == pytest.approx(1.08), "untere Klemmung"
     assert zoom_from_duration(60.0, d) == pytest.approx(1.30), "obere Klemmung"
+
+
+# --------------------------------------------------------------------------
+# Schwenk
+#
+# Derselbe Grundsatz wie beim Zoom: aus der Dauer abgeleitet, nicht fest.
+# --------------------------------------------------------------------------
+
+def _weg(m) -> float:
+    """Laenge der Schwenkstrecke von c0 nach c1."""
+    return math.dist(m.c0, m.c1)
+
+
+def test_schwenk_ergibt_sich_aus_der_dauer():
+    d = KBDefaults(pan_rate=0.03, pan_total=(0.05, 0.18))
+
+    assert _weg(plan_motion(0, 2.0, d)) == pytest.approx(0.06)
+    assert _weg(plan_motion(0, 4.0, d)) == pytest.approx(0.12)
+    assert _weg(plan_motion(0, 0.5, d)) == pytest.approx(0.05), "untere Klemmung"
+    assert _weg(plan_motion(0, 60.0, d)) == pytest.approx(0.18), "obere Klemmung"
+
+
+def test_schwenkgeschwindigkeit_ist_im_fenster_konstant():
+    """Genau dafür ist die Rate da: 2 s und 6 s müssen gleich schnell wirken."""
+    d = KBDefaults()
+    lo, hi = d.pan_total
+    for dauer in (lo / d.pan_rate, 3.0, 4.0, hi / d.pan_rate):
+        assert _weg(plan_motion(0, dauer, d)) / dauer == pytest.approx(d.pan_rate)
+
+
+def test_alle_acht_richtungen_schwenken_gleich_weit():
+    """Regression: unnormierte Diagonalen liefen 41 % weiter als die Geraden."""
+    d = KBDefaults()
+    wege = [_weg(plan_motion(i, 4.0, d)) for i in range(8)]
+
+    assert max(wege) == pytest.approx(min(wege)), \
+        "keine Richtung darf schneller sein als die andern"
+    assert len({(round(m.c1[0] - m.c0[0], 6), round(m.c1[1] - m.c0[1], 6))
+                for m in (plan_motion(i, 4.0, d) for i in range(8))}) == 8, \
+        "trotzdem acht verschiedene Richtungen"
+
+
+def test_schwenk_bleibt_im_bild():
+    """Die Mitte darf nicht so weit wandern, dass der Ausschnitt herausläuft.
+
+    Zulässig ist bei Zoom ``z`` eine Auslenkung von ``0.5 - 1/(2z)``; darüber
+    klemmt der Filter, und der eingestellte Weg käme gar nicht an.
+    """
+    d = KBDefaults()
+    for dauer in (2.0, 4.0, 6.0, 28.05):
+        m = plan_motion(0, dauer, d)
+        z_max = max(m.z0, m.z1)
+        erlaubt = 0.5 - 1.0 / (2.0 * z_max)
+        auslenkung = max(abs(m.c1[0] - 0.5), abs(m.c1[1] - 0.5))
+        assert auslenkung <= erlaubt + 1e-9, \
+            f"bei {dauer} s wird gegen den Bildrand geklemmt"
+
+
+def test_altes_pan_amount_rendert_unveraendert_weiter():
+    """``pan_amount`` war ein fester Weg — als Klemmung mit gleichen Grenzen
+    ist genau das wieder herstellbar, unabhängig von der Dauer."""
+    alt = KBDefaults.model_validate({"pan_amount": 0.06})
+
+    assert alt.pan_total == (0.12, 0.12)
+    for dauer in (2.0, 4.0, 12.0):
+        m = plan_motion(0, dauer, alt)
+        assert m.c0 == pytest.approx((0.44, 0.5))
+        assert m.c1 == pytest.approx((0.56, 0.5))
+
+
+def test_verdrehte_grenzen_werden_abgewiesen():
+    from pydantic import ValidationError
+    for feld in ("pan_total", "zoom_total"):
+        with pytest.raises(ValidationError):
+            KBDefaults.model_validate({feld: (0.5, 0.1)})
 
 
 def test_zoomrichtung_alterniert():
