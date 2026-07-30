@@ -113,12 +113,43 @@ def _clip_stream(project: Project, plan: Plan, slot: Slot, *, seg_start: int,
     return (args, vf, {"start": round(start, 6)})
 
 
+def fade_frames(plan: Plan, edit: EditList, segment_frames: int) -> int:
+    """Laenge der Ausblende in Frames, begrenzt auf das letzte Segment.
+
+    Die Blende sitzt bewusst *im Segment*, nicht im Mux: der Mux haengt die
+    Segmente mit ``-c:v copy`` aneinander, ein Filter dort wuerde den ganzen
+    Master neu encodieren und die verlustfreie Concat-Kette aufgeben (8.3).
+    Das letzte Segment wird ohnehin encodiert, dort kostet die Blende nichts.
+
+    Der Preis dieser Entscheidung: die Blende kann nicht laenger sein als das
+    letzte Segment. Bei den ueblichen Standzeiten von mehreren Sekunden faellt
+    das nicht ins Gewicht; ist das Segment kuerzer, wird die Blende gekuerzt
+    statt ueber die Segmentgrenze hinweg gestueckelt.
+    """
+    wunsch = float(getattr(edit.defaults, "fade_out", 0.0) or 0.0)
+    if wunsch <= 0 or segment_frames <= 0:
+        return 0
+    return max(0, min(int(round(wunsch * plan.fps)), segment_frames))
+
+
+def _fade_suffix(plan: Plan, edit: EditList, seg: RenderSegment) -> tuple[str, dict]:
+    """Filterzusatz fuer das *letzte* Segment der Timeline — sonst leer."""
+    if seg.end_f != plan.total_frames:
+        return ("", {})
+    n = fade_frames(plan, edit, seg.frames)
+    if n <= 0:
+        return ("", {})
+    st = (seg.frames - n) / plan.fps
+    return (f",fade=t=out:st={st:.6f}:d={n / plan.fps:.6f}", {"fade": n})
+
+
 def _segment_command(project: Project, plan: Plan, edit: EditList, seg: RenderSegment, *,
                      profile: EncoderProfile, out: Path,
                      manifest: Manifest | None) -> tuple[list[str], dict, list[str]]:
     """Baut das ffmpeg-Kommando und den Parametersatz fuer den Cache-Key."""
     fmt = f"format={profile.pix_fmt}"
     slots = plan.slots
+    fade, fade_param = _fade_suffix(plan, edit, seg)
 
     if seg.kind in ("still", "clip"):
         i = slots.index(seg.slot)                     # type: ignore[arg-type]
@@ -131,11 +162,11 @@ def _segment_command(project: Project, plan: Plan, edit: EditList, seg: RenderSe
                                           seg_frames=seg.frames, profile=profile,
                                           manifest=manifest)
         cmd = ["ffmpeg", "-hide_banner", "-v", "error", "-y", *args,
-               "-vf", f"{vf},{fmt}", *frames_arg(seg.frames),
+               "-vf", f"{vf},{fmt}{fade}", *frames_arg(seg.frames),
                "-an", *profile.video_args(), str(out)]
         sources = [seg.slot.intent.src]                # type: ignore[union-attr]
         params = {"kind": seg.kind, "v": RENDER_VERSION, "frames": seg.frames,
-                  "vf": vf, **meta}
+                  "vf": vf, **fade_param, **meta}
         return (cmd, params, sources)
 
     # --- Uebergangs-Segment (8.2) -------------------------------------
@@ -159,13 +190,13 @@ def _segment_command(project: Project, plan: Plan, edit: EditList, seg: RenderSe
         filters.append(f"[{n}:v]{vf},{fmt},setpts=PTS-STARTPTS[s{n}]")
 
     xf = xfade_expr(seg.mode, seg.frames, plan.fps)
-    graph = ";".join([*filters, f"[s0][s1]{xf},{fmt}[v]"])
+    graph = ";".join([*filters, f"[s0][s1]{xf},{fmt}{fade}[v]"])
     cmd = ["ffmpeg", "-hide_banner", "-v", "error", "-y", *parts_in,
            "-filter_complex", graph, "-map", "[v]", *frames_arg(seg.frames),
            "-an", *profile.video_args(), str(out)]
     sources = [seg.a.intent.src, seg.b.intent.src]     # type: ignore[union-attr]
     params = {"kind": "xfade", "v": RENDER_VERSION, "frames": seg.frames,
-              "mode": seg.mode, "a": metas[0], "b": metas[1]}
+              "mode": seg.mode, "a": metas[0], "b": metas[1], **fade_param}
     return (cmd, params, sources)
 
 
@@ -328,7 +359,8 @@ def write_concat_list(project: Project, jobs: list[SegmentJob]) -> Path:
 
 def concat_and_mux(project: Project, jobs: list[SegmentJob], *, audio: Path | None,
                    out: Path, profile: EncoderProfile, timeline_seconds: float,
-                   audio_start: float = 0.0, dry: DryRun | None = None) -> None:
+                   audio_start: float = 0.0, fade_seconds: float = 0.0,
+                   dry: DryRun | None = None) -> None:
     """Segmente verlustfrei aneinanderhaengen und mit der Tonspur muxen."""
     listfile = write_concat_list(project, jobs)
     video = project.cache / f"video_concat.{profile.container}"
@@ -349,7 +381,14 @@ def concat_and_mux(project: Project, jobs: list[SegmentJob], *, audio: Path | No
     if audio and audio.exists():
         # Kein -shortest: die Ziellaenge steht in der Edit-List. Audio wird
         # exakt darauf getrimmt bzw. mit apad aufgefuellt.
-        mux_cmd += ["-c:a", "aac", "-b:a", "320k", "-af", "apad",
+        af = "apad"
+        if fade_seconds > 0:
+            # Erst auffuellen, dann ausblenden — in dieser Reihenfolge blendet
+            # auch eine kuerzere Tonspur sauber aus, statt vorher zu enden und
+            # die Blende ins Leere laufen zu lassen.
+            af += (f",afade=t=out:st={max(0.0, timeline_seconds - fade_seconds):.6f}"
+                   f":d={fade_seconds:.6f}")
+        mux_cmd += ["-c:a", "aac", "-b:a", "320k", "-af", af,
                     "-map", "0:v:0", "-map", "1:a:0"]
     else:
         mux_cmd += ["-map", "0:v:0"]
@@ -446,9 +485,15 @@ def render(project: Project, edit: EditList, plan: Plan, *, caps: Capabilities,
     start_f, end_f = selected[0].start_f, selected[-1].end_f
     timeline_seconds = to_time(end_f - start_f, plan.fps)
     audio = project.abs(edit.audio_file) if edit.audio_file else None
+    # Der Ton blendet genau so lang aus wie das Bild — und nur, wenn das Ende
+    # des Films ueberhaupt im gerenderten Bereich liegt (`--range`).
+    letzte = selected[-1]
+    fade_s = (to_time(fade_frames(plan, edit, letzte.frames), plan.fps)
+              if letzte.end_f == plan.total_frames else 0.0)
     concat_and_mux(project, jobs, audio=audio, out=out, profile=profile,
                    timeline_seconds=timeline_seconds,
-                   audio_start=to_time(start_f, plan.fps), dry=dry)
+                   audio_start=to_time(start_f, plan.fps),
+                   fade_seconds=fade_s, dry=dry)
 
     stats.timeline_seconds = timeline_seconds
     stats.music_seconds = to_time(plan.total_frames, plan.fps)

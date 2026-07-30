@@ -324,6 +324,10 @@ class Defaults(BaseModel):
     clip_snap_tol: float = 1.0
     #: Lange Stille (> hold_seconds) bekommt ein ruhiges Einzelbild.
     hold_seconds: float = 12.0
+    #: Ausblende am Filmende, in Sekunden — Bild nach Schwarz und Ton nach
+    #: Stille, gleichzeitig. 0 schaltet sie ab. Wird die Tonspur gekuerzt,
+    #: bricht die Musik sonst mitten im Stueck ab.
+    fade_out: float = 1.5
     kb: KBDefaults = Field(default_factory=KBDefaults)
     xfade: XfadeDefaults = Field(default_factory=XfadeDefaults)
 

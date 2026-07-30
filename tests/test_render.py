@@ -206,6 +206,62 @@ def _moov_vor_mdat(path: Path) -> bool:
     return False
 
 
+# --------------------------------------------------------------------------
+# Ausblende am Filmende
+#
+# Sie sitzt im letzten Segment, nicht im Mux — der haengt die Segmente mit
+# `-c:v copy` aneinander, ein Filter dort wuerde den ganzen Master neu
+# encodieren.
+# --------------------------------------------------------------------------
+
+def test_ausblende_trifft_nur_das_letzte_segment(built):
+    from slideshow.render import _fade_suffix
+    edit, plan = built["edit"], built["plan"]
+    edit.defaults.fade_out = 1.5
+    segments = resolve(plan)
+
+    filter_je_segment = [_fade_suffix(plan, edit, s)[0] for s in segments]
+
+    assert filter_je_segment[-1], "das letzte Segment blendet aus"
+    assert not any(filter_je_segment[:-1]), "alle anderen bleiben unberuehrt"
+    assert "fade=t=out" in filter_je_segment[-1]
+
+
+def test_ausblende_wird_auf_das_letzte_segment_begrenzt(built):
+    """Lieber eine kuerzere Blende als eine ueber die Segmentgrenze hinweg."""
+    from slideshow.render import fade_frames
+    edit, plan = built["edit"], built["plan"]
+    edit.defaults.fade_out = 999.0
+
+    assert fade_frames(plan, edit, segment_frames=30) == 30
+
+
+def test_ausblende_laesst_sich_abschalten(built):
+    from slideshow.render import _fade_suffix, fade_frames
+    edit, plan = built["edit"], built["plan"]
+    edit.defaults.fade_out = 0.0
+    segments = resolve(plan)
+
+    assert fade_frames(plan, edit, segment_frames=600) == 0
+    assert _fade_suffix(plan, edit, segments[-1])[0] == ""
+
+
+def test_ausblende_geht_in_den_cache_key_ein(built, caps):
+    """Sonst liefert ein zweiter Lauf das alte, ungeblendete Segment aus."""
+    project, edit, plan = built["project"], built["edit"], built["plan"]
+    letztes = resolve(plan)[-1:]
+    index = HashIndex(project.cache / "hashindex.json")
+
+    edit.defaults.fade_out = 0.0
+    ohne = plan_jobs(project, plan, edit, letztes, profile=_profile(edit), caps=caps,
+                     manifest=built["manifest"], index=index)[0].key
+    edit.defaults.fade_out = 1.5
+    mit = plan_jobs(project, plan, edit, letztes, profile=_profile(edit), caps=caps,
+                    manifest=built["manifest"], index=index)[0].key
+
+    assert ohne != mit
+
+
 @pytest.mark.slow
 def test_uneinheitliche_segmente_brechen_vor_dem_concat_ab(built, caps, tmp_path):
     """8.4: lieber praezise abbrechen als einen kaputten Master produzieren."""

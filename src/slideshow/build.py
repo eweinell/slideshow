@@ -28,7 +28,8 @@ from .models import (BeatMap, ClipSegment, Defaults, EditList, KBSpec, Manifest,
                      Region, StillSegment, XfadeSegment)
 from .paths import Project
 from .planner import (Coverage, Intent, Plan, RenderSegment, apply_transitions,
-                      coverage, plan_slots, resolve, to_frame, to_time,
+                      coverage, fit_regions_to, material_seconds, plan_slots,
+                      resolve, standard_slot, to_frame, to_time,
                       validate_continuity, visible_span)
 from .probe import chronological
 
@@ -49,11 +50,6 @@ def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
     regions = beatmap.regions
     if not regions:
         raise SlideshowError("Regionenkarte ist leer — `slideshow beats` zuerst laufen lassen.")
-
-    duration = float(beatmap.audio.get("duration") or manifest.audio.duration or 0.0)
-    if duration <= 0:
-        duration = regions[-1].end
-    total_frames = to_frame(duration, fps)
 
     media = chronological(manifest)
     if order:
@@ -78,20 +74,64 @@ def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
         raise SlideshowError("Keine vorverarbeiteten Medien gefunden. "
                              "`slideshow preprocess` zuerst laufen lassen.")
 
+    # Ob eine Tonspur da ist, entscheidet die *Datei*, nicht die Dauer: die
+    # Karte fuer ein Projekt ohne Ton traegt zwar eine Laenge, aber keinen Pfad.
+    audio_file = manifest.audio.file or beatmap.audio.get("file", "")
+    audio_seconds = float(beatmap.audio.get("duration") or manifest.audio.duration or 0.0) \
+        if audio_file else 0.0
+    duration, hinweis = _timeline_length(regions, len(intents), defaults,
+                                         audio_seconds=audio_seconds)
+    regions = fit_regions_to(regions, duration)
+    total_frames = to_frame(duration, fps)
+
     plan = plan_slots(regions, intents, defaults, fps=fps, total_frames=total_frames)
     explicit = None if defaults.xfade.auto else {}
     apply_transitions(plan, defaults, explicit=explicit)
     clamp_transitions_for_handles(plan, manifest)
+    if hinweis:
+        plan.warnings.insert(0, hinweis)
     cov = coverage(plan, defaults)
+    cov.audio_seconds = audio_seconds
 
     edit = EditList(
         version=EDIT_VERSION, fps=fps, size=tuple(size),
-        audio={"file": manifest.audio.file or beatmap.audio.get("file", ""),
+        audio={"file": audio_file,
                "duration": round(duration, 6),
                "regions": [_region_dict(r) for r in regions]},
         defaults=defaults,
         segments=_segments_from_plan(plan, defaults))
     return (edit, plan, cov)
+
+
+def _timeline_length(regions: list[Region], n_media: int, defaults: Defaults, *,
+                     audio_seconds: float) -> tuple[float, str]:
+    """Laenge der Timeline bestimmen — und melden, wenn die Tonspur nachgibt.
+
+    Die Musik gibt die Laufzeit vor, solange das Material sie bis auf eine
+    Bildlaenge genau fuellt; dann faengt die uebliche Streckung des letzten
+    Bildes den Rest ab, und der Film endet mit der Musik.
+
+    Passt es *nicht*, gewinnt das Material. Sonst bleibt bei 14 Fotos unter
+    einem 6:32-Stueck das letzte Bild ueber fuenf Minuten stehen, nur damit der
+    Ton aufgeht — oder es fallen Bilder hinten herunter. Beides ist schlechter
+    als eine gekuerzte bzw. stumm auslaufende Tonspur, und beides bricht nicht
+    ab, sondern meldet sich.
+    """
+    if audio_seconds <= 0:
+        laenge = material_seconds(regions, n_media, defaults) or regions[-1].end
+        return (laenge, f"keine Tonspur — die Laufzeit ergibt sich aus dem Material "
+                        f"({n_media} Medien, {laenge:.1f} s)")
+
+    material = material_seconds(regions, n_media, defaults)
+    if abs(material - audio_seconds) <= standard_slot(regions, defaults):
+        return (audio_seconds, "")
+
+    if material < audio_seconds:
+        return (material, f"Material ({material:.1f} s) ist kuerzer als die Tonspur "
+                          f"({audio_seconds:.1f} s) — der Ton wird auf die Filmlaenge "
+                          f"abgeschnitten")
+    return (material, f"Material ({material:.1f} s) ist laenger als die Tonspur "
+                      f"({audio_seconds:.1f} s) — die restlichen Bilder laufen ohne Ton")
 
 
 def _region_dict(r: Region) -> dict:

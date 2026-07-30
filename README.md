@@ -13,6 +13,23 @@ slideshow build                               # → edit.yaml
 slideshow render edit.yaml -o out/master.mp4
 ```
 
+Diese Reihenfolge muss man sich nicht merken: jeder Schritt schließt mit dem
+nächsten sinnvollen Aufruf ab, fertig zum Kopieren und mit passenden
+Parametern.
+
+```
+Nächster Schritt:
+  slideshow build --still-seconds 28
+```
+
+Der Vorschlag kommt aus dem *Zustand* des Projekts, nicht aus dem zuletzt
+gelaufenen Kommando — wer eine Phase wiederholt oder überspringt, bekommt
+trotzdem den richtigen. `-q` schaltet ihn ab.
+
+Der `audio`-Schritt ist optional — ohne Tonspur entsteht eine stumme
+Slideshow mit fester Bilddauer, siehe [Ohne Musik, mit zu wenig oder zu
+viel](#ohne-musik-mit-zu-wenig-oder-zu-viel).
+
 ## Grundprinzipien
 
 1. **Die Edit-List ist die Single Source of Truth.** `edit.yaml` ist
@@ -31,6 +48,46 @@ slideshow render edit.yaml -o out/master.mp4
    Nie werden Einzeldauern aufaddiert — sonst läuft der Sync gegen Ende weg.
 4. **Fail loud, fail early.** Jede Phase validiert gegen ein Schema und bricht
    mit YAML-Pfad und Zeile ab, statt später einen kaputten Master zu bauen.
+
+## Ohne Musik, mit zu wenig oder zu viel
+
+Material und Musik passen selten von allein zusammen. Keiner dieser Fälle
+bricht ab — jeder meldet sich und läuft durch:
+
+| Fall | Verhalten |
+|---|---|
+| **keine Tonspur** | `beats` erzeugt eine Karte aus *Anzahl Medien × `still_seconds`*, der Master bekommt gar keine Tonspur |
+| **Ton kürzer als das Material** | die restlichen Bilder laufen im festen Takt weiter, der Ton wird stumm verlängert |
+| **Ton länger als das Material** | der Ton wird auf die Filmlänge abgeschnitten |
+
+Die Laufzeit bestimmt normalerweise die **Musik**: solange das Material sie bis
+auf eine Bildlänge genau füllt, fängt die Streckung des letzten Bildes den Rest
+ab, und der Film endet mit dem Stück. Passt es nicht, gewinnt das **Material**.
+Sonst stünde bei 14 Fotos unter einem 6:32-Stück das letzte Bild über fünf
+Minuten still, nur damit der Ton aufgeht.
+
+Der Takt ohne Beat-Raster ist `still_seconds` (Vorgabe 4 s) und gilt für
+`beats` wie `build`:
+
+```bash
+slideshow build --still-seconds 28    # 14 Fotos füllen ein 6:32-Stück
+```
+
+Passt das Material nicht zur Musik, nennt `build` die nötige Standzeit selbst —
+der Vorschlag ist so gerechnet, dass er die Lücke wirklich schließt.
+
+### Ausblende am Ende
+
+Bild und Ton blenden gemeinsam aus, 1,5 s per Vorgabe, abschaltbar mit
+`--fade-out 0`. Bei gekürzter Tonspur bricht die Musik sonst mitten im Stück
+ab.
+
+Die Blende sitzt bewusst **im letzten Segment** und nicht im Mux: der Mux hängt
+die Segmente mit `-c:v copy` aneinander, ein Filter dort würde den ganzen
+Master neu encodieren und die verlustfreie Concat-Kette aufgeben. Ein zweiter
+Lauf rendert deshalb genau *ein* Segment neu. Der Preis: die Blende kann nicht
+länger sein als das letzte Segment — ist es kürzer, wird sie gekürzt statt über
+die Segmentgrenze hinweg gestückelt.
 
 ## Ausführungsmodell
 
@@ -136,6 +193,27 @@ Framezähler als `n`, nicht als `on` (ein falscher Name wirft keinen Fehler, die
 Bewegung steht einfach still), und die Crop-Position darf nicht über `iw`/`ih`
 formuliert werden, weil `crop` die Eingangsmaße an die Filterkonfiguration
 bindet.
+
+## Bekannte Einschränkung: Beat-Erkennung bei langen Stücken
+
+Bei **einem durchgehenden Song** findet die Analyse derzeit kein Raster und
+stuft die ganze Tonspur als `free` ein — die Bildwechsel laufen dann im
+Standardtakt, aber kein Schnitt liegt auf einem Beat.
+
+Der Grund ist nicht das Material, sondern die Fensterlänge: Regionen werden nur
+an Stille getrennt, ein Song hat keine, also muss ein *starres* Raster über die
+volle Länge passen. Reale Aufnahmen driften, und die Konfidenz fällt mit der
+Fensterlänge — an einem 6:32-Stück von 0,818 (10-s-Fenster) auf 0,130 (voller
+Track), bei einer Schwelle von 0,55. Messwerte, Diagnose und der Umbauvorschlag
+stehen in [`docs/briefing-beat-detection.md`](docs/briefing-beat-detection.md).
+
+Mehrere Tracks mit Pause dazwischen (`slideshow audio a.mp3 b.mp3 --gap 6`)
+sind nicht betroffen — dort trennt die Stille die Regionen ohnehin. Wer das
+Tempo kennt, setzt es direkt:
+
+```bash
+slideshow beats --bpm 152 --offset 0.35
+```
 
 ## Übergangs-Mechanik
 

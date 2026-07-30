@@ -534,6 +534,10 @@ class Coverage:
     unused: list[str]
     stretched_seconds: float
     per_region: list[dict]
+    #: Laenge der *Tonspur*. Weicht von ``music_seconds`` (der Laenge der
+    #: Timeline) ab, sobald das Material die Laenge bestimmt: dann wird die
+    #: Tonspur beim Muxen gekuerzt oder mit Stille aufgefuellt.
+    audio_seconds: float = 0.0
 
     @property
     def underrun(self) -> bool:
@@ -566,6 +570,82 @@ def coverage(plan: Plan, defaults: Defaults) -> Coverage:
         unused=plan.unused,
         stretched_seconds=to_time(plan.stretched, plan.fps),
         per_region=per_region)
+
+
+def material_seconds(regions: list[Region], n_media: int, defaults: Defaults) -> float:
+    """Wie lang das Material bei Standardtaktung von sich aus laeuft.
+
+    Gegenstueck zur Tonspurlaenge: erst der Vergleich beider Zahlen sagt, ob
+    Musik und Material ueberhaupt zueinander passen. Gerechnet wird mit
+    denselben Slotlaengen, die der Planer spaeter vergibt — in einer
+    beat-Region ``beats_per_still`` Beats, in einer free-Region der
+    Standardtakt.
+    """
+    rest = n_media
+    total = 0.0
+    for r in regions:
+        if rest <= 0:
+            break
+        cap = _region_capacity(r, defaults)
+        if cap <= 0:
+            continue
+        nehmen = min(rest, cap)
+        total += nehmen * (r.duration / cap)
+        rest -= nehmen
+    if rest > 0:
+        # Material ueber die Karte hinaus: dort gibt es kein Raster mehr, also
+        # gilt der Standardtakt.
+        total += rest * defaults.still_seconds
+    return total
+
+
+def standard_slot(regions: list[Region], defaults: Defaults) -> float:
+    """Laenge *eines* Standardbildes — das Mass fuer die Toleranz."""
+    for r in regions:
+        if r.type == "beat" and r.bpm:
+            return (r.beats_per_still or defaults.beats_per_still) * r.beat_duration()
+        return float(r.still_seconds or defaults.still_seconds)
+    return float(defaults.still_seconds)
+
+
+def fit_regions_to(regions: list[Region], duration: float, *,
+                   eps: float = 0.02) -> list[Region]:
+    """Die Regionenkarte auf eine neue Gesamtlaenge zuschneiden oder verlaengern.
+
+    Die Karte beschreibt die *Tonspur*. Bestimmt ausnahmsweise das Material die
+    Laenge, muss sie mitwandern — sonst deckt sie die Timeline nicht mehr
+    lueckenlos ab, und der Planer bekommt Slots ohne Region.
+    """
+    out: list[Region] = []
+    for r in regions:
+        if r.start >= duration - eps:
+            break
+        r2 = r.model_copy(deep=True)
+        if r2.end > duration:
+            r2.end = duration
+        if r2.duration <= eps:
+            continue
+        out.append(r2)
+
+    if not out:
+        return [Region(type="free", start=0.0, end=duration,
+                       reason="Materiallaenge")]
+
+    letzte = out[-1]
+    if letzte.end < duration - eps:
+        # Der Schwanz bekommt *immer* eine eigene Region, statt die letzte zu
+        # verlaengern. Zwei Gruende: ein Beat-Raster liesse sich dort nicht
+        # fortschreiben, wo nichts mehr zu treffen ist — und eine als `quiet`
+        # markierte Region wuerde ihre hold-Eigenschaft mitnehmen und den
+        # ganzen Schwanz auf ein einziges Standbild zusammenziehen. Hinter dem
+        # Tonende ist aber keine Stille, sondern gar kein Ton; dort laeuft die
+        # Bildfolge im Standardtakt weiter.
+        out.append(Region(type="free", start=letzte.end, end=duration,
+                          quiet=False,
+                          reason="Material laeuft ueber die Tonspur hinaus"))
+    else:
+        letzte.end = duration
+    return out
 
 
 def _region_capacity(r: Region, defaults: Defaults) -> int:

@@ -92,6 +92,8 @@ def build_parser() -> argparse.ArgumentParser:
     bu.add_argument("--still-seconds", type=float, default=None)
     bu.add_argument("--portrait", choices=("blur", "black", "crop"), default=None)
     bu.add_argument("--kb-engine", choices=("zoompan", "scale16"), default=None)
+    bu.add_argument("--fade-out", type=float, default=None, metavar="S",
+                    help="Ausblende am Filmende in Sekunden (0 = keine)")
     bu.add_argument("--xfade-beats", type=float, default=None)
     bu.add_argument("--no-xfade", action="store_true",
                     help="keine automatischen Uebergaenge erzeugen")
@@ -354,17 +356,17 @@ def cmd_beats(args, project: Project) -> int:
     preflight(project, "beats")
 
     audio = Path(args.audio) if args.audio else (project.cache / "mix.flac")
-    if not audio.exists():
-        raise SlideshowError(f"Tonspur fehlt: {audio}. `slideshow audio` zuerst laufen "
-                             f"lassen oder den Pfad angeben.")
+    ohne_ton = not audio.exists()
 
     bounds: list[tuple[float, float]] = []
-    if project.manifest.exists():
+    if project.manifest.exists() and not ohne_ton:
         manifest = Manifest.load(project.manifest)
         _merge_audio_info(project, manifest)
         bounds = [(t.start, t.end) for t in manifest.audio.tracks]
 
-    if args.bpm:
+    if ohne_ton:
+        bm = _beatmap_ohne_tonspur(project, still_seconds=args.still_seconds)
+    elif args.bpm:
         dur = audio_duration(audio)
         bm = BeatMap(audio={"file": project.rel(audio), "duration": round(dur, 6)},
                      regions=[Region(type="beat", start=0.0, end=round(dur, 6),
@@ -390,6 +392,33 @@ def cmd_beats(args, project: Project) -> int:
         "# dauert dreissig Sekunden.\n" + text, encoding="utf-8")
     _print_beatmap(bm, out)
     return 0
+
+
+def _beatmap_ohne_tonspur(project: Project, *, still_seconds: float):
+    """Regionenkarte fuer ein Projekt ganz ohne Tonspur.
+
+    Ohne Musik gibt es nichts zu rastern. Die Karte besteht deshalb aus einer
+    einzigen free-Region, deren Laenge sich aus der Zahl der Medien und dem
+    Standardtakt ergibt — der uebliche Weg `beats` -> `build` -> `render` laeuft
+    damit auch hier durch, statt in einer Sackgasse zu enden.
+    """
+    from .models import BeatMap, Manifest, Region
+    if not project.manifest.exists():
+        raise SlideshowError(
+            f"Weder Tonspur noch Manifest gefunden ({project.manifest}). "
+            f"`slideshow probe <material>` zuerst laufen lassen — und fuer eine "
+            f"vertonte Slideshow zusaetzlich `slideshow audio <track>`.")
+    manifest = Manifest.load(project.manifest)
+    n = len(manifest.media)
+    if n == 0:
+        raise SlideshowError("Das Manifest enthaelt keine Medien — `slideshow probe` "
+                             "zuerst laufen lassen.")
+    dauer = round(n * still_seconds, 6)
+    log.info("Keine Tonspur — Karte aus %d Medien x %.1f s = %.1f s",
+             n, still_seconds, dauer)
+    return BeatMap(audio={"file": "", "duration": dauer},
+                   regions=[Region(type="free", start=0.0, end=dauer,
+                                   reason="ohne Tonspur")])
 
 
 def _region_yaml(r) -> dict:
@@ -444,6 +473,8 @@ def cmd_build(args, project: Project) -> int:
         defaults.portrait = args.portrait
     if args.kb_engine:
         defaults.kb.engine = args.kb_engine
+    if args.fade_out is not None:
+        defaults.fade_out = args.fade_out
     if args.xfade_beats is not None:
         defaults.xfade.beats = args.xfade_beats
     defaults.xfade.auto = not args.no_xfade
@@ -457,8 +488,11 @@ def cmd_build(args, project: Project) -> int:
     if tips and not args.force:
         for line in tips:
             console().print(f"  [yellow]{line}[/]")
-    if (cov.underrun or cov.overrun) and not args.force:
-        console().print("[yellow]Mit --force trotzdem schreiben.[/yellow]")
+        # Kein Abbruch: die Edit-List wird in jedem Fall geschrieben. Frueher
+        # stand hier "Mit --force trotzdem schreiben", was eine Aktion
+        # verlangte, die es nie gab — --force unterdrueckt nur diese Hinweise.
+        console().print("[dim]Hinweis, kein Fehler — die Edit-List wird geschrieben "
+                        "(`--force` blendet das aus).[/dim]")
 
     out = Path(args.output) if args.output else project.edit
     if args.dry_run:
@@ -488,7 +522,15 @@ def _print_coverage(cov, defaults, plan) -> None:
                   str(r["stills"]), str(r["clips"]))
     con = console()
     con.print(t)
-    con.print(f"Musik {cov.music_seconds:.2f} s | geplant {cov.planned_seconds:.2f} s | "
+    if cov.audio_seconds <= 0:
+        ton = "ohne Tonspur"
+    elif abs(cov.audio_seconds - cov.music_seconds) < 0.05:
+        ton = f"Musik {cov.audio_seconds:.2f} s"
+    else:
+        wie = "gekuerzt" if cov.audio_seconds > cov.music_seconds else "stumm verlaengert"
+        ton = f"Musik {cov.audio_seconds:.2f} s -> {wie}"
+    con.print(f"Laufzeit {cov.music_seconds:.2f} s | {ton} | "
+              f"geplant {cov.planned_seconds:.2f} s | "
               f"{cov.stills} Bilder, {cov.clips} Clips")
     for w in plan.warnings[:10]:
         con.print(f"  [yellow]WARN[/] {w}")
@@ -586,6 +628,137 @@ _COMMANDS = {
 
 
 # --------------------------------------------------------------------------
+# Wegweiser: was als naechstes sinnvoll ist
+#
+# Abgeleitet wird das aus dem *Zustand* des Projekts, nicht aus dem gerade
+# gelaufenen Kommando. Wer eine Phase wiederholt oder ueberspringt, bekommt
+# trotzdem den passenden Vorschlag, und nach einem `doctor` mitten im Projekt
+# steht nicht wieder `probe` da.
+# --------------------------------------------------------------------------
+
+def _praefix(args, project: Project) -> str:
+    """Der Aufruf so, wie ihn der Nutzer wiederholen kann — inklusive
+    ``--project``, sonst zeigt der Vorschlag auf das falsche Verzeichnis.
+
+    Zeigt es ohnehin aufs aktuelle Verzeichnis, bleibt es weg: der Vorschlag
+    soll kurz genug sein, dass man ihn ohne Zeilenumbruch liest.
+    """
+    if not args.project:
+        return "slideshow"
+    try:
+        if project.root == Path.cwd().resolve():
+            return "slideshow"
+    except OSError:
+        pass
+    p = str(args.project)
+    return f'slideshow --project "{p}"' if " " in p else f"slideshow --project {p}"
+
+
+def _zitiere(pfad: Path) -> str:
+    name = pfad.name
+    return f'"{name}"' if " " in name else name
+
+
+def _tonspur_kandidaten(project: Project, manifest) -> list[Path]:
+    """Audiodateien, die neben dem Material liegen."""
+    from .probe import AUDIO_EXT
+    for m in manifest.media:
+        p = project.abs(m.path)
+        if not p.exists():
+            continue
+        return sorted(q for q in p.parent.iterdir()
+                      if q.is_file() and q.suffix.lower() in AUDIO_EXT)
+    return []
+
+
+def _naechster_schritt(project: Project, args) -> list[str]:
+    """Erste Phase, deren Voraussetzung noch fehlt — als fertige Kommandozeile."""
+    from .models import Manifest
+    ruf = _praefix(args, project)
+
+    if not project.manifest.exists():
+        return [f"{ruf} probe <material-verzeichnis>"]
+
+    try:
+        manifest = Manifest.load(project.manifest)
+    except Exception:                              # noqa: BLE001 - der Wegweiser
+        return []                                  # darf nie das Kommando kippen
+
+    if manifest.media and not any(m.cache_path for m in manifest.media):
+        return [f"{ruf} preprocess"]
+
+    beats = project.root / "beats.yaml"
+    if not beats.exists():
+        mix = project.cache / "mix.flac"
+        if not manifest.audio.file and not mix.exists():
+            kandidaten = _tonspur_kandidaten(project, manifest)
+            if kandidaten:
+                dateien = " ".join(_zitiere(k) for k in kandidaten[:3])
+                return [f"{ruf} audio {dateien}",
+                        f"[dim]oder ohne Musik weiter mit: {ruf} beats[/dim]"]
+        return [f"{ruf} beats"]
+
+    if not project.edit.exists():
+        return [f"{ruf} build{_build_parameter(project, manifest, beats)}"]
+
+    if not (project.out / "master.mp4").exists():
+        return [f"{ruf} render"]
+
+    return [f"[dim]Fertig. Feinschliff von Hand: {ruf} export-mlt[/dim]"]
+
+
+def _build_parameter(project: Project, manifest, beats: Path) -> str:
+    """``--still-seconds`` vorschlagen, wenn der Standardtakt nicht aufgeht.
+
+    Nur fuer Karten ganz ohne Beat-Raster: dort taktet ``still_seconds``. Wo
+    ein Raster liegt, ist ``beats_per_still`` der Hebel, und den kennt der
+    Nutzer erst nach der Deckungspruefung in `build`.
+    """
+    import yaml
+    from .models import Defaults
+    try:
+        roh = yaml.safe_load(beats.read_text(encoding="utf-8")) or {}
+        regionen = roh.get("regions") or []
+        if not regionen or any(r.get("type") == "beat" for r in regionen):
+            return ""
+        dauer = float(roh.get("audio", {}).get("duration") or 0.0)
+    except Exception:                              # noqa: BLE001
+        return ""
+
+    n = sum(1 for m in manifest.media if m.cache_path)
+    if n < 1 or dauer <= 0:
+        return ""
+    passend = dauer / n
+    if abs(passend - Defaults().still_seconds) <= Defaults().still_seconds:
+        return ""
+    # Nur vorschlagen, was auch ein Mensch vorschlagen wuerde. Drei Fotos unter
+    # einem 6:32-Stueck ergaeben rechnerisch 131 s je Bild — richtig gerechnet
+    # und trotzdem Unsinn. In solchen Faellen bleibt der Vorschlag beim nackten
+    # `build`; dessen Deckungspruefung nennt dann alle drei Auswege.
+    if not 2.0 <= passend <= 30.0:
+        return ""
+    return f" --still-seconds {passend:.0f}"
+
+
+def _zeige_naechsten_schritt(project: Project, args) -> None:
+    if args.quiet or args.dry_run:
+        return
+    try:
+        zeilen = _naechster_schritt(project, args)
+    except Exception:                              # noqa: BLE001
+        return
+    if not zeilen:
+        return
+    con = console()
+    con.print("\n[bold]Nächster Schritt:[/bold]")
+    for z in zeilen:
+        # soft_wrap: ein Vorschlag, den die Konsole hart umbricht, laesst sich
+        # nicht mehr als eine Zeile kopieren — genau dafuer steht er da.
+        con.print(f"  {z}" if z.startswith("[dim]") else f"  [cyan]{z}[/cyan]",
+                  soft_wrap=True)
+
+
+# --------------------------------------------------------------------------
 # Einstieg
 # --------------------------------------------------------------------------
 
@@ -603,7 +776,10 @@ def main(argv: list[str] | None = None) -> int:
     log.debug("slideshow %s | %s", __version__, " ".join(sys.argv[1:]))
 
     try:
-        return _COMMANDS[args.command](args, project)
+        rc = _COMMANDS[args.command](args, project)
+        if rc == 0:
+            _zeige_naechsten_schritt(project, args)
+        return rc
     except SlideshowError as exc:
         console().print(f"\n[red]Fehler:[/red] {exc}")
         console().print(f"[dim]Log: {logfile}[/dim]")

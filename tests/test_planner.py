@@ -348,6 +348,101 @@ def test_stille_die_in_musik_uebergeht_zaehlt_als_musik():
 
 
 # --------------------------------------------------------------------------
+# Tonspur-Rückfälle
+#
+# Drei Fälle müssen ohne Abbruch durchlaufen: gar keine Tonspur, eine zu
+# kurze und eine zu lange. Die Musik gibt die Laufzeit vor, solange das
+# Material sie bis auf eine Bildlänge füllt — darüber hinaus gewinnt das
+# Material, und der Ton wird gekürzt bzw. stumm verlängert.
+# --------------------------------------------------------------------------
+
+def _tl(regions, n, defaults=None, *, audio):
+    from slideshow.build import _timeline_length
+    return _timeline_length(regions, n, defaults or Defaults(), audio_seconds=audio)
+
+
+def test_material_laenge_folgt_dem_standardtakt():
+    from slideshow.planner import material_seconds
+    regions = [Region(type="free", start=0.0, end=40.0, reason="x")]
+
+    # 10 Slots à 4 s in der Region, 3 davon belegt.
+    assert material_seconds(regions, 3, Defaults()) == pytest.approx(12.0)
+    # Mehr Medien als die Karte fasst: der Rest läuft im Standardtakt weiter.
+    assert material_seconds(regions, 12, Defaults()) == pytest.approx(48.0)
+
+
+def test_ohne_tonspur_bestimmt_das_material_die_laufzeit():
+    regions = [Region(type="free", start=0.0, end=12.0, reason="ohne Tonspur")]
+    dauer, hinweis = _tl(regions, 3, audio=0.0)
+
+    assert dauer == pytest.approx(12.0)
+    assert "keine Tonspur" in hinweis
+
+
+def test_kleine_abweichung_laesst_die_musik_gewinnen():
+    """Bis zu einer Bildlänge fängt die übliche Streckung den Rest ab."""
+    regions = [Region(type="free", start=0.0, end=40.0, reason="x")]
+    dauer, hinweis = _tl(regions, 10, audio=41.5)
+
+    assert dauer == pytest.approx(41.5), "der Film soll mit der Musik enden"
+    assert hinweis == ""
+
+
+def test_zu_lange_tonspur_wird_abgeschnitten():
+    regions = [Region(type="free", start=0.0, end=392.68, reason="x")]
+    dauer, hinweis = _tl(regions, 14, audio=392.68)
+
+    assert dauer == pytest.approx(56.0, abs=1.0), \
+        "14 Bilder à 4 s — nicht 392 s mit einem Standbild am Ende"
+    assert "abgeschnitten" in hinweis
+
+
+def test_zu_kurze_tonspur_laesst_die_bilder_weiterlaufen():
+    regions = [Region(type="free", start=0.0, end=5.0, reason="x")]
+    dauer, hinweis = _tl(regions, 3, audio=5.0)
+
+    assert dauer > 5.0
+    assert "ohne Ton" in hinweis
+
+
+def test_karte_wird_auf_die_neue_laenge_zugeschnitten():
+    from slideshow.planner import fit_regions_to
+    regions = [Region(type="beat", start=0.0, end=30.0, bpm=120.0, offset=0.0),
+               Region(type="free", start=30.0, end=60.0, reason="x")]
+
+    gekuerzt = fit_regions_to(regions, 20.0)
+    assert len(gekuerzt) == 1
+    assert gekuerzt[-1].end == pytest.approx(20.0)
+
+    verlaengert = fit_regions_to(regions, 80.0)
+    assert verlaengert[-1].end == pytest.approx(80.0)
+    assert verlaengert[0].bpm == 120.0, "das Raster davor bleibt unangetastet"
+
+
+def test_schwanz_hinter_dem_tonende_erbt_die_stille_nicht():
+    """Regression: sonst kollabiert der stumme Teil auf ein einziges Bild.
+
+    Beginnt die Tonspur leise, stuft ``beats`` die Region als ``stille`` ein.
+    Wird *diese* Region über das Tonende hinaus verlängert, nimmt sie ihre
+    hold-Eigenschaft mit — und ``hold`` heißt: ein Standbild für alles.
+    Hinter dem Tonende ist aber keine Stille, sondern gar kein Ton.
+    """
+    from slideshow.planner import fit_regions_to
+    still = [Region(type="free", start=0.0, end=5.017, reason="stille", quiet=True)]
+
+    angepasst = fit_regions_to(still, 13.017)
+
+    assert len(angepasst) == 2, "der Schwanz bekommt eine eigene Region"
+    assert angepasst[0].quiet, "die echte Stille bleibt still"
+    assert not angepasst[1].quiet, "der tonlose Teil ist keine Stille"
+
+    plan = plan_slots(angepasst, _stills(3), Defaults(), fps=FPS,
+                      total_frames=int(round(13.017 * FPS)))
+    assert coverage(plan, Defaults()).stills == 3, \
+        "alle drei Bilder müssen laufen, nicht eines über die volle Länge"
+
+
+# --------------------------------------------------------------------------
 # Richtung der Deckungs-Ratschlaege
 # --------------------------------------------------------------------------
 

@@ -153,3 +153,120 @@ def test_range_parser():
     assert parse_range(":3", 10) == (0, 3)
     with pytest.raises(SlideshowError):
         parse_range("5:5", 10)
+
+
+# --------------------------------------------------------------------------
+# Wegweiser
+#
+# Der Vorschlag kommt aus dem Zustand des Projekts, nicht aus dem zuletzt
+# gelaufenen Kommando — sonst führt er in die Irre, sobald jemand eine Phase
+# wiederholt oder überspringt.
+# --------------------------------------------------------------------------
+
+class _Args:
+    def __init__(self, project=None):
+        self.project = project
+        self.quiet = False
+        self.dry_run = False
+
+
+def _vorschlag(project, project_arg="/anderswo"):
+    from slideshow.cli import _naechster_schritt
+    return " ".join(_naechster_schritt(project, _Args(project_arg)))
+
+
+@pytest.fixture
+def leer(tmp_path):
+    from slideshow.paths import Project
+    p = Project.open(tmp_path / "proj", create=True)
+    p.ensure_dirs()
+    return p
+
+
+def _schreibe_manifest(project, *, cache_path="", medien=2, audio_file=""):
+    from slideshow.models import AudioInfo, ImageInfo, Manifest, MediaItem
+    m = Manifest(
+        media=[MediaItem(id=f"img_{i}", path=f"src/DSC{i}.jpg", kind="image",
+                         cache_path=(f"cache/img_{i}.jpg" if cache_path else ""),
+                         image=ImageInfo(width=6000, height=4000))
+               for i in range(medien)],
+        audio=AudioInfo(file=audio_file))
+    m.save(project.manifest)
+    return m
+
+
+def test_ohne_manifest_wird_probe_vorgeschlagen(leer):
+    assert "probe" in _vorschlag(leer)
+
+
+def test_ohne_zwischenprodukte_wird_preprocess_vorgeschlagen(leer):
+    _schreibe_manifest(leer)
+    assert _vorschlag(leer).endswith("preprocess")
+
+
+def test_tonspur_im_materialordner_wird_erkannt(leer):
+    """Der Vorschlag nennt die gefundene Datei, statt nur `audio` zu sagen."""
+    _schreibe_manifest(leer, cache_path="ja")
+    (leer.root / "src").mkdir(exist_ok=True)
+    for name in ("DSC0.jpg", "Mein Lied.mp3"):
+        (leer.root / "src" / name).write_bytes(b"x")
+
+    vorschlag = _vorschlag(leer)
+    assert 'audio "Mein Lied.mp3"' in vorschlag, "Leerzeichen müssen gequotet sein"
+    assert "ohne Musik weiter" in vorschlag, "der stumme Weg gehört daneben"
+
+
+def test_ohne_tonspurkandidat_geht_es_direkt_zu_beats(leer):
+    _schreibe_manifest(leer, cache_path="ja")
+    (leer.root / "src").mkdir(exist_ok=True)
+    (leer.root / "src" / "DSC0.jpg").write_bytes(b"x")
+
+    assert _vorschlag(leer).endswith("beats")
+
+
+def _schreibe_beatmap(project, dauer):
+    (project.root / "beats.yaml").write_text(
+        f"version: 1\naudio: {{file: cache/mix.flac, duration: {dauer}}}\n"
+        f"regions:\n- {{type: free, start: 0.0, end: {dauer}, reason: x}}\n",
+        encoding="utf-8")
+
+
+def test_build_vorschlag_nennt_die_passende_standzeit(leer):
+    _schreibe_manifest(leer, cache_path="ja", medien=14, audio_file="cache/mix.flac")
+    _schreibe_beatmap(leer, 392.68)
+
+    assert "--still-seconds 28" in _vorschlag(leer)
+
+
+def test_unsinnige_standzeit_wird_nicht_vorgeschlagen(leer):
+    """392 s auf 3 Bilder wären 131 s je Bild — richtig gerechnet, trotzdem Unsinn."""
+    _schreibe_manifest(leer, cache_path="ja", medien=3, audio_file="cache/mix.flac")
+    _schreibe_beatmap(leer, 392.68)
+
+    vorschlag = _vorschlag(leer)
+    assert vorschlag.endswith("build"), "dann lieber nackt — build erklärt die Optionen"
+    assert "still-seconds" not in vorschlag
+
+
+def test_projekt_schalter_entfaellt_im_eigenen_verzeichnis(leer, monkeypatch):
+    """Sonst steht in der Zeile ein --project, das auf das Hier zeigt."""
+    _schreibe_manifest(leer)
+    monkeypatch.chdir(leer.root)
+
+    assert _vorschlag(leer, str(leer.root)) == "slideshow preprocess"
+
+
+def test_am_ende_wird_nichts_mehr_verlangt(leer):
+    _schreibe_manifest(leer, cache_path="ja", audio_file="cache/mix.flac")
+    _schreibe_beatmap(leer, 20.0)
+    (leer.root / "edit.yaml").write_text("x", encoding="utf-8")
+    (leer.out / "master.mp4").write_bytes(b"x")
+
+    assert "Fertig" in _vorschlag(leer)
+
+
+def test_kaputtes_manifest_kippt_den_wegweiser_nicht(leer):
+    """Der Hinweis ist Beiwerk — er darf nie das eigentliche Kommando stören."""
+    leer.manifest.write_text("{kein json", encoding="utf-8")
+
+    assert _vorschlag(leer) == ""

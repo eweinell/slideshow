@@ -30,6 +30,11 @@ log = logging.getLogger("slideshow.probe")
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".heic", ".heif", ".webp",
              ".dng", ".arw", ".cr2", ".cr3", ".nef", ".raf", ".orf", ".rw2"}
 VIDEO_EXT = {".mp4", ".mov", ".mts", ".m2ts", ".avi", ".mkv", ".m4v", ".3gp", ".webm"}
+#: Kein Quellmaterial im Sinne von `probe` — die Tonspur kommt ueber
+#: `slideshow audio`. Die Liste dient dazu, sie im Materialordner zu *erkennen*
+#: und den passenden naechsten Schritt vorzuschlagen.
+AUDIO_EXT = {".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".opus", ".wma",
+             ".aif", ".aiff"}
 
 #: Verdachtsschwelle fuer VFR aus dem Vergleich r_frame_rate / avg_frame_rate.
 _VFR_SUSPECT = Fraction(1, 100)
