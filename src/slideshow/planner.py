@@ -81,7 +81,8 @@ class RegionGrid:
             self.beat = 0.0
             still_seconds = float(region.still_seconds or defaults.still_seconds)
             n, self.hold = _free_count(region.duration, still_seconds,
-                                       defaults.still_tolerance, defaults.hold_seconds)
+                                       defaults.still_tolerance, defaults.hold_seconds,
+                                       quiet=region.quiet)
             # Driftfrei: Kanten in Frames rechnen, Dauern daraus differenzieren.
             self.edges = np.rint(
                 np.linspace(region.start, region.end, n + 1) * fps).astype(np.int64)
@@ -133,10 +134,19 @@ class RegionGrid:
 
 
 def _free_count(duration: float, still_seconds: float,
-                tolerance: tuple[float, float], hold_seconds: float) -> tuple[int, bool]:
-    """Anzahl Bilder, die eine free-Region **exakt** fuellen (6.3)."""
+                tolerance: tuple[float, float], hold_seconds: float,
+                *, quiet: bool = False) -> tuple[int, bool]:
+    """Anzahl Bilder, die eine free-Region **exakt** fuellen (6.3).
+
+    Das ``hold``-Flag gilt nur fuer *stille* Regionen. Eine free-Region
+    entsteht auch dann, wenn Musik laeuft, sich aber kein Raster fitten liess
+    — bei einem durchgehenden Song ueber mehrere Minuten ist das der
+    Normalfall, denn ein starres Raster driftet. Ohne die ``quiet``-Bedingung
+    bekaeme genau der einen einzigen Standbild-Slot fuer den ganzen Film.
+    Hier greift stattdessen ``still_seconds`` als Standardtakt.
+    """
     lo, hi = tolerance
-    if duration > hold_seconds:
+    if quiet and duration > hold_seconds:
         # Sehr lange Stille bekommt ein hold-Flag, damit dort bewusst ein
         # einzelnes ruhiges Bild stehen bleiben kann.
         return (1, True)
@@ -564,27 +574,62 @@ def _region_capacity(r: Region, defaults: Defaults) -> int:
         per_still = (r.beats_per_still or defaults.beats_per_still) * r.beat_duration()
         return max(1, int(round(r.duration / per_still)))
     n, _hold = _free_count(r.duration, r.still_seconds or defaults.still_seconds,
-                           defaults.still_tolerance, defaults.hold_seconds)
+                           defaults.still_tolerance, defaults.hold_seconds,
+                           quiet=r.quiet)
     return n
 
 
 def coverage_advice(cov: Coverage, defaults: Defaults) -> list[str]:
-    """Bei Unterdeckung drei Optionen vorschlagen, statt stumm abzuschneiden."""
+    """Bei Unter- oder Ueberdeckung Optionen vorschlagen, statt stumm
+    abzuschneiden.
+
+    Die Richtung des Vorschlags ist das Entscheidende: zu *wenig* Material
+    verlangt **laengere** Standzeiten, zu *viel* verlangt kuerzere. Und der
+    Hebel haengt von der Regionsart ab — in free-Regionen taktet
+    ``still_seconds``, ``beats_per_still`` bleibt dort ohne Wirkung.
+    """
     tips: list[str] = []
+    stellen = _stellschraube(cov, defaults)
+    benutzt = max(1, cov.stills + cov.clips)
+    # ``planned_seconds`` enthaelt den gestreckten Schwanz bereits — als Basis
+    # fuer einen Faktor taugt es deshalb nicht. Die *natuerliche* Laenge des
+    # Materials ist das, was ohne die Streckung stehen bliebe.
+    natuerlich = max(1e-6, cov.planned_seconds - cov.stretched_seconds)
+    ist_standzeit = natuerlich / benutzt
+
     if cov.underrun:
         needed = cov.stretched_seconds
-        bps = defaults.beats_per_still
-        suggest = max(1, int(bps * cov.planned_seconds /
-                             max(1e-6, cov.planned_seconds + needed)))
+        ziel = cov.music_seconds / benutzt
         tips.append(f"Das Material deckt {needed:.1f} s der Musik nicht ab. Optionen:")
-        tips.append(f"  1. beats_per_still von {bps} auf ~{suggest} reduzieren")
-        tips.append(f"  2. mehr Bilder aufnehmen (ca. {math.ceil(needed / defaults.still_seconds)} "
-                    f"zusaetzlich)")
+        tips.append(f"  1. {stellen(ziel / ist_standzeit)}")
+        tips.append(f"  2. mehr Bilder aufnehmen (ca. "
+                    f"{math.ceil(needed / max(1e-6, ist_standzeit))} zusaetzlich)")
         tips.append(f"  3. Musik um {needed:.1f} s kuerzen")
     if cov.overrun:
+        ziel = cov.music_seconds / (benutzt + len(cov.unused))
         tips.append(f"{len(cov.unused)} Medien passen nicht mehr in die Musik und "
                     f"bleiben ungenutzt. Optionen:")
-        tips.append(f"  1. beats_per_still von {defaults.beats_per_still} erhoehen")
+        tips.append(f"  1. {stellen(ziel / ist_standzeit)}")
         tips.append(f"  2. diese Medien entfernen")
         tips.append(f"  3. Musik verlaengern (`slideshow audio` mit weiterem Track)")
     return tips
+
+
+def _stellschraube(cov: Coverage, defaults: Defaults):
+    """Den passenden Regler benennen — je nachdem, was die Karte hergibt.
+
+    ``faktor`` ist der Streckungsfaktor der Standzeit: > 1 laenger, < 1 kuerzer.
+    """
+    hat_beat = any(r["type"] == "beat" for r in cov.per_region)
+
+    def formuliere(faktor: float) -> str:
+        richtung = "erhoehen" if faktor > 1 else "reduzieren"
+        if hat_beat:
+            bps = defaults.beats_per_still
+            return (f"beats_per_still von {bps} auf ~{max(1, round(bps * faktor))} "
+                    f"{richtung} (`build --beats-per-still`)")
+        s = defaults.still_seconds
+        return (f"Standzeit still_seconds von {s:.1f} s auf ~{max(0.5, s * faktor):.1f} s "
+                f"{richtung} (`build --still-seconds`)")
+
+    return formuliere

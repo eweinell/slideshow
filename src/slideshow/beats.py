@@ -391,7 +391,8 @@ def detect_regions(path: Path, *, track_bounds: list[tuple[float, float]] | None
 
     for s, e in quiet_spans:
         reason = "stille" if e - s >= 2.0 else "kurze luecke"
-        regions.append(Region(type="free", start=round(s, 6), end=round(e, 6), reason=reason))
+        regions.append(Region(type="free", start=round(s, 6), end=round(e, 6), reason=reason,
+                              quiet=True))
 
     regions.sort(key=lambda r: r.start)
     regions = _tile(regions, duration)
@@ -447,6 +448,9 @@ def merge_adjacent_free(regions: list[Region]) -> list[Region]:
             out[-1].end = r.end
             if r.reason and r.reason not in out[-1].reason:
                 out[-1].reason = f"{out[-1].reason}+{r.reason}" if out[-1].reason else r.reason
+            # Nur wer durchgehend still ist, bleibt still: eine Stille, an die
+            # ein rastherloses Musikstueck anschliesst, ist zusammen Musik.
+            out[-1].quiet = out[-1].quiet and r.quiet
             continue
         out.append(r)
     return out

@@ -13,3 +13,7 @@ logs/
 manifest.json
 edit.yaml
 fixtures/
+
+# test data sets
+testset1
+testset2

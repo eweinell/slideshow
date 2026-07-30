@@ -118,19 +118,31 @@ class Project:
 
     # -- Pfadumrechnung -------------------------------------------------
     def rel(self, path: str | os.PathLike) -> str:
-        """Absoluter Pfad -> projektrelativer POSIX-Pfad.
+        """Dateisystempfad -> projektrelativer POSIX-Pfad.
 
         Liegt der Pfad ausserhalb des Projektroots (typisch: Quellmaterial),
         wird ein relativer Pfad mit ``..`` erzeugt, damit auch das portabel
         bleibt, solange die Verzeichnisse zueinander gleich liegen.
+
+        Ein *relativer* Eingabepfad wird gegen das **aktuelle Verzeichnis**
+        aufgeloest, nicht gegen den Projektroot: die Argumente kommen von der
+        Kommandozeile, und die meint die Shell des Nutzers. Gegen den Root
+        aufgeloest wuerde ``--project foo probe foo/`` die Bilder als
+        ``foo/DSC.jpg`` (= ``foo/foo/DSC.jpg``) ablegen — probe meldet Erfolg,
+        preprocess findet die Quellen zwei Phasen spaeter nicht mehr.
+        Der Gegenpart ``abs()`` bleibt bewusst rootbezogen: er bekommt
+        Manifest-Eintraege, und die *sind* projektrelativ.
         """
         p = Path(path).expanduser()
-        p = p if p.is_absolute() else (self.root / p)
+        p = p if p.is_absolute() else (Path.cwd() / p)
         p = _norm(p)
         try:
             return PurePosixPath(p.relative_to(self.root)).as_posix()
         except ValueError:
-            return PurePosixPath(os.path.relpath(p, self.root)).as_posix()
+            # relpath() liefert Systemtrenner; PurePosixPath wuerde ein
+            # ``..\material\DSC.jpg`` als *einen* Namen durchreichen, statt es
+            # zu zerlegen — die Backslashes landeten so im Manifest.
+            return Path(os.path.relpath(p, self.root)).as_posix()
 
     def abs(self, relpath: str | os.PathLike) -> Path:
         """Projektrelativer Pfad -> absoluter Pfad auf dieser Plattform."""

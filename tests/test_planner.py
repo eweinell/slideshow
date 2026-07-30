@@ -283,3 +283,127 @@ def test_unterdeckung_wird_gemeldet_statt_stumm_abzuschneiden():
     from slideshow.planner import coverage_advice
     tips = coverage_advice(cov, Defaults())
     assert any("beats_per_still" in t for t in tips)
+
+
+# --------------------------------------------------------------------------
+# Free-Regionen ohne Beat-Raster
+#
+# Ein durchgehender Song ohne erkennbares Raster ist *eine* lange
+# free-Region. Fiele die auf ein einziges Standbild zusammen, waere der Film
+# ein Foto mit Musik.
+# --------------------------------------------------------------------------
+
+def _langer_song(dauer: float = 392.68) -> list[Region]:
+    return [Region(type="free", start=0.0, end=dauer,
+                   reason="niedrige Rhythmus-Konfidenz")]
+
+
+def test_langer_song_ohne_raster_wechselt_im_standardtakt():
+    defaults = Defaults()                      # still_seconds = 4.0
+    regions = _langer_song()
+    plan = plan_slots(regions, _stills(200), defaults, fps=FPS,
+                      total_frames=int(round(392.68 * FPS)))
+    cov = coverage(plan, defaults)
+
+    assert cov.stills > 1, "die Region darf nicht auf ein Standbild zusammenfallen"
+    assert cov.stills == pytest.approx(392.68 / 4.0, abs=1), \
+        "gewechselt wird im Standardtakt still_seconds"
+
+
+def test_standardtakt_ist_konfigurierbar():
+    """Dieselbe Region, andere Standzeit — die Anzahl folgt der Einstellung."""
+    regions = _langer_song()
+    gesehen = {}
+    for sekunden in (4.0, 8.0, 28.0):
+        defaults = Defaults(still_seconds=sekunden)
+        plan = plan_slots(regions, _stills(200), defaults, fps=FPS,
+                          total_frames=int(round(392.68 * FPS)))
+        gesehen[sekunden] = coverage(plan, defaults).stills
+
+    assert gesehen[4.0] > gesehen[8.0] > gesehen[28.0]
+    assert gesehen[28.0] == 14, "392.68 s / 28 s geht genau auf"
+
+
+def test_stille_bekommt_weiterhin_ein_ruhiges_standbild():
+    """Die hold-Regel bleibt — sie gilt nur nicht mehr fuer Musik."""
+    defaults = Defaults()                      # hold_seconds = 12.0
+    regions = [Region(type="free", start=0.0, end=40.0, reason="stille", quiet=True)]
+    plan = plan_slots(regions, _stills(20), defaults, fps=FPS,
+                      total_frames=int(40 * FPS))
+
+    assert coverage(plan, defaults).stills == 1
+
+
+def test_stille_die_in_musik_uebergeht_zaehlt_als_musik():
+    """``merge_adjacent_free`` verodert nicht, es verundet."""
+    from slideshow.beats import merge_adjacent_free
+    verschmolzen = merge_adjacent_free([
+        Region(type="free", start=0.0, end=3.0, reason="stille", quiet=True),
+        Region(type="free", start=3.0, end=392.68, reason="niedrige Rhythmus-Konfidenz"),
+    ])
+
+    assert len(verschmolzen) == 1
+    assert not verschmolzen[0].quiet, \
+        "eine Region, in der ueberwiegend Musik laeuft, ist nicht still"
+
+
+# --------------------------------------------------------------------------
+# Richtung der Deckungs-Ratschlaege
+# --------------------------------------------------------------------------
+
+def test_bei_zu_wenig_material_werden_laengere_standzeiten_empfohlen():
+    from slideshow.planner import coverage_advice
+    tips = " ".join(coverage_advice(coverage(_plan(n=2), Defaults()), Defaults()))
+
+    assert "erhoehen" in tips, \
+        "zu wenig Material heisst: jedes Bild muss laenger stehen"
+    assert "reduzieren" not in tips
+
+
+def test_bei_zu_viel_material_werden_kuerzere_standzeiten_empfohlen():
+    from slideshow.planner import coverage_advice
+    tips = " ".join(coverage_advice(coverage(_plan(n=200), Defaults()), Defaults()))
+
+    assert "reduzieren" in tips, \
+        "uebrige Medien heissen: jedes Bild muss kuerzer stehen"
+    assert "erhoehen" not in tips
+
+
+def test_der_vorgeschlagene_wert_schliesst_die_luecke_wirklich():
+    """Der Ratschlag wird befolgt und nachgerechnet.
+
+    Ein Vorschlag, der die Unterdeckung nur verkleinert, ist so gut wie
+    keiner — wer ihn befolgt, steht danach wieder vor derselben Meldung.
+    """
+    import re
+    from slideshow.planner import coverage_advice
+
+    defaults = Defaults()
+    total = int(round(392.68 * FPS))
+    plan = plan_slots(_langer_song(), _stills(14), defaults, fps=FPS, total_frames=total)
+    cov = coverage(plan, defaults)
+    assert cov.underrun
+
+    tips = coverage_advice(cov, defaults)
+    treffer = re.search(r"auf ~([\d.]+) s", " ".join(tips))
+    assert treffer, "der Vorschlag muss eine konkrete Standzeit nennen"
+    vorgeschlagen = float(treffer.group(1))
+    assert vorgeschlagen == pytest.approx(392.68 / 14, abs=0.2)
+
+    danach = Defaults(still_seconds=vorgeschlagen)
+    cov2 = coverage(plan_slots(_langer_song(), _stills(14), danach, fps=FPS,
+                               total_frames=total), danach)
+    assert not cov2.underrun, "nach dem Befolgen darf keine Luecke mehr offen sein"
+    assert not cov2.overrun
+
+
+def test_free_region_bekommt_den_regler_der_dort_wirkt():
+    """``beats_per_still`` ist in einer free-Region wirkungslos."""
+    from slideshow.planner import coverage_advice
+    defaults = Defaults()
+    plan = plan_slots(_langer_song(), _stills(200), defaults, fps=FPS,
+                      total_frames=int(round(392.68 * FPS)))
+    tips = " ".join(coverage_advice(coverage(plan, defaults), defaults))
+
+    assert "still_seconds" in tips
+    assert "beats_per_still" not in tips

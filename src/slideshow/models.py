@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (BaseModel, ConfigDict, Field, ValidationError, field_validator,
+                      model_validator)
 
 from . import BEATS_VERSION, EDIT_VERSION, MANIFEST_VERSION
 from .errors import SchemaError
@@ -211,9 +212,28 @@ class Region(BaseModel):
     offset: float | None = None
     conf: float | None = None
     reason: str = ""
+    #: True nur bei echter Stille. Eine free-Region entsteht aus zwei sehr
+    #: verschiedenen Gruenden: da ist nichts zu hoeren, oder da ist etwas zu
+    #: hoeren, das sich nur nicht rastern liess. Nur der erste Fall
+    #: rechtfertigt das lange Standbild aus ``hold_seconds`` — im zweiten
+    #: laeuft Musik, und die Bildwechsel duerfen nicht ausfallen.
+    quiet: bool = False
     #: Regions-Defaults, die die globalen ueberschreiben (6.3, Praezedenz 3)
     beats_per_still: int | None = None
     still_seconds: float | None = None
+
+    @model_validator(mode="after")
+    def _quiet_aus_reason_ableiten(self) -> "Region":
+        """Aeltere Karten und handgeschriebene Regionen kennen ``quiet`` nicht.
+
+        ``stille`` als *alleiniger* Grund ist eindeutig — nur so schreibt die
+        Analyse eine reine Stille-Region. Sobald noch etwas dahinter steht
+        (``stille+niedrige Rhythmus-Konfidenz``), laeuft in der Region Musik,
+        und dann ist sie es gerade nicht.
+        """
+        if "quiet" not in self.model_fields_set and self.reason == "stille":
+            self.quiet = True
+        return self
 
     @property
     def duration(self) -> float:

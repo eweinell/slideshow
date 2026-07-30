@@ -338,7 +338,27 @@ def probe_sources(project: Project, sources: list[Path], *, caps: Capabilities,
         fps_rationale=rationale,
         media=media,
     )
+    _verify_paths(project, manifest)
     return ProbeResult(manifest, other, device_spans(manifest))
+
+
+def _verify_paths(project: Project, manifest: Manifest) -> None:
+    """Jeder gespeicherte Pfad muss vom Projektroot aus wieder auf seine
+    Quelldatei zeigen (Grundprinzip 4).
+
+    Gelesen wird das Material ueber die Pfade, wie sie auf der Kommandozeile
+    stehen — abgelegt wird projektrelativ. Stimmen die beiden Bezugssysteme
+    nicht ueberein, ist der Report trotzdem vollstaendig und korrekt, und der
+    Fehler faellt erst in preprocess auf. Hier ist er noch erklaerbar.
+    """
+    broken = [m for m in manifest.media if not project.abs(m.path).exists()]
+    if not broken:
+        return
+    lines = "\n".join(f"  {m.id}: {m.path} -> {project.abs(m.path)}" for m in broken[:10])
+    more = f"\n  ... und {len(broken) - 10} weitere" if len(broken) > 10 else ""
+    raise SlideshowError(
+        f"{len(broken)} von {len(manifest.media)} Medienpfaden zeigen vom Projektroot "
+        f"({project.root}) aus ins Leere:\n{lines}{more}")
 
 
 def _probe_image(project: Project, path: Path, exif: dict, taken: set[str]) -> MediaItem:

@@ -147,12 +147,36 @@ def cmd_probe(args, project: Project) -> int:
     result = probe_sources(project, [Path(s) for s in args.sources], caps=caps,
                            clock_offsets=offsets, target_fps=args.fps)
     out = Path(args.output) if args.output else project.manifest
+    _carry_over_audio(out, result.manifest)
     if args.dry_run:
         console().print(f"[dim]--dry-run: wuerde {out} schreiben[/dim]")
     else:
         result.manifest.save(out)
     _print_probe_report(result, out)
     return 0
+
+
+def _carry_over_audio(existing: Path, fresh) -> None:
+    """Den Tonteil eines vorhandenen Manifests in den neuen Scan uebernehmen.
+
+    ``probe`` baut das Manifest neu auf und wuesste vom Mix nichts — ein
+    zweiter Scan (neue Bilder dazugelegt, Uhren-Offset korrigiert) loeschte
+    sonst den Tonteil, waehrend ``cache/mix.flac`` liegen bleibt. Das faellt
+    erst in ``build`` auf, und dort sieht es aus, als haette ``audio`` nie
+    gelaufen. ``cache_path`` wird bewusst *nicht* uebernommen: den leitet
+    ``preprocess`` aus dem Inhalts-Hash der Quelle neu ab.
+    """
+    from .models import Manifest
+    if not existing.exists() or fresh.audio.file:
+        return
+    try:
+        alt = Manifest.load(existing)
+    except Exception:                     # noqa: BLE001 - ein kaputtes Altmanifest
+        return                            # darf den frischen Scan nicht aufhalten
+    if alt.audio.file:
+        fresh.audio = alt.audio
+        log.info("Tonspur aus dem vorhandenen Manifest uebernommen: %s (%.2f s)",
+                 alt.audio.file, alt.audio.duration)
 
 
 def _print_probe_report(result, out: Path) -> None:

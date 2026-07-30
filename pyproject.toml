@@ -17,7 +17,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-librosa = ["librosa"]
+# numba/llvmlite haben pro Python-Version eigene Wheels. Ohne untere Grenze
+# backtrackt der Resolver bis in uralte sdists (numba 0.53.1), die beim Bauen
+# mit "only versions >=3.6,<3.10 are supported" abbrechen. numba>=0.62 zwingt
+# den Resolver stattdessen dazu, numpy passend zu waehlen (numba braucht <2.5).
+librosa = ["librosa>=0.11", "numba>=0.62"]
 aubio = ["aubio"]
 dev = ["pytest"]
 
