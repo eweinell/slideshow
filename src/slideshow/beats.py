@@ -1,11 +1,20 @@
 """Phase 3a — Audio-Segmentierung und Beats (Abschnitte 6.1 und 6.2).
 
 Kein globales BPM-Raster: ein einzelnes ``bpm`` + ``offset`` fuer die gesamte
-Tonspur ist nur bei genau einem durchlaufenden Track korrekt. Die Tonspur wird
-deshalb zuerst in **Regionen** zerlegt, und erst danach wird jede Region
-*einzeln* analysiert. Diese Reihenfolge ist wichtig: eine Tempo-Erkennung ueber
-einen Mix aus zwei Tracks liefert einen Mittelwert, der zu keinem der beiden
-passt.
+Tonspur ist nicht einmal bei genau einem durchlaufenden Track korrekt. Die
+Tonspur wird deshalb zuerst in **Regionen** zerlegt, und erst danach wird jede
+Region *einzeln* analysiert. Diese Reihenfolge ist wichtig: eine
+Tempo-Erkennung ueber einen Mix aus zwei Tracks liefert einen Mittelwert, der
+zu keinem der beiden passt.
+
+Regionsgrenzen kommen aber nicht nur aus Stille und Track-Grenzen: ein
+durchgehend abgemischter Song hat weder das eine noch das andere und laege
+sonst als *ein* Stueck von mehreren Minuten vor. Ueber diese Laenge laesst sich
+kein starres Raster legen — echtes Material driftet um mehrere Beat-Laengen,
+und die Konfidenz bricht zusammen, obwohl das Stueck eindeutig rhythmisch ist.
+Lange Abschnitte werden deshalb zusaetzlich in Fenster von ``MAX_FIT_WINDOW``
+zerlegt, einzeln gefittet und anschliessend wieder verschmolzen, wo das Tempo
+gleich geblieben ist (:func:`merge_adjacent_beats`).
 
 ``free`` ist der Fallback-Modus — nicht nur fuer echte Stille, sondern fuer
 jeden Abschnitt, in dem sich kein verlaessliches Raster finden laesst.
@@ -43,13 +52,34 @@ QUIET_DB = -35.0
 
 #: Ab hier gilt eine Region als rhythmisch verlaesslich.
 CONF_THRESHOLD = 0.55
+#: Laengster Abschnitt, an den in einem Stueck ein Raster angepasst wird.
+#: **Eng an CONF_THRESHOLD gekoppelt.** Die Schwelle 0,55 ist fuer diese
+#: Fensterlaenge kalibriert; darueber hinaus misst die Konfidenz faktisch die
+#: Drift des Stuecks statt seines Rhythmus und ist als Kriterium bedeutungslos
+#: (gemessen an einem realen Track mit durchgehend klar hoerbarem Puls:
+#: Konfidenz 0,78 bei 20 s, 0,73 bei 30 s, 0,13 bei 393 s). Wer an einem der
+#: beiden Werte dreht, muss den anderen mitdenken.
+#:
+#: 20 statt 30 s, weil echte Stuecke ihr Tempo langsam verschieben: derselbe
+#: Track laeuft von 150 auf 157 BPM: ueber 30 s mittelt ein Fenster darueber
+#: hinweg und faellt an den Uebergaengen unter die Schwelle. Nicht kuerzer als
+#: 16 s — darunter werden die Fixture-Songs zerlegt und der Klick-Track
+#: verliert seine konstruktive Garantie von genau zwei Beat-Regionen.
+MAX_FIT_WINDOW = 20.0
 #: Kuerzer als das lohnt kein eigenes Beat-Raster.
 MIN_BEAT_REGION = 5.0
+
+#: Toleranzen, unter denen zwei benachbarte Fenster als dasselbe Raster gelten.
+BEAT_MERGE_BPM_TOL = 0.015
+BEAT_MERGE_PHASE_TOL = 0.25
 
 _BPM_RANGE = (55.0, 200.0)
 #: Prior gegen Oktavfehler (halbes/doppeltes Tempo), zentriert auf 120 BPM.
 _BPM_PRIOR_CENTER = 120.0
 _BPM_PRIOR_WIDTH = 0.9
+#: Ab dieser Ueberhoehung ueber dem Mittel — relativ zu der der starken
+#: Schlaege — gelten die Punkte *zwischen* den Rasterpunkten als echte Beats.
+_OCTAVE_RATIO = 0.15
 
 
 # --------------------------------------------------------------------------
@@ -177,6 +207,8 @@ def fit_grid(env: np.ndarray, *, start: float, sr: int = ANALYSIS_SR,
     mean_e = float(e.mean()) or 1e-9
 
     best: tuple[float, float, float] = (-1.0, 0.0, 0.0)   # (score, bpm, phase_frames)
+    # Bester Phasen-Score je BPM — wird fuer die Oktavkorrektur gebraucht.
+    per_bpm: dict[float, tuple[float, float]] = {}
     for bpm in np.arange(_BPM_RANGE[0], _BPM_RANGE[1] + 0.01, 0.25):
         period = 60.0 / bpm * fps
         if period < 2 or period > len(e):
@@ -185,18 +217,25 @@ def fit_grid(env: np.ndarray, *, start: float, sr: int = ANALYSIS_SR,
         if n_beats < 3:
             continue
         k = np.arange(n_beats)
+        top: tuple[float, float] = (-1.0, 0.0)
         for phase in np.arange(0.0, period, 0.5):
             pos = phase + k * period
             pos = pos[pos <= len(e) - 1]
             if pos.size < 3:
                 continue
             score = float(np.interp(pos, np.arange(len(e)), e).mean()) * _prior(bpm)
-            if score > best[0]:
-                best = (score, float(bpm), float(phase))
+            if score > top[0]:
+                top = (score, float(phase))
+        if top[0] < 0:
+            continue
+        per_bpm[float(bpm)] = top
+        if top[0] > best[0]:
+            best = (top[0], float(bpm), top[1])
 
     score, bpm, phase = best
     if bpm <= 0:
         return Analysis(0.0, start, 0.0, 0.0)
+    bpm, phase = _octave_up(e, bpm, phase, per_bpm, fps=fps, mean_e=mean_e)
 
     period = 60.0 / bpm * fps
     positions = phase + np.arange(int((len(e) - 1 - phase) // period) + 1) * period
@@ -205,14 +244,76 @@ def fit_grid(env: np.ndarray, *, start: float, sr: int = ANALYSIS_SR,
     # Konfidenz: wie stark heben sich die Rasterpunkte vom Mittel ab?
     ratio = float(vals.mean()) / mean_e
     conf = max(0.0, min(1.0, (ratio - 1.0) / 2.0))
-    # Stabilitaet: wie gleichmaessig ist die Energie ueber die Beats verteilt?
-    stability = 0.0
-    if vals.size > 2 and vals.mean() > 0:
-        stability = max(0.0, min(1.0, 1.0 - float(vals.std()) / float(vals.mean())))
+    stability = _stability(vals)
 
     return Analysis(bpm=round(bpm, 2), offset=round(start + phase / fps, 6),
                     conf=round(conf * 0.6 + stability * 0.4, 4),
                     stability=round(stability, 4))
+
+
+def _stability(vals: np.ndarray) -> float:
+    """Wie regelmaessig ist die Energie ueber die Beats verteilt?
+
+    Gemessen wird die Abweichung von einem sich wiederholenden *Zweiermuster*,
+    nicht vom Mittelwert. Der Grund ist musikalisch: Betonungen wechseln sich
+    regelmaessig ab (Bassdrum auf 1 und 3, Snare auf 2 und 4). Am Mittelwert
+    gemessen sieht genau dieser Wechsel wie Unregelmaessigkeit aus — die
+    Stabilitaet faellt dort auf nahezu null, wo der Puls am deutlichsten ist,
+    und das richtige Tempo wuerde zugunsten des halben verworfen.
+
+    Sind beide Haelften gleich stark — wie bei einem Klick-Track —, geht die
+    Formel exakt in ``1 - std/mean`` ueber. Material ohne systematischen
+    Wechsel bewertet sie also unveraendert; nur der Backbeat wird nicht mehr
+    bestraft.
+    """
+    if vals.size <= 2 or vals.mean() <= 0:
+        return 0.0
+    muster = np.array([vals[0::2].mean(), vals[1::2].mean()])
+    res = vals - muster[np.arange(vals.size) % 2]
+    abweichung = float(np.sqrt(float((res ** 2).mean())))
+    return max(0.0, min(1.0, 1.0 - abweichung / float(vals.mean())))
+
+
+def _octave_up(e: np.ndarray, bpm: float, phase: float,
+               per_bpm: dict[float, tuple[float, float]], *, fps: float,
+               mean_e: float) -> tuple[float, float]:
+    """Faengt den Oktavfehler ab: haelt der Fit das halbe Tempo fuer das ganze?
+
+    Sitzt die Bassdrum nur auf jedem zweiten Schlag, sammelt das *halbe* Raster
+    pro Rasterpunkt mehr Energie ein als das richtige — der Score bevorzugt es,
+    und der Prior kann das nicht auffangen: er gewichtet 155 BPM zwar hoeher
+    als 78, aber nur um rund ein Sechstel, und der Energievorsprung ist
+    groesser. Der Prior allein ist gegen Oktavfehler damit wirkungslos.
+
+    Entscheidbar ist der Fall nur an den Punkten *zwischen* den Rasterpunkten.
+    Tragen die ebenfalls deutlich Onset-Energie, sind es Schlaege, und das
+    doppelte Tempo ist das richtige. Bei einem Klick-Track liegt dort Stille,
+    und es bleibt beim gefundenen Tempo.
+
+    Ein einziger Verdopplungsschritt genuegt: ``_BPM_RANGE`` spannt mit 55–200
+    weniger als zwei Oktaven, ein zweites Verdoppeln fiele immer heraus.
+    """
+    band = [b for b in per_bpm if 1.9 * bpm <= b <= 2.1 * bpm]
+    if not band:
+        return bpm, phase
+    b2 = max(band, key=lambda b: per_bpm[b][0])
+    p2 = per_bpm[b2][1]
+
+    period = 60.0 / b2 * fps
+    pos = p2 + np.arange(int((len(e) - 1 - p2) // period) + 1) * period
+    vals = np.interp(pos, np.arange(len(e)), e)
+    if vals.size < 6:
+        return bpm, phase
+
+    # Jeder zweite Punkt des doppelten Rasters ist das urspruengliche Raster.
+    a, b = vals[0::2], vals[1::2]
+    stark, schwach = (a, b) if a.mean() >= b.mean() else (b, a)
+    ueber = float(stark.mean()) - mean_e
+    if ueber <= 0:
+        return bpm, phase
+    if (float(schwach.mean()) - mean_e) / ueber >= _OCTAVE_RATIO:
+        return b2, p2
+    return bpm, phase
 
 
 #: Feine Rasterung fuer die Offset-Verfeinerung: 64 Samples bei 22050 Hz sind
@@ -369,6 +470,7 @@ def detect_regions(path: Path, *, track_bounds: list[tuple[float, float]] | None
     seeds = sorted({round(b, 3) for pair in (track_bounds or []) for b in pair
                     if 0.0 < b < duration})
     loud_spans = _split_at(loud_spans, seeds)
+    loud_spans = _split_long(loud_spans, MAX_FIT_WINDOW)
 
     env = onset_envelope(y, sr=sr, hop=HOP)
     regions: list[Region] = []
@@ -397,6 +499,10 @@ def detect_regions(path: Path, *, track_bounds: list[tuple[float, float]] | None
     regions.sort(key=lambda r: r.start)
     regions = _tile(regions, duration)
     regions = merge_adjacent_free(regions)
+    # Vor merge_short_regions und snap_region_starts: beide arbeiten auf den
+    # endgueltigen Grenzen, und eine gleich wieder verschmolzene Grenze soll
+    # nicht vorher schon auf einen Beat gezogen werden.
+    regions = merge_adjacent_beats(regions)
     regions = apply_preroll_rule(regions)
     regions = merge_short_regions(regions, still_seconds=still_seconds, tolerance=tolerance)
     regions = snap_region_starts(regions)
@@ -416,6 +522,28 @@ def _split_at(spans: list[tuple[float, float]], seeds: list[float]) -> list[tupl
             out.append((prev, c))
             prev = c
         out.append((prev, e))
+    return out
+
+
+def _split_long(spans: list[tuple[float, float]],
+                limit: float) -> list[tuple[float, float]]:
+    """Zerlegt zu lange Abschnitte in gleich lange Fenster.
+
+    Bewusst in ``ceil(dauer / limit)`` *gleiche* Teile statt in Fenster zu
+    ``limit`` plus Rest: ein Rest-Stummel von zwei Sekunden am Ende eines Songs
+    bekaeme kein verwertbares Raster und fiele als ``free``-Insel auf.
+    """
+    out: list[tuple[float, float]] = []
+    for s, e in spans:
+        n = math.ceil((e - s) / limit) if e - s > limit else 1
+        if n <= 1:
+            out.append((s, e))
+            continue
+        step = (e - s) / n
+        # Das letzte Fenster endet exakt auf ``e``, damit sich die Kachelung
+        # nicht ueber die Gleitkomma-Summe verschiebt.
+        out += [(s + i * step, s + (i + 1) * step if i < n - 1 else e)
+                for i in range(n)]
     return out
 
 
@@ -454,6 +582,52 @@ def merge_adjacent_free(regions: list[Region]) -> list[Region]:
             continue
         out.append(r)
     return out
+
+
+def merge_adjacent_beats(regions: list[Region]) -> list[Region]:
+    """Pendant zu :func:`merge_adjacent_free` fuer ``beat``-Regionen.
+
+    Die Zerlegung in ``MAX_FIT_WINDOW``-Fenster ist ein Mittel der Messung und
+    keine Aussage ueber die Musik. Wo zwei Fenster dasselbe Raster tragen,
+    gehoert die Grenze wieder weg — an jeder Regionsgrenze sitzt sonst ein
+    erzwungener Schnitt, den nichts im Stueck rechtfertigt.
+
+    Bleibt die Grenze stehen, ist das die richtige Antwort: dort *hat* sich das
+    Tempo geaendert.
+    """
+    out: list[Region] = []
+    for r in regions:
+        if out and _traegt_weiter(out[-1], r):
+            out[-1].end = r.end
+            # Eine verschmolzene Region ist nur so verlaesslich wie ihr
+            # schwaechster Teil — sonst zoege ein starkes Fenster ein
+            # grenzwertiges ueber die Schwelle.
+            if out[-1].conf is not None and r.conf is not None:
+                out[-1].conf = min(out[-1].conf, r.conf)
+            continue
+        out.append(r)
+    return out
+
+
+def _traegt_weiter(prev: Region, r: Region) -> bool:
+    """Traegt das Raster von ``prev`` die Region ``r`` bis zu deren Ende mit?"""
+    if prev.type != "beat" or r.type != "beat":
+        return False
+    if not prev.bpm or not r.bpm or prev.offset is None or r.offset is None:
+        return False
+    if abs(r.bpm - prev.bpm) > BEAT_MERGE_BPM_TOL * prev.bpm:
+        return False
+    # Der Tempovergleich allein genuegt nicht: 1,5 % Abweichung summieren sich
+    # ueber ein volles Fenster auf rund eine Dreiviertel-Beat-Laenge Versatz,
+    # ein Vielfaches der Phasentoleranz. Geprueft wird deshalb am Anfang *und*
+    # am Ende von ``r`` — nur das Ende zeigt, ob das Raster durchtraegt.
+    p_prev, p_r = prev.beat_duration(), r.beat_duration()
+    for t in (r.start, r.end):
+        beat = r.offset + round((t - r.offset) / p_r) * p_r
+        d = (beat - prev.offset) % p_prev
+        if min(d, p_prev - d) > BEAT_MERGE_PHASE_TOL * p_prev:
+            return False
+    return True
 
 
 def apply_preroll_rule(regions: list[Region]) -> list[Region]:

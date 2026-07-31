@@ -101,7 +101,8 @@ Verletzt man eine davon, fällt es erst spät und woanders auf:
 
 | Thema | Stand |
 |---|---|
-| **Beat-Erkennung bei langen Stücken** | Ein durchgehender Song wird komplett als `free` eingestuft, kein Schnitt liegt auf einem Beat. Messwerte, Diagnose und Umbauvorschlag: [`docs/briefing-beat-detection.md`](docs/briefing-beat-detection.md). Nicht umgesetzt. |
+| **Beat-Erkennung bei langen Stücken** | **Umgesetzt** ([`docs/briefing-beat-detection.md`](docs/briefing-beat-detection.md)). Lange Abschnitte werden in `MAX_FIT_WINDOW`-Fenster (20 s) zerlegt, einzeln gefittet und über `merge_adjacent_beats` wieder verschmolzen. Offen bleibt nur die Abdeckung: 88,2 % statt der angepeilten 90 %, weil der Ausklang des Testtracks (die letzten ~40 s) rhythmisch wirklich zu dünn ist. |
+| **`fit_grid` misst lokal, nicht global** | Die Konfidenz ist nur für Fenster bis ~30 s kalibriert. `MAX_FIT_WINDOW` und `CONF_THRESHOLD` hängen zusammen — wer an einem dreht, muss den anderen nachmessen. Unter 16 s zerfallen zusätzlich die Fixture-Songs, und die konstruktive Garantie hinter Abnahmekriterium A5 fällt. |
 | **HLG unter ffmpeg 8.1.2** | Siehe oben, die drei roten Tests. Kein Briefing vorhanden. |
 | **Blendenmodus wird nicht geprüft** | `_XFADE_MODES.get(mode, "fade")` in `kenburns.py` macht aus einem vertippten Modus stillschweigend eine normale Blende — die einzige Stelle im Schema ohne Validierung. `known_modes()` gibt es bereits. |
 | **Schwenk am Zoomanfang** | Ein Hineinzoom startet bei `z = 1,0`, dort ist der Ausschnitt das ganze Bild und die Mitte kann sich nicht bewegen. Rund die Hälfte des geplanten Schwenks bleibt deshalb unsichtbar. Bewusst so belassen, in `docs/edit-yaml.md` beschrieben. |

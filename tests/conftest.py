@@ -52,6 +52,18 @@ def click_short_gap(fixture_root: Path):
 
 
 @pytest.fixture(scope="session")
+def click_long_track(fixture_root: Path):
+    """*Ein* durchgehender Song, deutlich laenger als ``MAX_FIT_WINDOW``.
+
+    Der Fall aus ``docs/briefing-beat-detection.md``: ohne innere Stille und
+    ohne Track-Grenze gab es frueher genau eine Region ueber die volle Laenge,
+    und die war mangels Konfidenz ``free``.
+    """
+    return make_click_track(fixture_root / "audio" / "long_track.wav",
+                            tracks=[TrackSpec(150.0, 175)], gap=0.0)
+
+
+@pytest.fixture(scope="session")
 def images(fixture_root: Path) -> list[Path]:
     return make_images(fixture_root / "images", count=10, width=800, height=500)
 

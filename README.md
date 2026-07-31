@@ -198,22 +198,35 @@ Bewegung steht einfach still), und die Crop-Position darf nicht über `iw`/`ih`
 formuliert werden, weil `crop` die Eingangsmaße an die Filterkonfiguration
 bindet.
 
-## Bekannte Einschränkung: Beat-Erkennung bei langen Stücken
+## Beat-Erkennung bei langen Stücken
 
-Bei **einem durchgehenden Song** findet die Analyse derzeit kein Raster und
-stuft die ganze Tonspur als `free` ein — die Bildwechsel laufen dann im
-Standardtakt, aber kein Schnitt liegt auf einem Beat.
+Ein Song driftet. Kein reales Stück hält sein Tempo über sechs Minuten so
+genau, dass ein *starres* Raster darüber passt — an einem gemessenen 6:32-Mix
+läuft der Puls von 150 auf 157 BPM und wieder zurück, gegenüber einem festen
+Raster sind das über zwei Sekunden Versatz. Ein einzelnes `bpm` für die ganze
+Tonspur beschreibt solches Material nicht.
 
-Der Grund ist nicht das Material, sondern die Fensterlänge: Regionen werden nur
-an Stille getrennt, ein Song hat keine, also muss ein *starres* Raster über die
-volle Länge passen. Reale Aufnahmen driften, und die Konfidenz fällt mit der
-Fensterlänge — an einem 6:32-Stück von 0,818 (10-s-Fenster) auf 0,130 (voller
-Track), bei einer Schwelle von 0,55. Messwerte, Diagnose und der Umbauvorschlag
-stehen in [`docs/briefing-beat-detection.md`](docs/briefing-beat-detection.md).
+Die Analyse legt deshalb kein globales Raster an, sondern zerlegt lange
+Abschnitte in Fenster von `MAX_FIT_WINDOW` (20 s) und passt jedem Fenster ein
+eigenes Raster an. Anschließend werden benachbarte Fenster wieder verschmolzen,
+wo Tempo *und* Phase durchtragen — die Fensterung ist ein Mittel der Messung
+und soll in der Karte nicht sichtbar werden. Bleibt eine Grenze stehen, hat
+sich dort tatsächlich das Tempo geändert.
 
-Mehrere Tracks mit Pause dazwischen (`slideshow audio a.mp3 b.mp3 --gap 6`)
-sind nicht betroffen — dort trennt die Stille die Regionen ohnehin. Wer das
-Tempo kennt, setzt es direkt:
+Für den gemessenen Mix ergibt das zwölf Beat-Regionen zwischen 149,5 und 156,75
+BPM, die jeweils auf unter 1 % dem lokal tatsächlich gespielten Tempo
+entsprechen; die Rasterpunkte liegen im Median 15,6 ms neben den Referenz-Beats.
+Vorher war das Ergebnis *eine* `free`-Region über die volle Länge — kein
+einziger Schnitt lag auf einem Beat.
+
+Was bewusst `free` bleibt: Passagen, in denen sich wirklich kein Puls finden
+lässt — Ambient, Sprachaufnahmen, ausgedünnte Intros und Ausklänge. Dort takten
+die Bildwechsel im Standardintervall `still_seconds` weiter. Messwerte und
+Diagnose stehen in
+[`docs/briefing-beat-detection.md`](docs/briefing-beat-detection.md).
+
+Wer das Tempo kennt, setzt es weiterhin direkt — eine handgeschriebene Karte
+mit einer einzigen Beat-Region über den ganzen Track bleibt gültig:
 
 ```bash
 slideshow beats --bpm 152 --offset 0.35

@@ -1,6 +1,11 @@
 # Briefing: Beat-Erkennung für durchgehende Tracks
 
-**Status:** offen · **Betrifft:** `src/slideshow/beats.py` · **Vorbedingung:** keine
+**Status:** umgesetzt nach Entscheidung 1(a), 2(a), 3 · **Betrifft:**
+`src/slideshow/beats.py` · **Ergebnis:** [Abschnitt 9](#9-ergebnis-der-umsetzung)
+
+> Die Abschnitte 1–8 beschreiben den **Zustand vor der Umsetzung** und bleiben
+> als Messgrundlage unverändert stehen. Was tatsächlich gebaut wurde und wo die
+> Abnahme abweicht, steht in Abschnitt 9.
 
 Die Beat-Erkennung gibt bei einem durchgehenden Musikstück vollständig auf und
 stuft die gesamte Tonspur als `free` ein. Damit liegt kein einziger Schnitt auf
@@ -300,6 +305,109 @@ Das Skript im Anhang erzeugt A1 und A4 direkt.
 - **Laufzeit.** `fit_grid` durchsucht 580 BPM-Stufen × Phasen je Fenster.
   Bei ~14 Fenstern statt einem steigt die Analysezeit spürbar; der ganze
   `beats`-Lauf lag bisher bei 7,9 s, es bleibt unkritisch.
+
+---
+
+## 9. Ergebnis der Umsetzung
+
+Umgesetzt wie vorgeschlagen: Entscheidung 1(a) stückweiser Fit, 2(a) Schwelle
+unverändert, 3 keine Schemaänderung. `beats.yaml`, `RegionGrid`,
+`beat_duration()` und der Planner blieben unberührt; `Region.quiet`,
+`_free_count` und der `still_seconds`-Rückfall wurden nicht angefasst.
+
+### 9.1 Zwei Abweichungen vom Vorschlag
+
+**`MAX_FIT_WINDOW = 20.0` statt 30.0.** Beide Werte liegen in dem in
+Abschnitt 5 genannten Band von 20–30 s. 30 s mittelt über die Tempoverschiebung
+des Stücks hinweg und fällt an den Übergängen unter die Schwelle — gemessen am
+selben Track:
+
+| `MAX_FIT_WINDOW` | Beat-Regionen | min. Konfidenz | Abdeckung | `free`-Inseln *im* Song |
+|---|---|---|---|---|
+| 30 s | 6 | 0,619 | 75,4 % | 181,7–211,2 s |
+| 25 s | 12 | 0,559 | 85,8 % | keine |
+| **20 s** | **12** | **0,596** | **88,2 %** | **keine** |
+
+Die konstruktive Erfüllung von A5 bleibt erhalten: 20 s liegt weiterhin über
+den 16,0 s des längeren Fixture-Songs, beide werden nicht zerlegt.
+
+**Zusätzlich nötig: die Stabilitäts-Formel.** Das war im Briefing nicht
+vorgesehen und stellte sich als Voraussetzung für A4 heraus. `stability`
+maß bisher `1 − std/mean` über die Rasterpunkte. Sitzt die Bassdrum auf jedem
+zweiten Schlag, ist die Energie am *richtigen* Tempo systematisch ungleich —
+die Stabilität fiel dort auf 0,014, wo der Puls am deutlichsten war, und die
+Oktavkorrektur hätte die Konfidenz unter die Schwelle gedrückt statt sie zu
+heben. Gemessen wird jetzt die Abweichung von einem sich wiederholenden
+*Zweiermuster*. Sind beide Hälften gleich stark, geht die Formel exakt in
+`1 − std/mean` über — Material ohne Backbeat wird unverändert bewertet, die
+Kalibrierung der Schwelle bleibt dort gültig.
+
+Der Oktavfehler selbst (2.3) wird über die Punkte *zwischen* den Rasterpunkten
+entschieden: tragen die ebenfalls deutlich Onset-Energie, war das gefundene
+Tempo das halbe (`_octave_up`). Ein Verdopplungsschritt genügt, weil
+`_BPM_RANGE` mit 55–200 weniger als zwei Oktaven spannt.
+
+### 9.2 Abnahme
+
+| | Kriterium | Ergebnis |
+|---|---|---|
+| A1 | jede `beat`-Region ≥ 0,55 | **erfüllt** — min. 0,596 (vorher: 0,130 bei einer Region) |
+| A2 | ≥ 90 % als `beat` | **88,2 %** — siehe unten |
+| A3 | Median ≤ 25 ms, max ≤ ½ Beat | **erfüllt** — 15,6 ms Median, 190,7 ms max (½ Beat = 197 ms) |
+| A4 | kein Oktavfehler | **erfüllt** — siehe unten |
+| A5 | Fixture ergibt zwei Beat-Regionen | **erfüllt** |
+| A6 | Stille behält `quiet: true` | **erfüllt** |
+| A7 | bestehende `beats.yaml` baut durch | **erfüllt** — Format unverändert (`test_handgeschriebene_karte_mit_einer_region_bleibt_gueltig`) |
+| A8 | Suite grün | **erfüllt** — 203 passed, 3 failed (die bekannten HLG-Tests) |
+
+Zu A8: die im Briefing genannten „157 passed" waren zum Zeitpunkt der Umsetzung
+bereits veraltet — der Ausgangsstand lag bei 183 passed, 3 failed. Dazu kommen
+20 neue Tests. Die drei roten Tests in `tests/test_media.py` sind unverändert
+dieselben.
+
+**A2 — 88,2 % statt 90 %.** Der Fehlbetrag ist Material, nicht Implementierung.
+Nicht als `beat` eingestuft werden 0–4,0 s (Vorlaufstille) und 350,5–392,7 s.
+Der zweite Bereich ist der Ausklang: der Pegel fällt von −10 auf −13 dB, die
+Perkussion dünnt aus, ab 389,2 s ist digitale Stille. Die Fenster dort erreichen
+Konfidenzen von 0,47 bis 0,59, liegen also tatsächlich an der Grenze. Allein
+Vorlauf und Schlussstille machen 4,2 % aus; erreichbar wären maximal 95,8 %.
+Um die 90 % zu erzwingen, müsste `CONF_THRESHOLD` fallen — was Entscheidung 2
+ausdrücklich ausschließt. Der Ausklang bekommt damit den `still_seconds`-Takt,
+und genau dafür ist der Rückfall da.
+
+**A4 — die ±2 % um 152,0 BPM sind das falsche Maß.** Das Kriterium unterstellt
+ein konstantes Tempo. Die Gegenmessung widerlegt das: eine Ausgleichsgerade
+durch die librosa-Beats ergibt lokal 150,0 BPM am Anfang und 156,8 BPM bei
+265 s, ohne einen einzigen ausgelassenen Schlag (kein Intervall weicht um mehr
+als 6 % vom Median ab). Der Track *spielt* dort schneller. Gemessen am lokal
+tatsächlichen Tempo trifft jede Region auf **≤ 0,87 %**:
+
+| Region | erkannt | lokale Referenz | Abw. |
+|---|---|---|---|
+| 4,0–23,2 s | 150,00 | 149,98 | 0,01 % |
+| 100,3–158,0 s | 150,75 | 150,59 | 0,10 % |
+| 177,5–196,5 s | 152,00 | 150,69 | 0,87 % |
+| 273,6–311,9 s | 156,75 | 156,71 | 0,03 % |
+| 331,3–350,5 s | 154,50 | 154,47 | 0,02 % |
+
+Die Absicht hinter A4 — „nicht bei 76 und nicht bei 304" — ist damit erfüllt:
+kein Wert liegt in der Nähe des halben oder doppelten Tempos. Wer das Kriterium
+nachziehen will, formuliert es gegen das lokale Referenztempo statt gegen eine
+Konstante.
+
+### 9.3 Was in der Karte jetzt steht
+
+Aus einer Region wurden vierzehn (zwölf `beat`, zwei `free`), Tempi zwischen
+149,5 und 156,75 BPM. Das Verschmelzen greift: benachbarte Fenster gleichen
+Tempos ergeben Regionen bis 57,7 s, die Fenstergrenzen sind dort verschwunden.
+Wo eine Grenze steht, hat sich das Tempo geändert.
+
+Geprüft wird beim Verschmelzen die Phasenlage am Anfang **und am Ende** der
+zweiten Region. Der reine Tempovergleich aus Schritt 4 genügt nicht: 1,5 %
+Abweichung summieren sich über ein volles Fenster auf rund eine
+Dreiviertel-Beat-Länge Versatz — ein Vielfaches der Phasentoleranz von ¼ Beat.
+Nur am Anfang geprüft wären die Regionen zusammengekittet und der Schnitt liefe
+in der zweiten Hälfte aus dem Takt (Risiko 2 in Abschnitt 8).
 
 ---
 
