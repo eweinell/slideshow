@@ -13,7 +13,9 @@ zerschneiden.
 Der Anspruch ist damit höher als „Bild mit Text drauf". Eine Titelfolie muss:
 
 1. **auf dem Raster liegen** — und zwar nicht auf irgendeinem Beat, sondern auf
-   einem musikalisch sinnvollen (Abschnitt 4, Entscheidung 3);
+   einem musikalisch sinnvollen (Entscheidung 3); und dort, wo es kein Raster
+   gibt — in `free`-Regionen und in Stille — schlicht so lange stehen wie jedes
+   andere Bild (Entscheidung 3b);
 2. **aus dem Material kommen** — der Hintergrund ist das erste Bild der neuen
    Stadt, unscharf; nicht ein Fremdkörper aus einer Vorlagensammlung;
 3. **wieder auflösen** — der Übergang zurück ins Material ist Teil der Idee,
@@ -82,7 +84,7 @@ Textbounding-Box** und zieht die Abdunklung (bzw. einen Verlaufs-Scrim von
 unten) nach, bis das Kontrastverhältnis ≥ 4,5:1 liegt — deterministisch, in
 festen Schritten, mit Obergrenze und Warnung, wenn die Grenze nicht erreicht
 wird. Das ist billig (Pillow, ein `resize` auf 64 px genügt) und macht aus einer
-Geschmacksfrage ein Abnahmekriterium (T5). Der Messcode steht im Anhang.
+Geschmacksfrage ein Abnahmekriterium (T6). Der Messcode steht im Anhang.
 
 **Zweite Zeile automatisch.** `subtitle: auto` formatiert den
 Aufnahmezeitpunkt des folgenden Bildes aus dem Manifest
@@ -112,7 +114,8 @@ Felder:
 | `title` | Text | Überschrift. Pflicht — eine Folie ohne Überschrift ist ein Fehler, kein Sonderfall |
 | `subtitle` | Text \| `auto` \| entfällt | zweite Zeile |
 | `bg` | `auto` (Default) \| Pfad \| `#rrggbb` \| `none` | Hintergrundquelle, siehe Entscheidung 4 |
-| `beats` / `dur` | Zahl | wie beim Still; `beats` nur in Beat-Regionen |
+| `beats` / `dur` | Zahl | wie beim Still; `beats` nur in Beat-Regionen, `dur` in `free`-Regionen (Entscheidung 3) |
+| `snap_back` | `true` \| `false` | wie beim Still; in langer Stille zwingend `false`, siehe Entscheidung 3 |
 | `style` | `card` (Default) \| `lower-third` | Reserviert für Stufe 2, siehe Entscheidung 1 |
 | `kb` | `KBSpec` | wie beim Still; `{z: [1, 1]}` erzeugt eine ruhende Karte |
 
@@ -121,7 +124,9 @@ Und die Defaults, neben `kb:` und `xfade:` in `defaults:`:
 ```yaml
 defaults:
   title:
-    beats: 12            # Standzeit, wenn nichts angegeben ist
+    beats: 12            # Standzeit in Beat-Regionen
+                         # in free-Regionen gilt still_seconds — die
+                         # Standardlänge der Bildanzeige, ohne Sonderregel
     phrase_beats: 8      # Titel beginnen auf Phrasengrenzen (Entscheidung 3)
     font: auto           # Pfad; SLIDESHOW_FONT gewinnt (analog SLIDESHOW_MELT)
     size: 0.075          # Versalhöhe der Überschrift, Anteil der Bildhöhe
@@ -255,15 +260,78 @@ innerhalb von ± ½ Phrase; liegt keine in Reichweite, bleibt es beim
 Standardverhalten und es wird gewarnt. So wird der Vorgänger nie mehr als vier
 Beats gedehnt oder gestaucht.
 
-In `free`-Regionen gibt es keine Phrasen. Dort greift `RegionGrid.snap_up`
-auf die `linspace`-Kachelung, und die Standzeit kommt aus `dur` bzw.
-`still_seconds` — kein Sonderfall, nur ein anderes Raster.
+**Standzeit in Beat-Regionen.** `beats: 12` sind bei 152 BPM 4,7 s. Als
+Untergrenze gilt eine Lesezeitregel: `1,8 s + 0,25 s je Wort`, aufgerundet auf
+ein Vielfaches der Phrase. „Malmö / Tag 11 · 24. Juli" sind fünf Wörter →
+3,05 s → 8 Beats (3,2 s) genügen; 12 Beats geben der Zäsur mehr Ruhe. Der
+Default bleibt 12, der Generator warnt nur, wenn die Untergrenze unterschritten
+wird.
 
-**Standzeit.** `beats: 12` sind bei 152 BPM 4,7 s. Als Untergrenze gilt eine
-Lesezeitregel: `1,8 s + 0,25 s je Wort`, aufgerundet auf ein Vielfaches der
-Phrase. „Malmö / Tag 11 · 24. Juli" sind fünf Wörter → 3,05 s → 8 Beats (3,2 s)
-genügen; 12 Beats geben der Zäsur mehr Ruhe. Der Default bleibt 12, der
-Generator warnt nur, wenn die Untergrenze unterschritten wird.
+### Entscheidung 3b — Titelfolien in `free`-Regionen und in Stille
+
+Eine `free`-Region entsteht aus zwei sehr verschiedenen Gründen
+(`models.py:215`): da läuft Musik, die sich nur nicht rastern ließ
+(`quiet: false`), oder da ist tatsächlich nichts zu hören (`quiet: true`). Für
+Titelfolien gilt in beiden Fällen dieselbe Zusage: **es gilt die Standardlänge
+der Bildanzeige.** Eine Titelfolie steht dort genauso lange wie die Bilder um
+sie herum, mit derselben Präzedenz wie im `RegionGrid` (`planner.py:82`) —
+`Region.still_seconds` vor `Defaults.still_seconds`. Phrasen gibt es hier
+nicht; die Ausrichtung aus Entscheidung 3 entfällt ersatzlos.
+
+Im Regelfall stellt sich das von selbst ein: `default_end` (`planner.py:98`)
+liefert die nächste Kante der `linspace`-Kachelung, und die **ist** die
+Standardlänge. Es gibt aber genau einen Fall, in dem es still schiefgeht:
+
+> **Lange Stille kachelt nicht.** Ist eine Region `quiet` und länger als
+> `hold_seconds` (12 s), liefert `_free_count` (`planner.py:136`) **`n = 1`** —
+> die ganze Stille ist *ein* Slot, damit dort bewusst ein ruhiges Einzelbild
+> stehen bleiben kann. Eine Titelfolie an dieser Stelle bekäme die **gesamte**
+> Stille: zwanzig Sekunden Standbild mit „Malmö" darauf.
+
+Der naheliegende Rettungsweg über `dur:` führt ohne Zutun in dieselbe Falle:
+`snap_back` ist per Default an, und `snap_up` (`planner.py:119`) sucht die
+nächste Kante — in einer `hold`-Region gibt es genau eine, nämlich das
+Regionsende. Der Override würde also wieder auf die volle Länge aufgerundet.
+
+**Regel, die `build` deshalb umsetzt.** Beides sind vorhandene Felder; der
+Planer bleibt unangetastet:
+
+```yaml
+- {type: title, title: Malmö, subtitle: auto, bg: auto,
+   dur: 4.0, snap_back: false}     # lange Stille: Standardlänge, nicht aufrunden
+```
+
+| Lage | Was `build` schreibt |
+|---|---|
+| `free`, ohne `hold` | nichts — die Kachelung liefert die Standardlänge von selbst |
+| `free`, mit `hold` (lange Stille) | `dur: still_seconds` **und** `snap_back: false` |
+| Region kürzer als die Standardlänge | Folie wird am Regionsende geklemmt (`plan_slots`, `region_end_frame`); unterschreitet das die Lesezeit, folgt eine Warnung mit dem Vorschlag, das Kapitel eine Region weiter zu setzen |
+
+Der Rest der Stille fällt damit an das folgende Bild, das seinen `hold`-Status
+behält und ruhig stehen bleibt — genau die Aufteilung, die gemeint ist: vier
+Sekunden Titel, sechzehn Sekunden Ruhe. Die Lesezeitregel bleibt auch hier die
+Untergrenze: liegt `1,8 s + 0,25 s je Wort` über `still_seconds`, schreibt
+`build` den größeren Wert und vermerkt es im Bericht. Sichtbar in der Datei und
+von Hand korrigierbar, nicht stillschweigend.
+
+**Umgekehrt ist die Stille der beste Platz für eine Zäsur, den es gibt.** Die
+Pause zwischen zwei Tracks ist bereits eine musikalische Kapitelgrenze; die
+Track-Grenzen stehen als `manifest.audio.tracks` (`models.py:127`) ohnehin im
+Manifest und sind Seed der Regionserkennung. Dort fällt der Ortswechsel mit
+einem Wechsel im Ton zusammen, und die Folie muss den Fluss nicht
+unterbrechen — an dieser Stelle ist ohnehin einer. `slideshow chapters`
+(Entscheidung 6) schlägt solche Punkte deshalb mit vor.
+
+Zwei Randbemerkungen zur Wechselwirkung mit der Beat-Erkennung:
+
+- Nach dem Umbau aus `briefing-beat-detection.md` wird ein durchgehender Track
+  in viele kurze Beat-Regionen zerlegt. Eine **Regionsgrenze ist immer eine
+  zulässige Titelposition** — sie ist per Konstruktion eine musikalische
+  Grenze, und die Phrasenrechnung entfällt dort.
+- Eine `free`-Region *mit* Musik (`quiet: false`) ist heute der Normalfall bei
+  langen Tracks. Auch dort greift die Standardlänge; Phrasenlage ist mangels
+  Raster nicht bestimmbar, und `build` sagt das im Bericht, statt eine
+  Genauigkeit vorzutäuschen, die es nicht gibt.
 
 ### Entscheidung 4 — Woher kommt der Hintergrund?
 
@@ -380,6 +448,13 @@ holen:
   zwei aufeinanderfolgenden Aufnahmen *ist* der neue Ort — das treffsicherste
   verfügbare Signal. Erfordert eine kleine Erweiterung in `probe.py`
   (`gps: [lat, lon]` am `MediaItem`).
+- **Pause im Ton.** Die Kapitel hängen an Medien-IDs, die Stille aber an der
+  Zeitachse — beides trifft erst nach dem Planen aufeinander. `build` prüft
+  deshalb im Nachgang, wo ein Kapitel landet, und schlägt vor, es um ein oder
+  zwei Bilder zu verschieben, wenn dadurch die Zäsur in eine `quiet`-Region
+  oder auf eine Regionsgrenze fällt (Entscheidung 3b). Das ist ein Vorschlag im
+  Bericht, keine automatische Verschiebung: welches Foto zu welcher Stadt
+  gehört, weiß das Werkzeug nicht.
 
 Die **Überschrift bleibt leer** und muss ausgefüllt werden: ein Ortsname lässt
 sich ohne Netz nicht aus Koordinaten gewinnen, und ein geratener Name ist
@@ -459,8 +534,11 @@ weiterhin sichtbar, hängt aber nicht mehr an der Position.
 7. **`build.py`:** `chapters.yaml` einlesen, Kapitel an Medien-IDs auflösen,
    Titel-Intents an der richtigen Stelle in die Intent-Liste einsetzen,
    Phrasenlage rechnen und als `beats:` des Vorgängers materialisieren
-   (Entscheidung 3c), Fokusblende und gekoppelte `KBSpec` erzeugen
-   (Entscheidung 5d). `_segment_from_slot` muss Titel als Titel zurückschreiben.
+   (Entscheidung 3c), in `free`-Regionen stattdessen `dur:` und — bei `hold` —
+   `snap_back: false` schreiben (Entscheidung 3b), Fokusblende und gekoppelte
+   `KBSpec` erzeugen (Entscheidung 5d). `_segment_from_slot` muss Titel als
+   Titel zurückschreiben, samt `dur`/`snap_back`; sonst kippt die Folie beim
+   nächsten Rundlauf zurück in die volle Stille.
 8. **Assets sicherstellen.** `render` darf nicht darauf vertrauen, dass `build`
    gelaufen ist — `slideshow render edit.yaml` mit von Hand geändertem Text ist
    ein unterstützter Weg. Also eine idempotente `ensure_title_assets(edit)` zu
@@ -523,23 +601,30 @@ Nicht anzufassen: `planner.py` (außer der Zählung in `coverage`), `beats.py`,
 - **T4 — Phrasenlage.** Jede Titelfolie in einer Beat-Region beginnt auf einem
   Vielfachen von `phrase_beats` ab `Region.offset`, ± 1 Frame. Gemessen an der
   Fixture mit bekanntem Beat-Fahrplan (120 und 90 BPM).
-- **T5 — Lesbarkeit.** Auf dem erzeugten Asset liegt das Kontrastverhältnis
+- **T5 — Stille.** Eine Titelfolie in einer `quiet`-Region von 20 s steht
+  `still_seconds` lang (± 1 Frame), **nicht** 20 s; das folgende Bild erhält
+  den Rest und behält `hold`. Geprüft an der Fixture, deren 6-s-Lücke
+  (`hold_seconds` = 12 s, also *ohne* `hold`) zusätzlich den Normalfall
+  abdeckt: dort greift die Kachelung ohne jeden Override. Gegenprobe: mit
+  `snap_back: true` **muss** der Test fehlschlagen — sonst prüft er die Falle
+  aus Entscheidung 3b gar nicht.
+- **T6 — Lesbarkeit.** Auf dem erzeugten Asset liegt das Kontrastverhältnis
   zwischen Textfarbe und der gemessenen mittleren Leuchtdichte unter der
   Textbounding-Box bei ≥ 4,5:1 — geprüft gegen ein absichtlich helles
   Testbild (weißer Verlauf) und ein dunkles.
-- **T6 — Safe Area.** Die Bounding-Box beider Zeilen liegt vollständig
+- **T7 — Safe Area.** Die Bounding-Box beider Zeilen liegt vollständig
   innerhalb der um `safe` eingerückten Fläche; Überlauf einer langen
   Überschrift führt zu automatischer Verkleinerung bis 0,7 × und danach zu
   einer Warnung — nicht zu abgeschnittenem Text.
-- **T7 — Fehlende Schrift.** Ohne auffindbare Schriftdatei bricht `build` mit
+- **T8 — Fehlende Schrift.** Ohne auffindbare Schriftdatei bricht `build` mit
   einer Meldung samt Installationsbefehl ab, nicht mit einem Traceback; und
   `doctor` hat es vorher gemeldet.
-- **T8 — Rundlauf.** `build` → `edit.yaml` → `plan_from_edit` → erneutes
+- **T9 — Rundlauf.** `build` → `edit.yaml` → `plan_from_edit` → erneutes
   Schreiben liefert dieselbe Datei. Eine Titelfolie darf beim Rundlauf nicht zum
   gewöhnlichen Standbild werden (Erweiterung von `tests/test_roundtrip.py`).
-- **T9 — MLT.** Der Kdenlive-Export enthält die Titelfolie als Clip mit
+- **T10 — MLT.** Der Kdenlive-Export enthält die Titelfolie als Clip mit
   identischer Länge und Position; `--reimport` bleibt heil.
-- **T10 — Suite.** `pytest` bleibt grün bis auf die bekannte Vorbelastung:
+- **T11 — Suite.** `pytest` bleibt grün bis auf die bekannte Vorbelastung:
   `test_hdr_wird_erkannt`, `test_tonemapping_steht_vor_dem_scale` und
   `test_ohne_tonemapper_greift_die_naeherung` in `tests/test_media.py`
   scheitern bereits vor dieser Arbeit unter ffmpeg 8.1.2. Keine **neuen**
@@ -556,8 +641,15 @@ Nicht anzufassen: `planner.py` (außer der Zählung in `coverage`), `beats.py`,
   `RENDER_VERSION`.
 - **Deckungsrechnung.** Jede Titelfolie kostet einen Slot Musik. Bei fünf
   Kapiteln fallen fünf Fotos hinten herunter, und der Hinweis „5 Medien passen
-  nicht mehr" nennt heute nicht den Grund. T-Punkt 9 der Umsetzung adressiert
+  nicht mehr" nennt heute nicht den Grund. Schritt 9 der Umsetzung adressiert
   das; wird es vergessen, ist der Bericht irreführend.
+- **Stille verschluckt die Folie.** Der Fehler aus Entscheidung 3b ist der
+  unangenehmste im ganzen Vorhaben: er tritt nur bei `quiet`-Regionen über
+  `hold_seconds` auf, wirft keine Fehlermeldung, und das Ergebnis ist ein
+  zwanzig Sekunden stehender Titel mitten im Film. Wer `dur:` setzt und
+  `snap_back: false` vergisst, bekommt exakt dasselbe. Deshalb ist T5 mit
+  Gegenprobe formuliert — ein Test, der auch mit `snap_back: true` grün bleibt,
+  prüft die Falle nicht.
 - **Phrasenlage veraltet still.** Materialisiert man die Ausrichtung als
   `beats:` (Entscheidung 3c), zerfällt sie bei jeder späteren Änderung davor.
   Die Prüfung in `validate_edit` ist deshalb nicht optional, sondern der
@@ -580,7 +672,7 @@ Nicht anzufassen: `planner.py` (außer der Zählung in `coverage`), `beats.py`,
 ## Anhang A — Kontrastmessung
 
 Läuft im Generator, bevor der Text gesetzt wird, und ist zugleich der Kern von
-Abnahmekriterium T5.
+Abnahmekriterium T6.
 
 ```python
 def _relative_luminance(rgb: tuple[float, float, float]) -> float:
@@ -662,3 +754,8 @@ Vorhabens sich nicht automatisiert prüfen lässt:
 4. **Bildsprache.** Titelhintergrund und Hochformat-Komposit nebeneinander:
    dieselbe Unschärfe, dieselbe Abdunklung? Wenn nicht, wirken sie wie zwei
    verschiedene Filme.
+5. **Titel in der Stille.** Ein Kapitel bewusst in eine Pause zwischen zwei
+   Tracks legen und die Stelle im Ganzen ansehen: Steht die Folie so lange wie
+   die Bilder ringsum, und übernimmt danach das ruhige Einzelbild? Das ist die
+   Sichtprobe zu T5 — die Zahl allein sagt nicht, ob die Ruhe nach dem Titel
+   trägt oder ob der Film an dieser Stelle stehenbleibt.
