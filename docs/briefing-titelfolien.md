@@ -1,7 +1,8 @@
 # Briefing: Titel- und Zwischenfolien
 
-**Status:** offen · **Betrifft:** neues Modul `src/slideshow/titles.py`,
-`models.py`, `build.py`, `cli.py` · **Vorbedingung:** keine
+**Status:** entschieden, Umsetzung offen · **Betrifft:** neues Modul
+`src/slideshow/titles.py`, `models.py`, `build.py`, `cli.py`,
+`docs/edit-yaml.md` · **Vorbedingung:** keine
 
 Eine Urlaubs-Slideshow über drei Wochen und vier Städte ist ohne Gliederung ein
 Strom aus 100 gleichwertigen Bildern. Was fehlt, ist die Zäsur: *hier endet
@@ -88,7 +89,7 @@ Geschmacksfrage ein Abnahmekriterium (T6). Der Messcode steht im Anhang.
 
 **Zweite Zeile automatisch.** `subtitle: auto` formatiert den
 Aufnahmezeitpunkt des folgenden Bildes aus dem Manifest
-(`capture_time`, `probe.py:538` liefert die Chronologie ohnehin schon):
+(`capture_time`, `probe.py:543` liefert die Chronologie ohnehin schon):
 *„Tag 11 · 24. Juli"*. Der Tageszähler ergibt sich aus dem ersten
 Aufnahmedatum des Projekts. Die Überschrift bleibt Handarbeit — einen
 Ortsnamen kann das Werkzeug nicht erfinden, und es soll es auch nicht
@@ -139,7 +140,12 @@ defaults:
 
 ---
 
-## 4. Offene Entscheidungen
+## 4. Entscheidungen
+
+**Alle sieben Entscheidungen sind gefallen, jeweils der Empfehlung folgend.**
+Die verworfenen Alternativen bleiben mit ihrer Begründung stehen — wer später
+an einer Stelle zweifelt, soll nachlesen können, was dagegen sprach, statt die
+Abwägung neu zu führen.
 
 ### Entscheidung 1 — Wo entsteht die Folie?
 
@@ -185,7 +191,7 @@ Alpha); der Renderer legt sie mit `overlay` übereinander.
   dem *laufenden* ersten Foto, ganz ohne eigene Folie.
 - **dagegen:** Der Standbild-Pfad in `render.py` müsste von `-vf` auf
   `-filter_complex` umgestellt werden, und zwar auch im xfade-Pfad, der bereits
-  zwei Ströme mischt (`render.py:141 ff.`). Das ist der einzige Vorschlag hier,
+  zwei Ströme mischt (`render.py:172 ff.`). Das ist der einzige Vorschlag hier,
   der echten Umbau am Renderer bedeutet.
 
 > **Empfehlung: (a) — aber der Generator wird von Anfang an zweischichtig
@@ -199,14 +205,14 @@ Alpha); der Renderer legt sie mit `overlay` übereinander.
 ### Entscheidung 2 — Eigener Segmenttyp oder Feld am Still?
 
 **(a) `type: title` als eigener Typ** *(Empfehlung)* — neue Klasse
-`TitleSegment` in der `Segment`-Union (`models.py:388`).
+`TitleSegment` in der `Segment`-Union (`models.py:421`).
 
 - **dafür:** liest sich in der YAML-Datei als das, was es ist. `extra="forbid"`
   erzwingt saubere Felder; eine Folie ohne `title` scheitert beim Laden mit
   Pfad und Zeile statt beim Rendern mit einem leeren Bild.
 - **dagegen:** drei Stellen müssen mitwandern, sonst wird es unangenehm:
-  `_DISCRIMINATORS` (`models.py:502`, sonst steht `segments[41].title.title`
-  im Fehlertext), `_segment_from_slot` (`build.py:129`, sonst wird eine
+  `_DISCRIMINATORS` (`models.py:535`, sonst steht `segments[41].title.title`
+  im Fehlertext), `_segment_from_slot` (`build.py:169`, sonst wird eine
   Titelfolie beim Rundlauf zum gewöhnlichen Still degradiert — das fängt
   `tests/test_roundtrip.py` ab) und der `StillSegment`-Zweig im MLT-Export
   (`mlt.py:299`).
@@ -322,16 +328,37 @@ einem Wechsel im Ton zusammen, und die Folie muss den Fluss nicht
 unterbrechen — an dieser Stelle ist ohnehin einer. `slideshow chapters`
 (Entscheidung 6) schlägt solche Punkte deshalb mit vor.
 
+**Ohne Tonspur — und warum `material_seconds` Titel mitzählen muss.** Seit
+der Musik-optional-Unterstützung bestimmt bei fehlender Tonspur das *Material*
+die Laufzeit: `_timeline_length` (`build.py:106`) ruft `material_seconds`
+(`planner.py:575`), und `fit_regions_to` (`planner.py:611`) zieht die
+Regionenkarte auf diese Länge nach. Die Karte besteht dann aus einer einzigen
+`free`-Region mit `quiet: false` — für Titelfolien also der unkomplizierte
+Fall aus der Tabelle oben, Standardlänge ohne jeden Override.
+
+Eine Falle steckt trotzdem darin: `material_seconds` rechnet mit `n_media` —
+der Zahl der Medien aus dem Manifest. **Eine Titelfolie ist kein Medium, belegt
+aber einen Slot.** Zählt man sie nicht mit, ist die Materiallänge je Titel um
+einen Standard-Slot zu kurz. Mit Tonspur kippt dadurch die Abwägung „Musik oder
+Material gibt die Laufzeit vor" an der Toleranzgrenze `standard_slot`
+(`planner.py:602`); ohne Tonspur fehlt dem Film schlicht je Titel dessen
+Standzeit, und die zugeschnittene Karte deckt die Timeline nicht mehr. `build`
+muss `n_media` deshalb um die Kapitel erhöhen, bevor es `_timeline_length`
+ruft — eine Zeile, die man genau einmal übersieht (Abnahmekriterium T11).
+
 Zwei Randbemerkungen zur Wechselwirkung mit der Beat-Erkennung:
 
-- Nach dem Umbau aus `briefing-beat-detection.md` wird ein durchgehender Track
-  in viele kurze Beat-Regionen zerlegt. Eine **Regionsgrenze ist immer eine
-  zulässige Titelposition** — sie ist per Konstruktion eine musikalische
-  Grenze, und die Phrasenrechnung entfällt dort.
-- Eine `free`-Region *mit* Musik (`quiet: false`) ist heute der Normalfall bei
-  langen Tracks. Auch dort greift die Standardlänge; Phrasenlage ist mangels
-  Raster nicht bestimmbar, und `build` sagt das im Bericht, statt eine
-  Genauigkeit vorzutäuschen, die es nicht gibt.
+- Seit `briefing-beat-detection.md` umgesetzt ist, zerfällt ein durchgehender
+  Track in viele kurze Beat-Regionen (`MAX_FIT_WINDOW`, 20 s, danach
+  `merge_adjacent_beats`). Eine **Regionsgrenze ist immer eine zulässige
+  Titelposition** — sie ist per Konstruktion eine musikalische Grenze, und die
+  Phrasenrechnung entfällt dort. Das macht die Platzierung *einfacher*, nicht
+  schwerer.
+- Die Abdeckung liegt bei 88,2 %; der Rest sind `free`-Regionen *mit* Musik
+  (`quiet: false`) — beim Testtrack der rhythmisch dünne Ausklang. Auch dort
+  greift die Standardlänge; Phrasenlage ist mangels Raster nicht bestimmbar,
+  und `build` sagt das im Bericht, statt eine Genauigkeit vorzutäuschen, die es
+  nicht gibt.
 
 ### Entscheidung 4 — Woher kommt der Hintergrund?
 
@@ -409,6 +436,15 @@ fehlt nur die Vorgabe, die die beiden `KBSpec` aneinander koppelt. `build`
 schreibt sie beim Erzeugen der Fokusblende explizit in beide Segmente, damit sie
 sichtbar und korrigierbar bleibt.
 
+Ein Nebengewinn, der die Kopplung zusätzlich rechtfertigt: `CLAUDE.md` führt
+unter den offenen Baustellen den **Schwenk am Zoomanfang** — ein Hineinzoom
+beginnt bei `z = 1,0`, dort ist der Ausschnitt das ganze Bild, und die
+Bildmitte kann sich nicht bewegen; rund die Hälfte des geplanten Schwenks
+bleibt unsichtbar. Setzt die Fokusblende das Folgebild auf den Endzoom der
+Titelfolie (im Beispiel 1,06 statt 1,0), fängt es *oberhalb* der Klemmung an
+und schwenkt von der ersten Sekunde an sichtbar. Für die Bilder direkt nach
+einem Kapitelanfang ist das Problem damit nebenbei behoben.
+
 > **Empfehlung: (d) für `bg: auto`, sonst (b).** Beides erzeugt `build`
 > automatisch; beides steht danach als gewöhnliche `xfade`-Segmente in der
 > Datei und lässt sich löschen oder ändern.
@@ -441,7 +477,7 @@ Anwender ausfüllt. Zwei Signale liegen bereits im Manifest oder sind billig zu
 holen:
 
 - **Zeitlücke.** `capture_time` steht im Manifest, `chronological()`
-  (`probe.py:538`) sortiert danach. Eine Lücke > 8 h ist eine Tagesgrenze,
+  (`probe.py:543`) sortiert danach. Eine Lücke > 8 h ist eine Tagesgrenze,
   eine Lücke > 20 h fast immer ein Ortswechsel. Zehn Zeilen Code.
 - **Ortssprung.** GPS steht in den EXIF-Daten der meisten Handyfotos; `probe`
   liest EXIF ohnehin (optional über exiftool). Ein Sprung > 30 km zwischen
@@ -474,8 +510,11 @@ Abhängigkeit; erwähnt, weil es die lästigste Handarbeit vollständig erledigt
 
 Ein Fund, der ohne diese Arbeit nicht auffällt, mit ihr aber sofort:
 
-`plan_motion` (`kenburns.py:62`) leitet Zoomrichtung und Schwenkrichtung aus
-`index % 2` bzw. `index % 8` ab — dem **Slot-Index**. Wird eine Titelfolie an
+`plan_motion` (`kenburns.py:73`) leitet Zoomrichtung und Schwenkrichtung aus
+`index % 2` bzw. `index % 8` ab — dem **Slot-Index**. Der Umbau des Schwenks
+auf `pan_rate`/`pan_total` hat daran nichts geändert; er hat die Kopplung nur
+ausdrücklich gemacht („deterministisch nach Segmentindex durchgereicht",
+`_DIRECTIONS`). Wird eine Titelfolie an
 Position 41 eingefügt, verschiebt sich der Index **jedes folgenden Bildes** um
 eins. Damit ändert sich jede folgende Bewegung, damit jeder folgende Cache-Key,
 damit rendert der halbe Film neu. Die Zusage aus Prinzip 2 — „ein korrigiertes
@@ -544,11 +583,17 @@ weiterhin sichtbar, hängt aber nicht mehr an der Position.
    ein unterstützter Weg. Also eine idempotente `ensure_title_assets(edit)` zu
    Beginn von `render` und `export-mlt`, nach dem `_is_fresh`/`_mark_fresh`-
    Muster aus `preprocess.py:61`. Kostet bei unverändertem Text nichts.
-9. **`coverage`** (`planner.py:547`) zählt Titel getrennt aus. Sonst meldet der
+9. **`coverage`** (`planner.py:551`) zählt Titel getrennt aus. Sonst meldet der
    Bericht „12 Medien passen nicht mehr in die Musik", ohne zu sagen, dass drei
    davon Titelfolien sind, die man nicht einfach weglassen möchte.
 10. **`mlt.py`:** Titelfolien als gewöhnliche Standbild-Producer exportieren
     (bei Umsetzungsvariante (a) fällt das von selbst an, es ist ein JPEG).
+11. **Laufzeitrechnung.** `n_media` in `_timeline_length` um die Kapitel
+    erhöhen (Entscheidung 3b, Abschnitt „Ohne Tonspur").
+12. **Dokumentation.** `docs/edit-yaml.md` beschreibt die Schlüssel der
+    Edit-List und ist damit Teil der Umsetzung, nicht Nacharbeit: `type: title`
+    mit allen Feldern und der `defaults.title`-Block. Dazu die Zeile in der
+    Tabelle „Offene Baustellen" in `CLAUDE.md`.
 
 **Stufe 3 — die Kapitelerkennung**
 
@@ -566,19 +611,23 @@ Nicht anzufassen: `planner.py` (außer der Zählung in `coverage`), `beats.py`,
 | Ort | Rolle | Änderung |
 |---|---|---|
 | `titles.py` (neu) | Folienerzeugung | Layout, Schriftfindung, Kontrastmessung, Cache-Key |
-| `models.py:338` | `StillSegment` | Vorbild für `TitleSegment` |
-| `models.py:388` | `Segment`-Union | `TitleSegment` aufnehmen |
-| `models.py:502` | `_DISCRIMINATORS` | `"title"` ergänzen, sonst falsche Fehlerpfade |
-| `models.py:316` | `Defaults` | `title:`-Block |
+| `models.py:371` | `StillSegment` | Vorbild für `TitleSegment` |
+| `models.py:421` | `Segment`-Union | `TitleSegment` aufnehmen |
+| `models.py:535` | `_DISCRIMINATORS` | `"title"` ergänzen, sonst falsche Fehlerpfade |
+| `models.py:345` | `Defaults` | `title:`-Block |
 | `preprocess.py:79` | `process_image` | Blur/Abdunklung als Parameter, Wiederverwendung für den Hintergrund |
 | `preprocess.py:141` | `_portrait_composite` | Vorlage für die Blur-Ebene (Shrink-8-Trick) |
-| `build.py:63` | Intent-Erzeugung | Kapitel einsetzen |
-| `build.py:108` | `_segments_from_plan` | Fokusblende, gekoppelte `KBSpec` |
-| `build.py:129` | `_segment_from_slot` | Titel als Titel zurückschreiben (Rundlauf!) |
-| `build.py:297` | `validate_edit` | Phrasenlage prüfen und warnen |
-| `render.py:421` | `render` | `ensure_title_assets` voranstellen |
-| `planner.py:547` | `coverage` | Titel getrennt zählen |
-| `kenburns.py:62` | `plan_motion` | Entscheidung 7 |
+| `build.py:59` | Intent-Erzeugung | Kapitel einsetzen |
+| `build.py:148` | `_segments_from_plan` | Fokusblende, gekoppelte `KBSpec` |
+| `build.py:169` | `_segment_from_slot` | Titel als Titel zurückschreiben (Rundlauf!) |
+| `build.py:337` | `validate_edit` | Phrasenlage prüfen und warnen |
+| `render.py:460` | `render` | `ensure_title_assets` voranstellen |
+| `planner.py:551` | `coverage` | Titel getrennt zählen |
+| `planner.py:575` | `material_seconds` | Titel zählen als Slot; Aufrufer korrigieren |
+| `build.py:106` | `_timeline_length` | `n_media` um die Kapitel erhöhen |
+| `docs/edit-yaml.md` | Schlüsselreferenz | `type: title`, `defaults.title` |
+| `CLAUDE.md` | Baustellentabelle | Zeile für dieses Vorhaben |
+| `kenburns.py:73` | `plan_motion` | Entscheidung 7 |
 | `mlt.py:299` | `StillSegment`-Zweig | Titel mitnehmen |
 | `doctor.py:561` | Fähigkeitsprüfung | Zeile „Schrift" |
 | `cli.py` | Unterkommandos | `chapters`, `build --chapters` |
@@ -624,7 +673,11 @@ Nicht anzufassen: `planner.py` (außer der Zählung in `coverage`), `beats.py`,
   gewöhnlichen Standbild werden (Erweiterung von `tests/test_roundtrip.py`).
 - **T10 — MLT.** Der Kdenlive-Export enthält die Titelfolie als Clip mit
   identischer Länge und Position; `--reimport` bleibt heil.
-- **T11 — Suite.** `pytest` bleibt grün bis auf die bekannte Vorbelastung:
+- **T11 — Ohne Tonspur.** Ein Projekt ohne Musik mit drei Titelfolien ergibt
+  eine Timeline, die um genau die drei Titelstandzeiten länger ist als dasselbe
+  Projekt ohne Titel — und `validate_continuity` bleibt grün, die Karte deckt
+  also weiterhin lückenlos ab.
+- **T12 — Suite.** `pytest` bleibt grün bis auf die bekannte Vorbelastung:
   `test_hdr_wird_erkannt`, `test_tonemapping_steht_vor_dem_scale` und
   `test_ohne_tonemapper_greift_die_naeherung` in `tests/test_media.py`
   scheitern bereits vor dieser Arbeit unter ffmpeg 8.1.2. Keine **neuen**
