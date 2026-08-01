@@ -32,7 +32,7 @@ from xml.dom import minidom
 from .build import plan_from_edit
 from .errors import SlideshowError
 from .kenburns import plan_motion
-from .models import EditList, Manifest, StillSegment, XfadeSegment
+from .models import EditList, Manifest, StillSegment, TitleSegment, XfadeSegment
 from .paths import Project
 from .planner import Plan, visible_span
 
@@ -296,7 +296,9 @@ def reimport_mlt(project: Project, path: Path, edit: EditList,
         old = plan.slots[slot_i].frames / fps if slot_i < len(plan.slots) else None
         if old is not None and abs(new_dur - old) < 1.0 / fps:
             continue
-        if isinstance(seg, StillSegment):
+        if isinstance(seg, (StillSegment, TitleSegment)):
+            # Eine Titelfolie ist beim Reimport ein Standbild wie jedes andere:
+            # sie traegt dieselben Dauerfelder, nur keinen `src`.
             seg.dur = new_dur
             seg.beats = None
         else:

@@ -17,21 +17,26 @@ Wer die aufgeloeste Timeline sehen will, bekommt sie als Report bzw. in
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import logging
+import math
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import EDIT_VERSION
 from .errors import SchemaError, SlideshowError
 from .kenburns import plan_motion
-from .models import (BeatMap, ClipSegment, Defaults, EditList, KBSpec, Manifest,
-                     Region, StillSegment, XfadeSegment)
+from .models import (BeatMap, Chapter, ClipSegment, Defaults, EditList, KBSpec,
+                     Manifest, MediaItem, Region, StillSegment, TitleSegment,
+                     XfadeSegment)
 from .paths import Project
 from .planner import (Coverage, Intent, Plan, RenderSegment, apply_transitions,
-                      coverage, fit_regions_to, material_seconds, plan_slots,
-                      resolve, standard_slot, to_frame, to_time,
-                      validate_continuity, visible_span)
+                      coverage, default_transition_seconds, fit_regions_to,
+                      material_seconds, plan_slots, resolve, standard_slot,
+                      to_frame, to_time, validate_continuity, visible_span)
 from .probe import chronological
+from .titles import reading_seconds, resolved, title_asset
 
 log = logging.getLogger("slideshow.build")
 
@@ -43,7 +48,9 @@ log = logging.getLogger("slideshow.build")
 def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
                     defaults: Defaults | None = None, fps: float | None = None,
                     size: tuple[int, int] = (3840, 2160),
-                    order: list[str] | None = None) -> tuple[EditList, Plan, Coverage]:
+                    order: list[str] | None = None,
+                    chapters: list[Chapter] | None = None
+                    ) -> tuple[EditList, Plan, Coverage]:
     """Erzeugt ``edit.yaml`` aus Manifest und Regionenkarte."""
     defaults = defaults or Defaults()
     fps = float(fps or manifest.fps_suggestion)
@@ -74,20 +81,31 @@ def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
         raise SlideshowError("Keine vorverarbeiteten Medien gefunden. "
                              "`slideshow preprocess` zuerst laufen lassen.")
 
+    kapitel_warnungen = insert_titles(intents, chapters or [], media, defaults, size)
+
     # Ob eine Tonspur da ist, entscheidet die *Datei*, nicht die Dauer: die
     # Karte fuer ein Projekt ohne Ton traegt zwar eine Laenge, aber keinen Pfad.
     audio_file = manifest.audio.file or beatmap.audio.get("file", "")
     audio_seconds = float(beatmap.audio.get("duration") or manifest.audio.duration or 0.0) \
         if audio_file else 0.0
+    # ``len(intents)`` schliesst die Titelfolien ein — genau deshalb werden sie
+    # *vor* dieser Zeile eingesetzt. Eine Titelfolie ist kein Medium, belegt
+    # aber einen Slot; zaehlte man sie nicht mit, waere die Materiallaenge je
+    # Titel um einen Standard-Slot zu kurz, und ohne Tonspur deckte die
+    # zugeschnittene Regionenkarte die Timeline nicht mehr ab.
     duration, hinweis = _timeline_length(regions, len(intents), defaults,
                                          audio_seconds=audio_seconds)
     regions = fit_regions_to(regions, duration)
     total_frames = to_frame(duration, fps)
 
-    plan = plan_slots(regions, intents, defaults, fps=fps, total_frames=total_frames)
+    plan, lage_warnungen = plan_with_titles(regions, intents, defaults, fps=fps,
+                                            total_frames=total_frames)
     explicit = None if defaults.xfade.auto else {}
     apply_transitions(plan, defaults, explicit=explicit)
+    if defaults.xfade.auto:
+        apply_transitions(plan, defaults, explicit=_title_transitions(plan, defaults))
     clamp_transitions_for_handles(plan, manifest)
+    plan.warnings.extend(kapitel_warnungen + lage_warnungen)
     if hinweis:
         plan.warnings.insert(0, hinweis)
     cov = coverage(plan, defaults)
@@ -145,6 +163,441 @@ def _region_dict(r: Region) -> dict:
     return d
 
 
+# --------------------------------------------------------------------------
+# Titelfolien (docs/briefing-titelfolien.md)
+#
+# Der Planer weiss von Titeln nichts: eine Titelfolie ist fuer ihn ein Still
+# mit generiertem ``src``. Alles, was sie besonders macht — Phrasenlage,
+# Verhalten in langer Stille, Fokusblende —, wird hier in *gewoehnliche
+# Absicht* uebersetzt und steht danach sichtbar in ``edit.yaml``. Wer eine
+# dieser Rechnungen nicht mag, ueberschreibt sie in der Datei von Hand.
+# --------------------------------------------------------------------------
+
+#: Wie oft die Lage der Titel nachgerechnet wird. Jede Korrektur verschiebt
+#: alles Folgende, also auch den naechsten Titel — deshalb ueberhaupt eine
+#: Schleife. Zwei Durchgaenge genuegen in der Praxis; die Grenze verhindert
+#: nur, dass zwei Titel sich gegenseitig hin- und herschieben.
+_MAX_LAGE_PASSES = 4
+
+_MONATE = ["Januar", "Februar", "Maerz", "April", "Mai", "Juni", "Juli",
+           "August", "September", "Oktober", "November", "Dezember"]
+
+
+@dataclass
+class _Lage:
+    """Buchhaltung waehrend der Lagekorrektur.
+
+    Zwei Dinge muessen ueber die Durchgaenge hinweg ueberleben. **Meldungen**
+    sind nach (Thema, Titel) verschluesselt, damit ein spaeterer Durchgang seine
+    eigene Aussage ueberschreibt statt sie zu verdoppeln — und damit die Meldung
+    ueber eine Korrektur stehen bleibt, auch wenn der letzte Durchgang nichts
+    mehr zu tun findet. **Ausgangswerte** braucht es, weil der Bericht sonst die
+    letzte Zwischenstufe meldet ("von 9 auf 7") statt der tatsaechlichen
+    Aenderung — und bei einer Korrektur, die sich unterwegs selbst aufhebt,
+    ueberhaupt keine Aenderung zu melden ist.
+    """
+
+    meldungen: dict[tuple[str, str], str] = field(default_factory=dict)
+    ausgang: dict[int, float | None] = field(default_factory=dict)
+
+    def merke(self, intent: Intent) -> None:
+        self.ausgang.setdefault(intent.index, intent.beats)
+
+    def vorher(self, intent: Intent) -> float | None:
+        return self.ausgang.get(intent.index, intent.beats)
+
+
+def insert_titles(intents: list[Intent], chapters: list[Chapter],
+                  media: list[MediaItem], defaults: Defaults,
+                  size: tuple[int, int]) -> list[str]:
+    """Setzt die Kapitel als Titel-Intents in die Medienfolge ein.
+
+    Aufgeloest wird hier alles, was spaeter nicht mehr zu ermitteln ist:
+    ``bg: auto`` auf das erste Bild des neuen Abschnitts und ``subtitle: auto``
+    auf dessen Aufnahmedatum. Beides landet als konkreter Wert in ``edit.yaml``
+    — sichtbar und von Hand korrigierbar statt als Zauberei im Code.
+    """
+    warnungen: list[str] = []
+    if not chapters:
+        return warnungen
+
+    pos_von_src = {i.src: p for p, i in enumerate(intents)}
+    verwendet = [m for m in media if m.cache_path in pos_von_src]
+    erster_tag = _erster_aufnahmetag(verwendet)
+
+    aufgeloest: list[tuple[int, Chapter]] = []
+    for kap in chapters:
+        if kap.at is not None:
+            aufgeloest.append((max(0, min(int(kap.at), len(verwendet))), kap))
+            continue
+        treffer = next((p for p, m in enumerate(verwendet) if m.id == kap.before), None)
+        if treffer is None:
+            raise SchemaError(
+                f"Kapitel {kap.title!r} verweist auf die Medien-ID {kap.before!r}, "
+                f"die es nicht gibt (oder die kein Zwischenprodukt hat). "
+                f"IDs stehen im Manifest.", path="chapters")
+        aufgeloest.append((treffer, kap))
+    # Stabil nach Position: sonst haengt bei zwei Kapiteln an derselben Stelle
+    # die Reihenfolge davon ab, wie die Datei geschrieben wurde.
+    aufgeloest.sort(key=lambda x: x[0])
+
+    for versatz, (pos, kap) in enumerate(aufgeloest):
+        folgebild = next((m for m in verwendet[pos:] if m.kind == "image"), None)
+        bg = kap.bg
+        if bg == "auto":
+            if folgebild is not None:
+                bg = folgebild.cache_path
+            else:
+                bg = "none"
+                warnungen.append(
+                    f"Titel {kap.title!r} steht hinter allem Material — es gibt kein "
+                    f"'naechstes Bild' als Hintergrund. Faellt auf `bg: none` "
+                    f"(Text auf Schwarz) zurueck.")
+        subtitle = kap.subtitle
+        if subtitle == "auto":
+            subtitle = _auto_subtitle(folgebild, erster_tag)
+            if subtitle is None:
+                warnungen.append(
+                    f"Titel {kap.title!r}: `subtitle: auto` braucht einen "
+                    f"Aufnahmezeitpunkt, das folgende Bild hat keinen. Zweite Zeile "
+                    f"bleibt leer.")
+
+        seg = TitleSegment(title=kap.title, subtitle=subtitle, bg=bg,
+                           beats=kap.beats, dur=kap.dur, style=kap.style, kb=kap.kb)
+        intents.insert(pos + versatz,
+                       Intent(kind="still", src=title_asset(seg, defaults, size),
+                              beats=kap.beats, dur=kap.dur, kb=kap.kb, title=seg))
+
+    # Die Positionen der nachfolgenden Intents haben sich verschoben; ``index``
+    # zeigt in Fehlermeldungen auf das Segment und muss stimmen.
+    for p, intent in enumerate(intents):
+        intent.index = p
+    return warnungen
+
+
+def _erster_aufnahmetag(media: list[MediaItem]) -> _dt.date | None:
+    """Tag 1 der Reise — Bezugspunkt des Tageszaehlers in ``subtitle: auto``."""
+    zeiten = [m.capture_time for m in media if m.capture_time]
+    return _dt.datetime.fromtimestamp(min(zeiten)).date() if zeiten else None
+
+
+def _auto_subtitle(item: MediaItem | None, erster_tag: _dt.date | None) -> str | None:
+    """"Tag 11 · 24. Juli" aus dem Aufnahmezeitpunkt des folgenden Bildes."""
+    if item is None or not item.capture_time:
+        return None
+    wann = _dt.datetime.fromtimestamp(item.capture_time)
+    datum = f"{wann.day}. {_MONATE[wann.month - 1]}"
+    if erster_tag is None:
+        return datum
+    tag = (wann.date() - erster_tag).days + 1
+    return f"Tag {tag} · {datum}" if tag >= 1 else datum
+
+
+def plan_with_titles(regions: list[Region], intents: list[Intent], defaults: Defaults,
+                     *, fps: float, total_frames: int) -> tuple[Plan, list[str]]:
+    """Planen, die Lage der Titel korrigieren, neu planen — bis es steht.
+
+    Die Korrektur ist gewoehnliche Absicht (``beats:`` des Vorgaengers,
+    ``dur:``/``snap_back:`` an der Folie selbst), keine Sonderregel im Planer.
+    Nur deshalb bleibt ``planner.py`` von diesem Vorhaben unberuehrt.
+    """
+    def planen() -> Plan:
+        return plan_slots(regions, intents, defaults, fps=fps, total_frames=total_frames)
+
+    plan = planen()
+    if not any(i.title is not None for i in intents):
+        return (plan, [])
+
+    lage = _Lage()
+    for _ in range(_MAX_LAGE_PASSES):
+        if not _adjust_titles(plan, defaults, lage):
+            break
+        plan = planen()
+    else:
+        lage.meldungen[("instabil", "")] = (
+            f"Die Lage der Titelfolien ist nach {_MAX_LAGE_PASSES} Durchgaengen nicht "
+            f"stabil — zwei Kapitel schieben sich gegenseitig. Die Folien stehen "
+            f"trotzdem; `beats:` der Vorgaenger in edit.yaml von Hand nachziehen.")
+    return (plan, list(lage.meldungen.values()))
+
+
+def _adjust_titles(plan: Plan, defaults: Defaults,
+                   lage: _Lage) -> bool:
+    """Standzeit und Lage jeder Titelfolie an ihre Region anpassen."""
+    veraendert = False
+    for i, slot in enumerate(plan.slots):
+        if slot.intent.title is None:
+            continue
+        region = plan.regions[slot.region_index]
+        if region.type == "beat" and region.bpm:
+            veraendert |= _titel_in_beatregion(plan, i, defaults, lage)
+        else:
+            veraendert |= _titel_in_freeregion(plan, i, defaults, lage)
+    return veraendert
+
+
+def _setze(intent: Intent, **felder) -> bool:
+    """Absicht setzen und melden, ob sich etwas geaendert hat."""
+    veraendert = False
+    for name, wert in felder.items():
+        alt = getattr(intent, name)
+        gleich = (abs(alt - wert) < 1e-6 if isinstance(alt, float)
+                  and isinstance(wert, float) else alt == wert)
+        if not gleich:
+            setattr(intent, name, wert)
+            veraendert = True
+    return veraendert
+
+
+def _titel_in_beatregion(plan: Plan, i: int, defaults: Defaults,
+                         lage: _Lage) -> bool:
+    """Standzeit in Beats, und der Anfang auf einer Phrasengrenze."""
+    slot = plan.slots[i]
+    seg = slot.intent.title
+    region = plan.regions[slot.region_index]
+    beat = region.beat_duration()
+
+    if seg.dur is not None:
+        # Explizite Sekunden aus dem Kapitel gewinnen auch hier (Praezedenz 1).
+        veraendert = _setze(slot.intent, beats=None, dur=seg.dur)
+    else:
+        wunsch = float(seg.beats if seg.beats is not None else defaults.title.beats)
+        veraendert = _setze(slot.intent, beats=wunsch, dur=None)
+        lese = reading_seconds(seg)
+        if wunsch * beat < lese - 1e-6:
+            lage.meldungen[("lesezeit", seg.title)] = (
+                f"Titel {seg.title!r} steht {wunsch:g} Beats ({wunsch * beat:.1f} s), "
+                f"die Lesezeit liegt bei {lese:.1f} s. `beats:` erhoehen.")
+
+    return _phrasenlage(plan, i, defaults, lage) or veraendert
+
+
+def _phrasenlage(plan: Plan, i: int, defaults: Defaults,
+                 lage: _Lage) -> bool:
+    """Den **Vorgaenger** so dehnen oder stauchen, dass der Titel auf die Eins faellt.
+
+    Entscheidung 3c: die Ausrichtung wird als ``beats:`` des vorangehenden
+    Bildes materialisiert. Der Planer fuehrt sie danach ohne jede Sonderregel
+    aus, und in der Datei steht sichtbar, warum dieses eine Bild laenger steht.
+    """
+    slot = plan.slots[i]
+    seg = slot.intent.title
+    region = plan.regions[slot.region_index]
+    if i == 0:
+        return False                    # der Auftakt liegt per Definition richtig
+    vor = plan.slots[i - 1]
+    if vor.region_index != slot.region_index:
+        # Eine Regionsgrenze ist per Konstruktion eine musikalische Grenze —
+        # dort ist die Phrasenrechnung gegenstandslos, nicht fehlgeschlagen.
+        return False
+    if vor.intent.kind != "still":
+        lage.meldungen[("phrase", seg.title)] = (
+            f"Titel {seg.title!r} folgt auf einen Clip; dessen Laenge haengt am "
+            f"Material und wird fuer die Phrasenlage nicht angetastet.")
+        return False
+
+    beat = region.beat_duration()
+    phrase = float(defaults.title.phrase_beats) * beat
+    offset = float(region.offset if region.offset is not None else region.start)
+    start = to_time(slot.start_f, plan.fps)
+
+    k = round((start - offset) / phrase)
+    ziel = offset + k * phrase
+    if abs(ziel - start) <= 0.5 / plan.fps:
+        return False                    # liegt bereits auf der Eins
+    if not (region.start - 1e-6 <= ziel <= region.end + 1e-6):
+        lage.meldungen[("phrase", seg.title)] = (
+            f"Titel {seg.title!r} hat keine Phrasengrenze in Reichweite — die "
+            f"naechste laege ausserhalb der Region. Bleibt beim Standardverhalten.")
+        return False
+
+    vor_start = to_time(vor.start_f, plan.fps)
+    k0 = math.ceil((vor_start - offset) / beat - 1e-6)
+    neu = (ziel - (offset + k0 * beat)) / beat
+    if neu < 1.0:
+        lage.meldungen[("phrase", seg.title)] = (
+            f"Titel {seg.title!r} liesse sich nur auf die Phrasengrenze ziehen, wenn "
+            f"das Bild davor auf {neu:.1f} Beats schrumpfte. Bleibt beim "
+            f"Standardverhalten; Kapitel ein Bild frueher oder spaeter ansetzen.")
+        return False
+
+    lage.merke(vor.intent)
+    if not _setze(vor.intent, beats=round(neu, 6)):
+        return False
+
+    # Gemeldet wird der Weg vom **Ausgangswert**, nicht von der letzten
+    # Zwischenstufe. Hebt ein spaeterer Durchgang die Korrektur wieder auf —
+    # weil ein Titel davor bereits alles verschoben hat —, gibt es nichts zu
+    # melden, und der stehengebliebene Satz aus dem ersten Durchgang muss weg.
+    vorher = lage.vorher(vor.intent)
+    ausgang = float(vorher if vorher is not None
+                    else (region.beats_per_still or defaults.beats_per_still))
+    if abs(ausgang - neu) < 1e-6:
+        lage.meldungen.pop(("phrase", seg.title), None)
+        return True
+    lage.meldungen[("phrase", seg.title)] = (
+        f"Titel {seg.title!r} beginnt bei {start:.2f} s, die Phrasengrenze liegt bei "
+        f"{ziel:.2f} s — `beats:` des Vorgaengers von {ausgang:g} auf {neu:g} gesetzt.")
+    return True
+
+
+def _titel_in_freeregion(plan: Plan, i: int, defaults: Defaults,
+                         lage: _Lage) -> bool:
+    """In ``free``-Regionen gilt die **Standardlaenge der Bildanzeige**.
+
+    Ob dort Musik laeuft, die sich nur nicht rastern liess, oder wirklich nichts
+    zu hoeren ist, aendert daran nichts: die Folie steht so lange wie die Bilder
+    um sie herum. Phrasen gibt es hier nicht.
+
+    Genau einen Fall gibt es, in dem das ohne Zutun schiefgeht: eine *stille*
+    Region ueber ``hold_seconds`` ist **ein** Slot (``_free_count`` liefert
+    ``n = 1``), damit dort bewusst ein ruhiges Einzelbild stehen bleiben kann.
+    Eine Titelfolie bekaeme dort die ganze Stille — zwanzig Sekunden Standbild
+    mit "Malmoe" darauf. Und der naheliegende Rettungsweg ueber ``dur:`` fuehrt
+    in dieselbe Falle zurueck, weil ``snap_back`` per Default aufrundet und die
+    einzige Kante einer ``hold``-Region das Regionsende ist.
+    """
+    slot = plan.slots[i]
+    seg = slot.intent.title
+    region = plan.regions[slot.region_index]
+    lese = reading_seconds(seg)
+
+    if seg.dur is not None:
+        return _setze(slot.intent, beats=None, dur=seg.dur)
+
+    if not slot.hold:
+        if to_time(slot.frames, plan.fps) < lese - 1e-6:
+            lage.meldungen[("kurz", seg.title)] = (
+                f"Titel {seg.title!r} steht nur {to_time(slot.frames, plan.fps):.1f} s "
+                f"(Region zu kurz), die Lesezeit liegt bei {lese:.1f} s. Kapitel eine "
+                f"Region weiter ansetzen.")
+        return _setze(slot.intent, beats=None, dur=None)
+
+    standard = float(region.still_seconds or defaults.still_seconds)
+    dauer = max(standard, lese)
+    if dauer > standard + 1e-6:
+        lage.meldungen[("stille", seg.title)] = (
+            f"Titel {seg.title!r}: Lesezeit {lese:.1f} s liegt ueber der Standzeit "
+            f"{standard:.1f} s — die Folie steht {dauer:.1f} s.")
+    return _setze(slot.intent, beats=None, dur=dauer, snap_back=False)
+
+
+def _ist_fokusblende(plan: Plan, i: int) -> bool:
+    """Loest die Blende aus der Folie heraus auf **dasselbe Bild, scharf** auf?"""
+    slot = plan.slots[i]
+    if slot.intent.title is None or i + 1 >= len(plan.slots):
+        return False
+    folge = plan.slots[i + 1]
+    return (folge.intent.title is None and folge.intent.kind == "still"
+            and slot.intent.title.bg == folge.intent.src)
+
+
+def _title_transitions(plan: Plan, defaults: Defaults) -> dict[int, float]:
+    """Blendendauern aller Schnitte, mit eigener Choreografie um jede Folie.
+
+    ``apply_transitions`` kennt nur alles-oder-nichts: ein ``explicit``-Eintrag
+    fehlt heisst *keine Blende*, nicht *die uebliche*. Deshalb werden hier alle
+    Schnitte aufgefuehrt und nur die um eine Titelfolie skaliert.
+    """
+    t = defaults.title
+    explicit = {cut: default_transition_seconds(plan, cut, defaults)
+                for cut in range(1, len(plan.slots))}
+    for i, slot in enumerate(plan.slots):
+        if slot.intent.title is None:
+            continue
+        if i in explicit:
+            explicit[i] *= t.xfade_in
+        if i + 1 in explicit:
+            explicit[i + 1] *= t.xfade_focus if _ist_fokusblende(plan, i) else t.xfade_out
+    return explicit
+
+
+def _sichtbare_dauer(plan: Plan, i: int) -> float:
+    vs, ve = visible_span(plan, i)
+    return (ve - vs) / plan.fps
+
+
+def _couple_focus_motion(plan: Plan, defaults: Defaults) -> None:
+    """Die Fokusblende braucht eine ueber die Blende hinweg **stetige** Fahrt.
+
+    Ohne sie wirkt die Aufloesung nicht wie ein Schaerfezug, sondern wie ein
+    Schnitt zwischen zwei aehnlichen Bildern — das Schlechteste aus beiden
+    Welten. Zoom und Bildmitte der Folie enden deshalb dort, wo die des
+    Folgebildes beginnen; geschrieben wird beides explizit in die Datei, damit
+    es sichtbar und korrigierbar bleibt.
+
+    Die Folie zoomt dabei immer *hinein*. Ein Hinauszoom endete bei ``z = 1,0``,
+    und das Folgebild muesste darunter weitermachen — dort ist der Ausschnitt
+    aber bereits das ganze Bild. Nebengewinn: das Folgebild beginnt oberhalb von
+    ``z = 1,0`` und schwenkt damit von der ersten Sekunde an sichtbar, statt in
+    der Klemmung des Bildrands festzuhaengen.
+    """
+    from .kenburns import zoom_from_duration
+
+    kb = defaults.kb
+    for i, slot in enumerate(plan.slots):
+        if not _ist_fokusblende(plan, i):
+            continue
+        folge = plan.slots[i + 1]
+        if slot.intent.kb is not None or folge.intent.kb is not None:
+            continue                    # von Hand gesetzt gewinnt
+
+        d_titel = _sichtbare_dauer(plan, i)
+        d_folge = _sichtbare_dauer(plan, i + 1)
+        m = plan_motion(i, d_titel, kb)          # nur fuer die Schwenkrichtung
+        z_titel = zoom_from_duration(d_titel, kb)
+        z_folge = z_titel + (zoom_from_duration(d_folge, kb) - 1.0)
+
+        weg = math.dist(m.c0, m.c1)
+        richtung = ((m.c1[0] - m.c0[0]) / weg, (m.c1[1] - m.c0[1]) / weg) \
+            if weg > 1e-9 else (0.0, 0.0)
+        weg_folge = min(max(kb.pan_rate * d_folge, kb.pan_total[0]), kb.pan_total[1])
+        ziel = (_klemme(m.c1[0] + richtung[0] * weg_folge),
+                _klemme(m.c1[1] + richtung[1] * weg_folge))
+
+        slot.intent.kb = KBSpec(z=(1.0, round(z_titel, 4)),
+                                c=(round(m.c0[0], 4), round(m.c0[1], 4),
+                                   round(m.c1[0], 4), round(m.c1[1], 4)))
+        folge.intent.kb = KBSpec(z=(round(z_titel, 4), round(z_folge, 4)),
+                                 c=(round(m.c1[0], 4), round(m.c1[1], 4),
+                                    round(ziel[0], 4), round(ziel[1], 4)))
+
+
+def _klemme(v: float) -> float:
+    return max(0.0, min(1.0, v))
+
+
+def check_title_phrases(plan: Plan, defaults: Defaults) -> list[str]:
+    """Liegt noch jede Titelfolie auf ihrer Phrasengrenze?
+
+    Die Ausrichtung ist als ``beats:`` des Vorgaengers materialisiert
+    (Entscheidung 3c) und zerfaellt still, sobald jemand davor etwas aendert.
+    Diese Pruefung ist deshalb nicht optional, sondern der Preis fuer den
+    einfachen Planer.
+    """
+    hinweise: list[str] = []
+    phrase_beats = float(defaults.title.phrase_beats)
+    for i, slot in enumerate(plan.slots):
+        seg = slot.intent.title
+        if seg is None or i == 0:
+            continue
+        region = plan.regions[slot.region_index]
+        if region.type != "beat" or not region.bpm:
+            continue
+        if plan.slots[i - 1].region_index != slot.region_index:
+            continue
+        phrase = phrase_beats * region.beat_duration()
+        offset = float(region.offset if region.offset is not None else region.start)
+        start = to_time(slot.start_f, plan.fps)
+        versatz = start - (offset + round((start - offset) / phrase) * phrase)
+        if abs(versatz) > 0.5 / plan.fps:
+            hinweise.append(
+                f"Titel {seg.title!r} beginnt {abs(versatz):.2f} s neben der "
+                f"Phrasengrenze. Wurde davor etwas geaendert? `slideshow build` "
+                f"richtet die Lage neu aus.")
+    return hinweise
+
+
 def _segments_from_plan(plan: Plan, defaults: Defaults) -> list:
     """Baut die Segmentliste inklusive der Uebergaenge als *eigene* Segmente.
 
@@ -154,6 +607,11 @@ def _segments_from_plan(plan: Plan, defaults: Defaults) -> list:
     """
     segments: list = []
     slot_to_index: list[int] = []
+
+    # Erst hier, weil die Kopplung die *endgueltigen* Blendendauern braucht:
+    # die Bewegung ist ueber die volle sichtbare Spanne definiert, und die
+    # schliesst die halben Blenden ein.
+    _couple_focus_motion(plan, defaults)
 
     for i, slot in enumerate(plan.slots):
         if i > 0 and plan.transitions[i] > 0:
@@ -185,20 +643,27 @@ def _segment_from_slot(plan: Plan, i: int, slot, defaults: Defaults):
             "src": intent.src, "in": round(slot.clip_in, 6),
             "out": round(slot.clip_out, 6), "snap": intent.snap})
 
-    seg = StillSegment(src=intent.src)
+    felder: dict = {"beats": None, "dur": None, "snap_back": None,
+                    "hold": bool(slot.hold), "kb": intent.kb}
     if intent.dur is not None:
-        seg.dur = round(intent.dur, 6)
+        felder["dur"] = round(intent.dur, 6)
     elif region.type == "beat" and region.bpm:
         # Explizit ausschreiben: so ist beim Lesen sofort klar, warum ein Bild
         # so lang steht, und die Zahl laesst sich direkt anfassen.
-        beats = intent.beats if intent.beats is not None else \
+        felder["beats"] = intent.beats if intent.beats is not None else \
             (region.beats_per_still or defaults.beats_per_still)
-        seg.beats = beats
     if intent.snap_back is not None:
-        seg.snap_back = intent.snap_back
-    if slot.hold:
-        seg.hold = True
-    return seg
+        felder["snap_back"] = intent.snap_back
+
+    if intent.title is not None:
+        # Eine Titelfolie muss als Titelfolie zurueckkommen — sonst degradiert
+        # sie beim Rundlauf zum gewoehnlichen Standbild, und in einer langen
+        # Stille faellt genau dabei die Regel aus Entscheidung 3b weg.
+        # ``update`` setzt *alle* Dauerfelder neu, damit ein ``beats:`` aus dem
+        # Kapitel nicht stehen bleibt, wenn die Folie in einer free-Region
+        # gelandet ist.
+        return intent.title.model_copy(update=felder)
+    return StillSegment(src=intent.src, **felder)
 
 
 # --------------------------------------------------------------------------
@@ -229,7 +694,15 @@ def plan_from_edit(edit: EditList, manifest: Manifest | None = None) -> Plan:
             pending.append((idx, seg))
             continue
         slot_of_segment[idx] = len(intents)
-        if isinstance(seg, StillSegment):
+        if isinstance(seg, TitleSegment):
+            # Der Planer sieht ein Standbild wie jedes andere; ``src`` ergibt
+            # sich aus dem Inhalt der Folie, ohne Datei anzufassen.
+            titel = resolved(edit.segments, idx)
+            intents.append(Intent(
+                kind="still", src=title_asset(titel, edit.defaults, tuple(edit.size)),
+                index=idx, beats=seg.beats, dur=seg.dur, hold=seg.hold,
+                snap_back=seg.snap_back, kb=seg.kb, title=titel))
+        elif isinstance(seg, StillSegment):
             intents.append(Intent(
                 kind="still", src=seg.src, index=idx, beats=seg.beats, dur=seg.dur,
                 hold=seg.hold, snap_back=seg.snap_back, kb=seg.kb,
@@ -351,6 +824,7 @@ def validate_edit(edit: EditList, manifest: Manifest | None = None) -> Plan:
     plan = plan_from_edit(edit, manifest)
     segments = resolve(plan)
     validate_continuity(segments, plan.total_frames)
+    plan.warnings.extend(check_title_phrases(plan, edit.defaults))
 
     if manifest is not None:
         _validate_sources(edit, manifest)
@@ -361,6 +835,16 @@ def _validate_sources(edit: EditList, manifest: Manifest) -> None:
     """Referenzierte Cache-Dateien muessen vorhanden sein."""
     known = {m.cache_path for m in manifest.media if m.cache_path}
     for idx, seg in enumerate(edit.segments):
+        if isinstance(seg, TitleSegment):
+            # Das Asset einer Titelfolie ist ein Erzeugnis, kein Material — es
+            # steht nicht im Manifest. Der Hintergrund dagegen schon.
+            bg = resolved(edit.segments, idx).bg
+            if bg not in ("none", "") and not bg.startswith("#") and bg not in known:
+                raise SchemaError(
+                    f"{bg!r} steht nicht im Manifest. `slideshow preprocess` erneut "
+                    f"laufen lassen oder den Pfad korrigieren.",
+                    path=f"segments[{idx}].bg")
+            continue
         src = getattr(seg, "src", None)
         if src and src not in known:
             raise SchemaError(

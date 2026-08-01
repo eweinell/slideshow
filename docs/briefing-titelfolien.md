@@ -1,8 +1,26 @@
 # Briefing: Titel- und Zwischenfolien
 
-**Status:** entschieden, Umsetzung offen · **Betrifft:** neues Modul
-`src/slideshow/titles.py`, `models.py`, `build.py`, `cli.py`,
+**Status:** Stufe 2 (Einbettung) **umgesetzt**, Stufe 1 (Generator) und Stufe 3
+(Kapitelerkennung) offen · **Betrifft:** neues Modul `src/slideshow/titles.py`,
+`models.py`, `build.py`, `planner.py`, `mlt.py`, `cli.py`,
 `docs/edit-yaml.md` · **Vorbedingung:** keine
+
+> **Was heute läuft.** `slideshow build --chapters chapters.yaml` erzeugt eine
+> vollständige Edit-List mit `type: title`-Segmenten: Phrasenlage ausgerichtet,
+> Stille-Regel angewandt, Fokusblende mit gekoppelter `kb:` gesetzt, Rundlauf
+> und Deckungsrechnung stimmen. Was fehlt, ist das **Bild**:
+> `titles.render_title` wirft noch einen `SlideshowError`, `render` kann eine
+> Titelfolie also nicht encodieren. Die Nahtstelle dorthin — Schriftfindung,
+> Layoutparameter, Assetpfad, Frische-Schlüssel — steht bereits und ist
+> beschrieben in Abschnitt 5.
+>
+> **Eine Abweichung vom Plan:** Schrift- und Hintergrund-Hash gehen nicht in
+> den *Dateinamen* des Assets ein, sondern in den *Frische-Schlüssel* daneben
+> (`.key`-Datei, Muster aus `preprocess.py`). Damit lässt sich der Pfad ohne
+> Datei-I/O berechnen, `plan_from_edit` bleibt eine reine Funktion über
+> `edit.yaml`, und die Zusage aus Abschnitt 8 bleibt trotzdem erhalten: eine
+> unter WSL erzeugte Folie wird unter Windows neu gebacken. Begründung im
+> Modul-Docstring von `titles.py`.
 
 Eine Urlaubs-Slideshow über drei Wochen und vier Städte ist ohne Gliederung ein
 Strom aus 100 gleichwertigen Bildern. Was fehlt, ist die Zäsur: *hier endet
@@ -547,7 +565,10 @@ weiterhin sichtbar, hängt aber nicht mehr an der Position.
 
 ## 5. Vorgeschlagene Umsetzung
 
-**Stufe 1 — die Folie**
+Abgehakt ist, was in Stufe 2 steht — mit den unten vermerkten Abweichungen.
+Stufe 1 und 3 stehen noch aus.
+
+**Stufe 1 — die Folie** *(offen; Punkt 2 und 5 sind bereits da)*
 
 1. **`titles.py`** mit `TITLE_VERSION = 1`, einer Layout-Dataclass (die Werte
    aus Abschnitt 2) und `render_title(spec, bg_source, out) -> dict`. Intern
@@ -566,7 +587,7 @@ weiterhin sichtbar, hängt aber nicht mehr an der Position.
    Schriftdatei gehört in den Hash.** Sonst sieht eine unter WSL erzeugte
    Folie anders aus als dieselbe unter Windows, und der Cache merkt es nicht.
 
-**Stufe 2 — die Einbettung**
+**Stufe 2 — die Einbettung** *(umgesetzt)*
 
 6. **`TitleSegment`** in `models.py`, `_DISCRIMINATORS` erweitern,
    `Defaults.title` ergänzen.
@@ -595,14 +616,23 @@ weiterhin sichtbar, hängt aber nicht mehr an der Position.
     mit allen Feldern und der `defaults.title`-Block. Dazu die Zeile in der
     Tabelle „Offene Baustellen" in `CLAUDE.md`.
 
-**Stufe 3 — die Kapitelerkennung**
+**Stufe 3 — die Kapitelerkennung** *(offen)*
 
-11. `slideshow chapters` mit Zeitlücken-Heuristik, schreibt `chapters.yaml`
+13. `slideshow chapters` mit Zeitlücken-Heuristik, schreibt `chapters.yaml`
     mit leeren Überschriften und vorbelegten Untertiteln.
-12. GPS im Manifest (`probe.py`) und Ortssprung als zweites Signal.
+14. GPS im Manifest (`probe.py`) und Ortssprung als zweites Signal.
 
 Nicht anzufassen: `planner.py` (außer der Zählung in `coverage`), `beats.py`,
 `encoders.py`, die Concat- und Muxing-Kette.
+
+**Abweichungen in der Umsetzung von Stufe 2**, jeweils mit Begründung im Code:
+
+| Geplant | Umgesetzt |
+|---|---|
+| Schrift- und Hintergrund-Hash im Cache-Key des Dateinamens (Punkt 5) | Beide im Frische-Schlüssel daneben; der Name hängt nur an der Absicht. Sonst bräuchte `plan_from_edit` Datei-I/O. |
+| `n_media` in `_timeline_length` erhöhen (Punkt 11) | Die Titel-Intents werden *vor* dem Aufruf eingesetzt, damit `len(intents)` von selbst stimmt. Eine Stelle statt zwei, die auseinanderlaufen können. |
+| `plan_slots` nur einmal aufrufen | Die Lagekorrektur braucht das Ergebnis des Planens (in welcher Region landet die Folie?) und ändert danach die Absicht. `plan_with_titles` iteriert deshalb bis zu viermal; der Planer selbst bleibt unberührt. |
+| — | `mlt.py:299` nimmt Titelfolien im `--reimport` bereits mit; ohne das wäre der Reimport eines Projekts mit Titeln abgestürzt. Der Export selbst brauchte keine Änderung — er geht über `plan.slots`, und dort ist eine Folie ein Standbild. |
 
 ---
 

@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .errors import SchemaError
-from .models import Defaults, KBSpec, Region
+from .models import Defaults, KBSpec, Region, TitleSegment
 
 log = logging.getLogger("slideshow.planner")
 
@@ -180,6 +180,11 @@ class Intent:
     snap_back: bool | None = None
     kb: KBSpec | None = None
     portrait: str | None = None
+    #: Titelfolien: die Absicht aus ``edit.yaml``. Der Planer behandelt sie wie
+    #: jedes andere Standbild — ``kind`` bleibt ``"still"``, ``src`` zeigt auf
+    #: das gebackene Asset. Das Feld traegt nur, was ``build`` beim Rueckschreiben
+    #: braucht, und wofuer die Deckungsrechnung Titel getrennt zaehlen muss.
+    title: TitleSegment | None = None
     #: Nur Clips: verfuegbare Laenge und Startpunkt im Intermediate.
     clip_in: float = 0.0
     clip_available: float = 0.0
@@ -387,6 +392,16 @@ def apply_transitions(plan: Plan, defaults: Defaults, *,
     plan.transitions = trans
 
 
+def default_transition_seconds(plan: Plan, cut: int, defaults: Defaults) -> float:
+    """Die Blendendauer, die :func:`apply_transitions` an diesem Schnitt saehe.
+
+    Oeffentlich, weil ``build`` einzelne Schnitte abweichend setzt (die
+    Choreografie um eine Titelfolie) und dafuer die uebrigen unveraendert
+    mitgeben muss — ``explicit`` ist alles-oder-nichts.
+    """
+    return _default_transition_seconds(plan, cut, defaults)
+
+
 def _default_transition_seconds(plan: Plan, cut: int, defaults: Defaults) -> float:
     """Blendendauer am Schnitt ``cut``.
 
@@ -534,6 +549,11 @@ class Coverage:
     unused: list[str]
     stretched_seconds: float
     per_region: list[dict]
+    #: Titelfolien, getrennt gezaehlt. Sie belegen einen Slot wie ein Foto,
+    #: sind aber keines: "5 Medien passen nicht mehr in die Musik" ist
+    #: irrefuehrend, wenn drei der Slots Kapitelanfaenge sind, die man nicht
+    #: einfach weglassen moechte.
+    titles: int = 0
     #: Laenge der *Tonspur*. Weicht von ``music_seconds`` (der Laenge der
     #: Timeline) ab, sobald das Material die Laenge bestimmt: dann wird die
     #: Tonspur beim Muxen gekuerzt oder mit Stille aufgefuellt.
@@ -554,19 +574,23 @@ def coverage(plan: Plan, defaults: Defaults) -> Coverage:
     per_region: list[dict] = []
     for i, r in enumerate(plan.regions):
         members = [s for s in plan.slots if s.region_index == i]
-        stills = sum(1 for s in members if s.intent.kind == "still")
+        titles = sum(1 for s in members if s.intent.title is not None)
+        stills = sum(1 for s in members
+                     if s.intent.kind == "still" and s.intent.title is None)
         clips = sum(1 for s in members if s.intent.kind == "clip")
         capacity = _region_capacity(r, defaults)
         per_region.append({
             "index": i, "type": r.type, "start": r.start, "end": r.end,
             "seconds": r.duration, "bpm": r.bpm, "stills": stills, "clips": clips,
-            "capacity": capacity,
+            "titles": titles, "capacity": capacity,
         })
     return Coverage(
         music_seconds=to_time(plan.total_frames, plan.fps),
         planned_seconds=to_time(sum(s.frames for s in plan.slots), plan.fps),
-        stills=sum(1 for s in plan.slots if s.intent.kind == "still"),
+        stills=sum(1 for s in plan.slots
+                   if s.intent.kind == "still" and s.intent.title is None),
         clips=sum(1 for s in plan.slots if s.intent.kind == "clip"),
+        titles=sum(1 for s in plan.slots if s.intent.title is not None),
         unused=plan.unused,
         stretched_seconds=to_time(plan.stretched, plan.fps),
         per_region=per_region)
@@ -670,7 +694,9 @@ def coverage_advice(cov: Coverage, defaults: Defaults) -> list[str]:
     """
     tips: list[str] = []
     stellen = _stellschraube(cov, defaults)
-    benutzt = max(1, cov.stills + cov.clips)
+    # Titelfolien zaehlen mit: sie belegen einen Slot und tragen damit zur
+    # Standzeit bei, aus der die Vorschlaege gerechnet werden.
+    benutzt = max(1, cov.stills + cov.clips + cov.titles)
     # ``planned_seconds`` enthaelt den gestreckten Schwanz bereits — als Basis
     # fuer einen Faktor taugt es deshalb nicht. Die *natuerliche* Laenge des
     # Materials ist das, was ohne die Streckung stehen bliebe.
@@ -687,8 +713,10 @@ def coverage_advice(cov: Coverage, defaults: Defaults) -> list[str]:
         tips.append(f"  3. Musik um {needed:.1f} s kuerzen")
     if cov.overrun:
         ziel = cov.music_seconds / (benutzt + len(cov.unused))
+        grund = (f" — {cov.titles} der belegten Slots sind Titelfolien"
+                 if cov.titles else "")
         tips.append(f"{len(cov.unused)} Medien passen nicht mehr in die Musik und "
-                    f"bleiben ungenutzt. Optionen:")
+                    f"bleiben ungenutzt{grund}. Optionen:")
         tips.append(f"  1. {stellen(ziel / ist_standzeit)}")
         tips.append(f"  2. diese Medien entfernen")
         tips.append(f"  3. Musik verlaengern (`slideshow audio` mit weiterem Track)")

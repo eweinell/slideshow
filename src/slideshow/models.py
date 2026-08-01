@@ -342,6 +342,47 @@ class XfadeDefaults(BaseModel):
     auto: bool = True
 
 
+class TitleDefaults(BaseModel):
+    """Gestalt und Choreografie der Titelfolien (``docs/briefing-titelfolien.md``)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Standzeit in Beat-Regionen. In free-Regionen gilt ``still_seconds`` —
+    #: eine Titelfolie steht dort so lange wie die Bilder um sie herum.
+    beats: float = 12.0
+    #: Musik ist in Phrasen gegliedert; eine Zaesur mitten in der Phrase faellt
+    #: als Fehler auf. Titel beginnen deshalb auf einem Vielfachen davon.
+    phrase_beats: int = 8
+    #: Pfad zur Schriftdatei. ``SLIDESHOW_FONT`` gewinnt (analog SLIDESHOW_MELT).
+    font: str = "auto"
+    #: Versalhoehe der Ueberschrift als Anteil der Bildhoehe.
+    size: float = 0.075
+    subtitle_scale: float = 0.42
+    #: Blur-Sigma auf 7680er Basis — derselbe Wert wie das Hochformat-Komposit.
+    blur: float = 60.0
+    #: Startwert der Abdunklung; der Generator fuehrt ihn nach, bis der
+    #: gemessene Kontrast ``min_contrast`` traegt.
+    darken: float = 0.55
+    min_contrast: float = 4.5
+    #: Safe Area ringsum, Anteil der Kante. Ueberlebt TV-Overscan.
+    safe: float = 0.10
+    #: Blendenchoreografie, als Faktor auf die Standardblende. Der Film atmet
+    #: in die Zaesur ein (laenger hinein) und setzt danach neu an.
+    xfade_in: float = 1.5
+    xfade_out: float = 1.0
+    #: Blende *aus* einer Folie mit ``bg: auto`` heraus — die Fokusblende
+    #: (Entscheidung 5d). Sie loest den unscharfen Hintergrund in dasselbe
+    #: Bild scharf auf und braucht dafuer mehr Zeit als ein Bildwechsel.
+    xfade_focus: float = 2.0
+
+    @field_validator("phrase_beats")
+    @classmethod
+    def _phrase_positiv(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("phrase_beats muss >= 1 sein")
+        return v
+
+
 class Defaults(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -359,6 +400,7 @@ class Defaults(BaseModel):
     fade_out: float = 1.5
     kb: KBDefaults = Field(default_factory=KBDefaults)
     xfade: XfadeDefaults = Field(default_factory=XfadeDefaults)
+    title: TitleDefaults = Field(default_factory=TitleDefaults)
 
     @field_validator("still_tolerance")
     @classmethod
@@ -383,6 +425,53 @@ class StillSegment(BaseModel):
     snap_back: bool | None = None
     portrait: Literal["blur", "black", "crop"] | None = None
     kb: KBSpec | None = None
+
+
+class TitleSegment(BaseModel):
+    """Eine Titel- oder Zwischenfolie.
+
+    Eigener Typ statt eines ``title:``-Blocks am Still (Entscheidung 2a): eine
+    Folie ohne Ueberschrift scheitert damit beim Laden mit Pfad und Zeile statt
+    beim Rendern mit einem leeren Bild.
+
+    Einen ``src``-Schluessel gibt es bewusst **nicht**. Der Pfad des gebackenen
+    Assets ergibt sich aus dem Inhalt dieses Segments
+    (:func:`slideshow.titles.title_asset`) — stuende er zusaetzlich in der
+    Datei, gaebe es zwei Wahrheiten, und eine von Hand geaenderte Ueberschrift
+    wuerde weiter auf das alte Bild zeigen.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["title"] = "title"
+    title: str
+    subtitle: str | None = None
+    #: ``auto`` (erstes Bild des neuen Abschnitts, unscharf) | Pfad | ``#rrggbb``
+    #: | ``none``. ``build`` schreibt den aufgeloesten Wert zurueck.
+    bg: str = "auto"
+    #: Wie beim Still — ``beats`` nur in Beat-Regionen, ``dur`` in free-Regionen.
+    beats: float | None = None
+    dur: float | None = None
+    hold: bool = False
+    snap_back: bool | None = None
+    #: ``lower-third`` ist fuer Stufe 2 reserviert und rendert vorerst wie ``card``.
+    style: Literal["card", "lower-third"] = "card"
+    kb: KBSpec | None = None
+
+    @field_validator("title")
+    @classmethod
+    def _ueberschrift_pflicht(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Titelfolie ohne Ueberschrift. Einen Ortsnamen kann "
+                             "das Werkzeug nicht erfinden — bitte ausfuellen.")
+        return v
+
+    @field_validator("bg")
+    @classmethod
+    def _hintergrund_plausibel(cls, v: str) -> str:
+        if v.startswith("#") and not re.fullmatch(r"#[0-9a-fA-F]{6}", v):
+            raise ValueError(f"unlesbare Farbangabe {v!r} (erwartet #rrggbb)")
+        return v
 
 
 class ClipSegment(BaseModel):
@@ -418,7 +507,8 @@ class XfadeSegment(BaseModel):
     mode: str = "dissolve"
 
 
-Segment = Annotated[StillSegment | ClipSegment | XfadeSegment, Field(discriminator="type")]
+Segment = Annotated[StillSegment | TitleSegment | ClipSegment | XfadeSegment,
+                    Field(discriminator="type")]
 
 
 class EditList(BaseModel):
@@ -486,6 +576,77 @@ class EditList(BaseModel):
 
 
 # --------------------------------------------------------------------------
+# Kapitel (`chapters.yaml`)
+# --------------------------------------------------------------------------
+
+class Chapter(BaseModel):
+    """Ein Kapitel der Reise — Eingabe fuer ``slideshow build``.
+
+    Verankert wird an **Medien-IDs**, nicht an Segmentindizes oder Zeiten
+    (Entscheidung 6b): IDs sind gegen Umsortieren und gegen zusaetzliche Bilder
+    stabil, alles andere verrutscht beim naechsten ``build``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Medien-ID, **vor** der die Folie steht.
+    before: str | None = None
+    #: Position in der Medienfolge; ``0`` ist der Auftakt vor allem Material.
+    at: int | None = None
+    title: str
+    subtitle: str | None = "auto"
+    bg: str = "auto"
+    beats: float | None = None
+    dur: float | None = None
+    style: Literal["card", "lower-third"] = "card"
+    kb: KBSpec | None = None
+
+    @field_validator("title")
+    @classmethod
+    def _ueberschrift_pflicht(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError(
+                "Kapitel ohne Ueberschrift. Aus Koordinaten laesst sich ohne Netz "
+                "kein Ortsname gewinnen, und ein geratener Name ist schlimmer als "
+                "keiner — bitte `title:` ausfuellen.")
+        return v
+
+    @model_validator(mode="after")
+    def _genau_ein_anker(self) -> "Chapter":
+        if (self.before is None) == (self.at is None):
+            raise ValueError("genau eines von `before:` (Medien-ID) und `at:` "
+                             "(Position) angeben")
+        return self
+
+
+class ChapterList(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = 1
+    chapters: list[Chapter] = Field(default_factory=list)
+
+    @classmethod
+    def load(cls, path: Path) -> "ChapterList":
+        p = Path(path)
+        if not p.exists():
+            raise SchemaError(f"Kapiteldatei fehlt: {p}")
+        try:
+            data = yaml.load(p.read_text(encoding="utf-8"), Loader=_LineLoader)
+        except yaml.YAMLError as exc:
+            line = getattr(getattr(exc, "problem_mark", None), "line", None)
+            raise SchemaError(f"{p.name} ist kein gueltiges YAML: {exc}", file=str(p),
+                              line=(line + 1) if line is not None else None) from exc
+        if not isinstance(data, dict):
+            raise SchemaError(f"{p.name} muss ein Mapping auf oberster Ebene sein "
+                              f"(`chapters:` als Schluessel)", file=str(p))
+        lines = _line_index(data)
+        try:
+            return cls.model_validate(_strip_lines(data))
+        except ValidationError as exc:
+            raise _to_schema_error(exc, file=str(p), lines=lines) from exc
+
+
+# --------------------------------------------------------------------------
 # YAML mit Zeilennummern
 # --------------------------------------------------------------------------
 
@@ -532,12 +693,12 @@ def _line_index(obj, prefix: str = "", out: dict[str, int] | None = None) -> dic
 #: Werte des ``type``-Discriminators. Pydantic schiebt sie als eigene Ebene in
 #: den Fehlerpfad (``segments[0].still.kb.z``) — fuer den Leser der YAML-Datei
 #: ist das Rauschen, dort steht kein solcher Schluessel.
-_DISCRIMINATORS = {"still", "clip", "xfade"}
+_DISCRIMINATORS = {"still", "title", "clip", "xfade"}
 
 
 def _loc_to_path(loc: tuple) -> str:
     parts: list[str] = []
-    for item in loc:
+    for pos, item in enumerate(loc):
         if isinstance(item, int):
             if parts:
                 parts[-1] += f"[{item}]"
@@ -547,7 +708,12 @@ def _loc_to_path(loc: tuple) -> str:
             name = str(item)
             if name.endswith("Segment") or name.startswith("function-"):
                 continue
-            if name in _DISCRIMINATORS and parts and parts[-1].endswith("]"):
+            # Der Discriminator steht immer *vor* dem eigentlichen Feldpfad,
+            # nie am Ende. Ohne diese Bedingung frisst die Regel den Feldnamen
+            # ``title`` — der heisst zufaellig wie sein eigener Typ, und ein
+            # ``Chapter`` ohne Ueberschrift meldete dann nur ``chapters[1]``.
+            if (name in _DISCRIMINATORS and parts and parts[-1].endswith("]")
+                    and pos < len(loc) - 1):
                 continue
             name = {"in_": "in", "from_": "from"}.get(name, name)
             parts.append(name)

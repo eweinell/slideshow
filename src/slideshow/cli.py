@@ -94,6 +94,9 @@ def build_parser() -> argparse.ArgumentParser:
     bu.add_argument("--kb-engine", choices=("zoompan", "scale16"), default=None)
     bu.add_argument("--fade-out", type=float, default=None, metavar="S",
                     help="Ausblende am Filmende in Sekunden (0 = keine)")
+    bu.add_argument("--chapters", default=None, metavar="chapters.yaml",
+                    help="Titel- und Zwischenfolien einsetzen "
+                         "(Default: chapters.yaml im Projekt, falls vorhanden)")
     bu.add_argument("--xfade-beats", type=float, default=None)
     bu.add_argument("--no-xfade", action="store_true",
                     help="keine automatischen Uebergaenge erzeugen")
@@ -479,9 +482,11 @@ def cmd_build(args, project: Project) -> int:
         defaults.xfade.beats = args.xfade_beats
     defaults.xfade.auto = not args.no_xfade
 
+    chapters = _load_chapters(project, args.chapters, defaults)
+
     size = _parse_size(args.size) if args.size else (3840, 2160)
     edit, plan, cov = build_edit_list(project, manifest, beatmap, defaults=defaults,
-                                      fps=args.fps, size=size)
+                                      fps=args.fps, size=size, chapters=chapters)
     _print_coverage(cov, defaults, plan)
 
     tips = coverage_advice(cov, defaults)
@@ -510,16 +515,55 @@ def cmd_build(args, project: Project) -> int:
     return 0
 
 
+def _load_chapters(project: Project, angabe: str | None, defaults) -> list:
+    """Kapitel laden — ausdruecklich angegeben oder als Projektdatei gefunden.
+
+    Ein *ausdruecklich* genannter Pfad, den es nicht gibt, ist ein Fehler; die
+    stillschweigend gefundene ``chapters.yaml`` ist eine Bequemlichkeit und
+    darf fehlen.
+    """
+    from .models import ChapterList
+    from .titles import find_font
+
+    if angabe:
+        pfad = Path(angabe)
+        if not pfad.exists():
+            raise SlideshowError(f"Kapiteldatei fehlt: {pfad}")
+    else:
+        pfad = project.root / "chapters.yaml"
+        if not pfad.exists():
+            return []
+
+    kapitel = ChapterList.load(pfad).chapters
+    if kapitel:
+        # Ohne Schrift gibt es keine Folie. Das jetzt zu melden ist der
+        # Unterschied zwischen einer Zeile mit Installationsbefehl und einem
+        # Traceback nach dem halben Rendern (Abnahmekriterium T8).
+        schrift = find_font(defaults.title.font)
+        console().print(f"Kapitel: {pfad}  ({len(kapitel)} Titelfolien, "
+                        f"Schrift {schrift})")
+    return kapitel
+
+
 def _print_coverage(cov, defaults, plan) -> None:
     """Laufzeit-Vorabpruefung nach 6.5."""
     from rich.table import Table
     t = Table(title="Laufzeit-Vorabpruefung (6.5)", title_justify="left")
-    for c in ("#", "Typ", "Start", "Dauer", "BPM", "Kapazitaet", "Bilder", "Clips"):
+    spalten = ["#", "Typ", "Start", "Dauer", "BPM", "Kapazitaet", "Bilder", "Clips"]
+    # Die Titelspalte nur zeigen, wenn es Titel gibt — sonst steht in jeder
+    # Zeile eine Null, die nichts erklaert.
+    mit_titeln = bool(cov.titles)
+    if mit_titeln:
+        spalten.append("Titel")
+    for c in spalten:
         t.add_column(c, justify="right" if c != "Typ" else "left")
     for r in cov.per_region:
-        t.add_row(str(r["index"]), r["type"], f"{r['start']:.2f}", f"{r['seconds']:.2f}",
-                  f"{r['bpm']:.1f}" if r["bpm"] else "-", str(r["capacity"]),
-                  str(r["stills"]), str(r["clips"]))
+        zeile = [str(r["index"]), r["type"], f"{r['start']:.2f}", f"{r['seconds']:.2f}",
+                 f"{r['bpm']:.1f}" if r["bpm"] else "-", str(r["capacity"]),
+                 str(r["stills"]), str(r["clips"])]
+        if mit_titeln:
+            zeile.append(str(r.get("titles", 0)))
+        t.add_row(*zeile)
     con = console()
     con.print(t)
     if cov.audio_seconds <= 0:
@@ -531,7 +575,8 @@ def _print_coverage(cov, defaults, plan) -> None:
         ton = f"Musik {cov.audio_seconds:.2f} s -> {wie}"
     con.print(f"Laufzeit {cov.music_seconds:.2f} s | {ton} | "
               f"geplant {cov.planned_seconds:.2f} s | "
-              f"{cov.stills} Bilder, {cov.clips} Clips")
+              f"{cov.stills} Bilder, {cov.clips} Clips"
+              + (f", {cov.titles} Titelfolien" if cov.titles else ""))
     for w in plan.warnings[:10]:
         con.print(f"  [yellow]WARN[/] {w}")
 

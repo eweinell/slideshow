@@ -185,11 +185,36 @@ Der Schnittpunkt liegt **auf** dem Beat; eine Blende der Dauer `T` belegt
 `[t − T/2, t + T/2]`. Der Schnitt bleibt also auf dem Raster, die Blende ist
 darüber zentriert.
 
+### `defaults.title` — Titelfolien
+
+Gestalt und Choreografie der Titel- und Zwischenfolien. Die Zahlen sind
+gerechnet, nicht geraten — die Begründungen stehen in
+[`briefing-titelfolien.md`](briefing-titelfolien.md), Abschnitt 2.
+
+| Schlüssel | Typ | Vorgabe | Bedeutung |
+|---|---|---|---|
+| `beats` | float | `12.0` | Standzeit in einer Beat-Region. In einer `free`-Region gilt stattdessen `still_seconds` — dort steht eine Folie so lange wie die Bilder um sie herum, ohne Sonderregel. |
+| `phrase_beats` | int | `8` | Länge einer musikalischen Phrase. Titel beginnen auf einem Vielfachen davon; `build` dehnt oder staucht dafür das **vorangehende** Bild. Muss ≥ 1 sein. |
+| `font` | string | `auto` | Pfad zur Schriftdatei. `auto` sucht plattformabhängig (Windows: Segoe UI, Arial; Linux: DejaVu Sans, Noto Sans; macOS: Helvetica). Die Umgebungsvariable **`SLIDESHOW_FONT` gewinnt immer** — dieselbe Regel wie bei `SLIDESHOW_MELT`. |
+| `size` | float | `0.075` | Versalhöhe der Überschrift als Anteil der Bildhöhe. 162 px bei 2160 — auf einem 55″-Fernseher aus 3 m so groß wie eine Zeitungsschlagzeile. |
+| `subtitle_scale` | float | `0.42` | Größe der zweiten Zeile, Anteil der Überschrift. |
+| `blur` | float | `60.0` | Blur-Sigma des Hintergrunds, auf 7680er Basis. Derselbe Wert wie das Hochformat-Komposit — die beiden Bildsprachen müssen zusammenpassen. |
+| `darken` | float | `0.55` | **Startwert** der Abdunklung. Der Generator misst die Leuchtdichte unter der Textfläche und führt den Wert in festen Schritten nach, bis der Kontrast trägt. |
+| `min_contrast` | float | `4.5` | Gefordertes Kontrastverhältnis zwischen Text und gemessenem Hintergrund (WCAG 2.1). Wird es bis zur Untergrenze nicht erreicht, folgt eine Warnung statt stiller Unlesbarkeit. |
+| `safe` | float | `0.10` | Safe Area ringsum, Anteil der Kante. Überlebt TV-Overscan und einen 4:5-Beschnitt. |
+| `xfade_in` | float | `1.5` | Blende **in** die Folie hinein, als Faktor auf die Standardblende. Der Film atmet in die Zäsur ein. |
+| `xfade_out` | float | `1.0` | Blende **aus** der Folie heraus, ohne Fokusblende. |
+| `xfade_focus` | float | `2.0` | Blende heraus, wenn der Hintergrund das Folgebild ist (Fokusblende). Länger, weil der Schärfezug Zeit braucht. |
+
+Die drei `xfade_*`-Faktoren ändern nur die Choreografie, nicht das Bild — sie
+gehen deshalb **nicht** in den Cache-Key des Titelassets ein. Alles andere
+schon: eine Änderung an `size` oder `darken` erzeugt eine neue Datei.
+
 ---
 
 ## `segments`
 
-Die Abfolge. Drei Typen, unterschieden über `type`.
+Die Abfolge. Vier Typen, unterschieden über `type`.
 
 ### `still` — Standbild
 
@@ -210,6 +235,102 @@ Die Abfolge. Drei Typen, unterschieden über `type`.
 | `snap_back` | bool | von `defaults` | Nur für dieses Segment. |
 | `portrait` | enum | von `defaults` | Nur für dieses Bild. |
 | `kb` | Objekt | von `defaults.kb` | Siehe unten. |
+
+### `title` — Titel- und Zwischenfolie
+
+Die Zäsur zwischen zwei Abschnitten: Überschrift, zweite Zeile, unscharfer
+Hintergrund aus dem Material.
+
+```yaml
+- {type: title, title: Malmö, subtitle: 'Tag 11 · 24. Juli',
+   bg: cache/img_042.jpg, beats: 12,
+   kb: {z: [1.0, 1.06], c: [0.5, 0.5, 0.53, 0.5]}}
+```
+
+| Schlüssel | Typ | Vorgabe | Bedeutung |
+|---|---|---|---|
+| `title` | string | – | Überschrift. **Pflicht** und nicht leer — eine Folie ohne Überschrift ist ein Fehler, kein Sonderfall. |
+| `subtitle` | string | – | Zweite Zeile. `auto` in `chapters.yaml` wird beim Bauen zum Aufnahmedatum des folgenden Bildes aufgelöst und steht danach als Text hier. |
+| `bg` | string | `auto` | Hintergrund: `auto` (erstes Bild des neuen Abschnitts, unscharf), ein Pfad, `#rrggbb` als Farbfläche oder `none` für Text auf Schwarz. `build` schreibt den aufgelösten Wert zurück. |
+| `dur` | float | – | Wie beim Standbild. Gewinnt immer. |
+| `beats` | float | von `defaults.title.beats` | Wie beim Standbild — nur in einer Beat-Region gültig. |
+| `hold` | bool | `false` | Wie beim Standbild. |
+| `snap_back` | bool | von `defaults` | Wie beim Standbild. **In langer Stille setzt `build` hier `false`** — siehe unten. |
+| `style` | enum | `card` | `card` ist die ganzseitige Folie. `lower-third` ist reserviert und rendert vorerst wie `card`. |
+| `kb` | Objekt | von `defaults.kb` | Wie beim Standbild. Bei einer Fokusblende schreibt `build` hier und am Folgebild gekoppelte Werte. |
+
+Einen `src`-Schlüssel gibt es bewusst **nicht**. Der Pfad des gebackenen Assets
+(`cache/title_malmoe_<hash>.jpg`) ergibt sich aus dem Inhalt des Segments;
+stünde er zusätzlich in der Datei, gäbe es zwei Wahrheiten, und eine von Hand
+geänderte Überschrift zeigte weiter auf das alte Bild. Wer den Text ändert,
+bekommt beim nächsten Lauf automatisch ein neues Asset — und genau drei
+Segmente rendern neu.
+
+#### Wo eine Titelfolie beginnen darf
+
+In einer **Beat-Region** auf einer Phrasengrenze. Ein Schnitt auf irgendeinem
+Beat ist synchron, aber nicht musikalisch: ein Bildwechsel mitten in der Phrase
+fällt kaum auf, eine *Zäsur* mitten in der Phrase fällt sofort auf — als
+Fehler. `build` rechnet die nächstgelegene Grenze aus und materialisiert die
+Ausrichtung als `beats:` des **vorangehenden** Bildes:
+
+```yaml
+- {type: still, src: cache/img_041.jpg, beats: 11}   # 8 -> 11: Phrasenlage
+- {type: xfade, from: 78, to: 80, beats: 1.5}
+- {type: title, title: Malmö, beats: 12}
+```
+
+Der Planer führt das ohne jede Sonderregel aus, und die Zahl lässt sich von
+Hand überstimmen. Der Preis: wer später ein Bild *davor* verlängert, verschiebt
+die Lage. `build` und `render` prüfen sie deshalb bei jedem Lauf und melden die
+Abweichung mit konkretem Vorschlag.
+
+An einer **Regionsgrenze** entfällt die Rechnung — die Grenze *ist* per
+Konstruktion eine musikalische Zäsur.
+
+In einer **`free`-Region** gibt es keine Phrasen; dort gilt die Standardlänge
+der Bildanzeige (`still_seconds`, regional überschreibbar). Mit genau einer
+Ausnahme:
+
+> **Lange Stille kachelt nicht.** Eine `quiet`-Region über `hold_seconds`
+> ist **ein** Slot, damit dort bewusst ein ruhiges Einzelbild stehen bleiben
+> kann. Eine Titelfolie bekäme sonst die *ganze* Stille — zwanzig Sekunden
+> Standbild mit „Malmö" darauf, ohne Fehlermeldung. `build` schreibt deshalb
+> `dur: <still_seconds>` **und** `snap_back: false`. Beides zusammen: `dur:`
+> allein rettet nichts, weil `snap_back` per Default aufrundet und die einzige
+> Kante einer `hold`-Region ihr Ende ist. Der Rest der Stille fällt an das
+> folgende Bild, das seinen `hold`-Status behält.
+
+Als Untergrenze der Standzeit gilt eine Lesezeitregel — `1,8 s + 0,25 s je
+Wort`. Sie begründet eine Warnung, keine stille Korrektur.
+
+#### Fokusblende
+
+Steht der Hintergrund einer Folie auf `auto`, ist er das erste Bild des neuen
+Abschnitts. Die Blende *aus* der Folie heraus führt dann auf **dasselbe Bild,
+scharf**: der Hintergrund löst sich vor den Augen des Zuschauers auf.
+
+Damit das wie ein Schärfezug wirkt und nicht wie ein Schnitt zwischen zwei
+ähnlichen Bildern, muss die Kamerafahrt über die Blende hinweg stetig sein.
+`build` schreibt dafür gekoppelte `kb:`-Blöcke in beide Segmente — Zoom und
+Bildmitte der Folie enden dort, wo die des Folgebildes beginnen:
+
+```yaml
+- {type: title, title: Malmö, bg: cache/img_042.jpg, beats: 12,
+   kb: {z: [1.0, 1.06], c: [0.5, 0.5, 0.53, 0.5]}}
+- {type: xfade, from: 79, to: 81, beats: 2}          # Fokusblende
+- {type: still, src: cache/img_042.jpg, beats: 8,
+   kb: {z: [1.06, 1.14], c: [0.53, 0.5, 0.58, 0.5]}} # setzt die Fahrt fort
+```
+
+Die Folie zoomt dabei immer **hinein**. Ein Hinauszoom endete bei `z = 1,0`,
+und das Folgebild müsste darunter weitermachen — dort ist der Ausschnitt aber
+bereits das ganze Bild. Nebengewinn: das Folgebild fängt oberhalb von `z = 1,0`
+an und schwenkt damit von der ersten Sekunde an sichtbar, statt in der Klemmung
+des Bildrands festzuhängen (siehe [Schwenk: Richtung und
+Reichweite](#schwenk-richtung-und-reichweite)).
+
+Ein von Hand gesetztes `kb:` gewinnt und wird nicht überschrieben.
 
 ### `clip` — Videoausschnitt
 
@@ -279,6 +400,51 @@ Bewegung durch die Blende hindurch weiterläuft.
 
 ---
 
+## `chapters.yaml` — woher die Titelfolien kommen
+
+`build` erzeugt `edit.yaml` **neu**. Zwölf Städte von Hand einzupflegen ist
+zumutbar, zwölf Städte nach jedem `build`-Lauf erneut einzupflegen nicht.
+Deshalb sind die Kapitel eine eigene Eingabedatei:
+
+```yaml
+# chapters.yaml — Kapitel der Reise. Wird von `slideshow build` eingelesen.
+chapters:
+  - {at: 0,           title: Skandinavien 2026, subtitle: "Drei Wochen, vier Städte",
+     bg: "#1b2a3a", beats: 16}
+  - {before: img_042, title: Malmö,     subtitle: auto}
+  - {before: img_071, title: Stockholm, subtitle: auto, bg: cache/img_075.jpg}
+```
+
+| Schlüssel | Typ | Vorgabe | Bedeutung |
+|---|---|---|---|
+| `before` | string | – | Medien-ID, **vor** der die Folie steht. Genau eines von `before` und `at`. |
+| `at` | int | – | Position in der Medienfolge. `at: 0` ist der Auftakt vor allem Material. |
+| `title` | string | – | Überschrift. Pflicht und nicht leer. |
+| `subtitle` | string | `auto` | Zweite Zeile. `auto` bildet `Tag 11 · 24. Juli` aus dem Aufnahmezeitpunkt des folgenden Bildes; Tag 1 ist das früheste Aufnahmedatum des Projekts. Weglassen mit `subtitle: null`. |
+| `bg` | string | `auto` | Wie am Segment. |
+| `beats`, `dur` | float | von `defaults.title` | Standzeit. |
+| `style` | enum | `card` | Wie am Segment. |
+| `kb` | Objekt | – | Wie am Segment. Setzt die Fokusblenden-Kopplung außer Kraft. |
+
+Verankert wird an **Medien-IDs**, nicht an Segmentindizes oder Zeiten: IDs sind
+gegen Umsortieren und gegen zusätzliche Bilder stabil, alles andere verrutscht
+beim nächsten `build`. Eine ID, die es nicht gibt, ist ein Fehler mit Nennung
+des Kapitels — kein stilles Überspringen.
+
+Aufgerufen wird das mit `slideshow build --chapters chapters.yaml`; liegt die
+Datei unter diesem Namen im Projektverzeichnis, findet `build` sie von selbst.
+Ohne auffindbare Schriftdatei bricht der Lauf sofort ab, mit
+Installationsbefehl statt Traceback.
+
+**Die Überschrift bleibt Handarbeit.** Einen Ortsnamen kann das Werkzeug nicht
+erfinden, und ein geratener Name ist schlimmer als kein Name.
+
+*Nebenbei:* Liegt für die Reise eine Planung mit Stationen und Daten vor, ist
+`chapters.yaml` daraus direkt erzeugbar — die Stationsnamen sind exakt die
+gesuchten Überschriften.
+
+---
+
 ## Präzedenz der Dauer
 
 Für ein Standbild gilt, von oben nach unten, die erste zutreffende Regel:
@@ -341,5 +507,6 @@ lassen.
 |---|---|
 | `manifest.json` | Was für Material vorliegt (`probe`, `preprocess`). |
 | `beats.yaml` | Regionenkarte der Tonspur (`beats`) — vor dem Bauen ansehen. |
+| `chapters.yaml` | Kapitel der Reise, Eingabe für `build --chapters`. Überlebt das Neubauen der Edit-List. |
 | `edit.yaml` | **Diese Datei** (`build`). |
 | `out/timeline.json` | Die *aufgelöste* Timeline mit absoluten Framenummern. Erzeugnis, kein Eingabeformat — zum Nachrechnen, nicht zum Editieren. |
