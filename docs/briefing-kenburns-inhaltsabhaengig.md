@@ -187,7 +187,8 @@ Prompt-Version und Modell gleich bleiben.
 | Format | `output_config.format` mit JSON-Schema → garantiert parsebare Antwort |
 | Aufwand | `output_config: {"effort": "low"}` — die Aufgabe ist Klassifikation, kein Denksport |
 | Caching | Systemprompt + Schema als gecachter Präfix (`cache_control`), volatile Teile ans Ende |
-| Durchsatz | ein Bild je Request, Batch-API für den ganzen Lauf (−50 %), `--sync` für den Einzelfall |
+| Durchsatz | ein Bild je Request, synchron und parallel; Batch-API nur auf Wunsch (`--batch`, s. E4) |
+| Übertragung | Bild als base64 im Request — **nicht** über die Files-API (E6) |
 | Wiederholung | SDK-Default (2 Retries), dazu Ausfall-Rückfall aus Abschnitt 8 |
 
 Zwei Details, die leicht Geld kosten, wenn man sie übersieht:
@@ -374,9 +375,10 @@ angesetzt.
   Fotos kostet einmalig ein bis zwei Dollar und wird bei Wiederholungsläufen
   aus `vision.yaml` bedient. Dagegen stehen Stunden Renderzeit. Es gibt keinen
   Kostengrund, am Modell zu sparen — deshalb Opus 5 als Default.
-- **Die Batch-API ist der Normalfall.** Ein Analyselauf ist kein
-  interaktiver Vorgang; die meisten Batches sind unter einer Stunde durch, und
-  das halbiert den Preis.
+- **Die Batch-API halbiert den Preis, kostet aber 29 Tage Aufbewahrung.** Ein
+  Analyselauf ist zwar kein interaktiver Vorgang, aber die Batch-API ist nicht
+  ZDR-fähig und speichert die Aufträge 29 Tage. Bei privaten Fotos ist das der
+  falsche Tausch für 0,55 USD je 100 Bilder; siehe E4.
 - Vor dem ersten großen Lauf gehört `count_tokens` gegen fünf echte Bilder
   ausgeführt und mit der Tabelle verglichen. Die Ist-Kosten meldet `analyze`
   am Ende aus `usage` (Abnahmekriterium A6).
@@ -431,15 +433,23 @@ sich die Kamera". Ein `--variety`-Wechsel erzwingt dann eine Neuanalyse.
 
 ### E4 — Ein Bild je Request oder Bündel?
 
-**(a) Ein Bild je Request + Batch-API** *(Empfehlung)* — je Bild cachebar, ein
-Fehlschlag betrifft ein Bild, Zuordnung über `custom_id` ist trivial.
+**(a) Ein Bild je Request, synchron parallel** *(Empfehlung)* — je Bild
+cachebar, ein Fehlschlag betrifft ein Bild, und der Messages-Endpunkt ist der
+datensparsamste Weg: ZDR-fähig, Bild und Antwort werden nach der Antwort nicht
+abgelegt (E6). 100 Bilder sind in wenigen Minuten durch.
 
-**(b) N Bilder je Request** — weniger Requests, aber das Modell muss Indizes
+**(b) Ein Bild je Request, Batch-API** — halbiert den Preis, ist aber
+**nicht ZDR-fähig und speichert die Aufträge 29 Tage**. Für 0,55 USD je 100
+Bilder ist das bei privaten Fotos der falsche Tausch.
+
+**(c) N Bilder je Request** — weniger Requests, aber das Modell muss Indizes
 sauber halten (erfahrungsgemäß die Fehlerquelle bei Mehrbild-Prompts), ein
 Fehlschlag kostet N Bilder, und die Ersparnis ist gering, weil der geteilte
 Präfix ohnehin gecacht ist.
 
-> **Empfehlung: (a).**
+> **Empfehlung: (a)**, mit `--batch` als bewusst zu wählender Option für
+> Anwender, denen die 29 Tage gleichgültig sind (etwa bei Landschafts- oder
+> Sachaufnahmen ohne Personen).
 
 ### E5 — Welches Modell als Default?
 
@@ -454,12 +464,38 @@ bewusste Entscheidung mit Renderkosten (Abschnitt 8).
 Die Analyse schickt private Urlaubsfotos mit erkennbaren Personen an einen
 externen Dienst. **Das darf kein stiller Schritt in `preprocess` werden.**
 
+Was Anthropic für die Claude-API zusagt (Stand 08/2026, Quellen unten):
+
+| Punkt | Zusage |
+|---|---|
+| Training | „Retained data is never used for model training without your express permission." Gilt für die API, **nicht** für die Consumer-Produkte (Free/Pro/Max) — deren Regeln sind andere. |
+| Aufbewahrung | Standard: Inhalte werden nicht dauerhaft vorgehalten und innerhalb von 30 Tagen gelöscht. |
+| Zero Data Retention | Vertraglich über den Vertrieb, nicht selbst einschaltbar — für ein privates Projekt praktisch nicht erreichbar. |
+| Auffälligkeiten | **Unabhängig von jeder Vereinbarung:** von den automatischen Trust-&-Safety-Systemen markierte Inhalte können bis zu **2 Jahren** aufbewahrt werden. |
+| Modellwahl | `claude-opus-5` ist kein „Covered Model"; nur Fable 5 und Mythos 5 erzwingen 30-Tage-Retention und sind von ZDR ausgeschlossen. Die Wahl aus E5 ist damit auch die datensparsamste. |
+
+Daraus folgen drei technische Festlegungen:
+
+1. **Bilder als base64 im Messages-Request, nie über die Files-API.** Der
+   Messages-Endpunkt ist ZDR-fähig; die Files-API ist es nicht und hält
+   Dateien *„until explicitly deleted"*.
+2. **Batch-API nicht als Default** — 29 Tage Aufbewahrung, siehe E4.
+3. **Strukturierte Ausgabe ist unkritisch.** Vom JSON-Schema wird eine
+   Grammatik bis zu 24 h zwischengespeichert, Prompt und Antwort nicht. Unser
+   Schema enthält keine Bilddaten — es darf auch künftig keine bekommen.
+
 > **Empfehlung:** eigenes, ausdrücklich aufzurufendes Kommando
 > `slideshow analyze`; beim ersten Lauf in einem Projekt eine einmalige
-> Bestätigung mit Nennung von Modell, Bildanzahl und Datenaufbewahrung des
-> Anbieters; `--yes` für Skripte; `--no-vision` als dauerhafte Abschaltung in
-> `build`. Der Punkt gehört zusätzlich in die README, nicht nur in den
-> `--help`-Text.
+> Bestätigung, die Modell, Bildanzahl **und die Tabelle oben in zwei Sätzen**
+> nennt — insbesondere die 2-Jahres-Frist bei markierten Inhalten, denn das
+> ist der Punkt, den ein Nutzer nicht erwartet; `--yes` für Skripte;
+> `--no-vision` als dauerhafte Abschaltung in `build`. Der Punkt gehört
+> zusätzlich in die README, nicht nur in den `--help`-Text.
+
+Quellen: [API and data retention](https://platform.claude.com/docs/en/manage-claude/api-and-data-retention),
+[How long do you store my organization's data?](https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-my-organization-s-data),
+[Data retention practices for Covered Models](https://support.claude.com/en/articles/15425996-data-retention-practices-for-covered-models).
+Policies ändern sich — vor der Umsetzung neu prüfen.
 
 ### E7 — Geht der Musikkontext in die Bewegung ein?
 
