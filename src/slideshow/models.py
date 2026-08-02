@@ -117,6 +117,10 @@ class MediaItem(BaseModel):
     capture_time: float | None = None
     #: ``exif`` | ``container`` | ``mtime`` | ``filename`` | ``none``
     time_source: str = "none"
+    #: Aufnahmeort als ``[lat, lon]`` in Grad, sofern das Material einen
+    #: GPS-Fix traegt. Signal fuer die Kapitelerkennung (`slideshow chapters`):
+    #: ein Sprung von 30 km zwischen zwei Aufnahmen *ist* der neue Ort.
+    gps: tuple[float, float] | None = None
     image: ImageInfo | None = None
     clip: ClipInfo | None = None
     #: Pfad des normalisierten Zwischenprodukts, relativ zum Projektroot

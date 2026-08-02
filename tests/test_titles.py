@@ -276,6 +276,45 @@ def test_titel_werden_getrennt_gezaehlt():
 
 
 # --------------------------------------------------------------------------
+# Tonpausen-Vorschlag (Entscheidung 6c)
+# --------------------------------------------------------------------------
+
+def _mit_stille(position: int):
+    """44 s Takt, 12 s echte Stille, dann wieder Takt."""
+    regions = [_beat_region(0.0, 44.0),
+               Region(type="free", start=44.0, end=56.0, reason="stille", quiet=True),
+               _beat_region(56.0, 90.0)]
+    return _bauen(_manifest(), regions, [Chapter(at=position, title="Malmoe")])
+
+
+def test_ein_titel_neben_der_stille_bekommt_einen_verschiebevorschlag():
+    """Die Pause zwischen zwei Tracks ist bereits eine musikalische
+    Kapitelgrenze — landet die Folie knapp daneben, ist das schade.
+
+    Ein Vorschlag im Bericht, keine automatische Verschiebung: welches Foto zu
+    welcher Stadt gehoert, weiss das Werkzeug nicht.
+    """
+    _edit, plan, _cov = _mit_stille(10)
+    passend = [w for w in plan.warnings if "Pause im Ton" in w]
+    assert passend, "der Hinweis fehlt"
+    assert "44.0 s" in passend[0]
+    assert "1 Bild spaeter" in passend[0]
+
+
+def test_ein_titel_in_der_stille_bekommt_keinen_vorschlag():
+    """Die Gegenprobe — sonst schlaegt der Bericht vor, was schon gilt."""
+    _edit, plan, _cov = _mit_stille(11)
+    assert not [w for w in plan.warnings if "Pause im Ton" in w]
+
+
+def test_weit_entfernte_kanten_bleiben_unerwaehnt():
+    """Drei Bilder zu verschieben ist keine Feinkorrektur mehr, sondern eine
+    inhaltliche Aenderung — dazu schweigt das Werkzeug."""
+    _edit, plan, _cov = _mit_stille(8)
+    assert not [w for w in plan.warnings if "Pause im Ton" in w]
+
+
+# --------------------------------------------------------------------------
 # T3 — Lokalitaet der Aenderung
 # --------------------------------------------------------------------------
 

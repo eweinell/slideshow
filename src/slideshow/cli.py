@@ -32,6 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
                "  slideshow audio track1.mp3 track2.mp3 --gap 6\n"
                "  slideshow preprocess\n"
                "  slideshow beats cache/mix.flac        # Regionenkarte pruefen!\n"
+               "  slideshow chapters                    # optional: Titelfolien\n"
                "  slideshow build\n"
                "  slideshow render edit.yaml -o out/master.mp4\n")
     p.add_argument("--version", action="version", version=f"slideshow {__version__}")
@@ -94,6 +95,20 @@ def build_parser() -> argparse.ArgumentParser:
     bu.add_argument("--kb-engine", choices=("zoompan", "scale16"), default=None)
     bu.add_argument("--fade-out", type=float, default=None, metavar="S",
                     help="Ausblende am Filmende in Sekunden (0 = keine)")
+    ch = sub.add_parser("chapters", help="Kapitelgrenzen vorschlagen -> chapters.yaml")
+    ch.add_argument("-o", "--output", default=None, metavar="chapters.yaml")
+    ch.add_argument("--manifest", default=None)
+    ch.add_argument("--min-gap", type=float, default=None, metavar="H",
+                    help="Zeitluecke in Stunden, ab der ein Kapitel vorgeschlagen "
+                         "wird (Default 20)")
+    ch.add_argument("--min-jump", type=float, default=None, metavar="KM",
+                    help="Ortssprung in km, ab dem ein Kapitel vorgeschlagen wird "
+                         "(Default 30)")
+    ch.add_argument("--no-auftakt", action="store_true",
+                    help="keinen Titel vor dem Material vorschlagen")
+    ch.add_argument("--force", action="store_true",
+                    help="vorhandene Datei ueberschreiben")
+
     bu.add_argument("--chapters", default=None, metavar="chapters.yaml",
                     help="Titel- und Zwischenfolien einsetzen "
                          "(Default: chapters.yaml im Projekt, falls vorhanden)")
@@ -515,6 +530,44 @@ def cmd_build(args, project: Project) -> int:
     return 0
 
 
+def cmd_chapters(args, project: Project) -> int:
+    from .chapters import (GAP_PLACE_HOURS, JUMP_KM, coverage_note,
+                           dump_chapters_yaml, suggest)
+    from .models import Manifest
+
+    manifest = Manifest.load(Path(args.manifest) if args.manifest else project.manifest)
+    vorschlaege = suggest(manifest,
+                          min_gap_hours=(args.min_gap if args.min_gap is not None
+                                         else GAP_PLACE_HOURS),
+                          min_jump_km=(args.min_jump if args.min_jump is not None
+                                       else JUMP_KM))
+    text = dump_chapters_yaml(vorschlaege, hinweis=coverage_note(manifest),
+                              auftakt=not args.no_auftakt)
+
+    out = Path(args.output) if args.output else (project.root / "chapters.yaml")
+    con = console()
+    if args.dry_run:
+        con.print(text)
+        return 0
+    # Die Datei ist Handarbeit, sobald sie einmal ausgefuellt wurde. Sie
+    # kommentarlos zu ueberschreiben hiesse, zwoelf Ortsnamen zu loeschen.
+    if out.exists() and not args.force:
+        raise SlideshowError(
+            f"{out} gibt es bereits. Die Datei enthaelt von Hand eingetragene "
+            f"Ueberschriften — `--force` ueberschreibt sie, `--dry-run` zeigt den "
+            f"Vorschlag nur an.")
+    out.write_text(text, encoding="utf-8")
+
+    stark = sum(1 for v in vorschlaege if v.staerke == "stark")
+    schwach = len(vorschlaege) - stark
+    con.print(f"Kapitelvorschlaege: {out}  ({stark} Grenzen"
+              + (f", {schwach} schwaechere als Kommentar" if schwach else "") + ")")
+    con.print(f"[dim]{coverage_note(manifest)}[/dim]")
+    con.print("[yellow]Die Ueberschriften sind leer und muessen ausgefuellt "
+              "werden.[/yellow] Danach: `slideshow build`")
+    return 0
+
+
 def _load_chapters(project: Project, angabe: str | None, defaults) -> list:
     """Kapitel laden — ausdruecklich angegeben oder als Projektdatei gefunden.
 
@@ -685,7 +738,8 @@ def cmd_selftest(args, project: Project) -> int:
 
 _COMMANDS = {
     "doctor": cmd_doctor, "probe": cmd_probe, "audio": cmd_audio,
-    "preprocess": cmd_preprocess, "beats": cmd_beats, "build": cmd_build,
+    "preprocess": cmd_preprocess, "beats": cmd_beats, "chapters": cmd_chapters,
+    "build": cmd_build,
     "render": cmd_render, "export-mlt": cmd_export_mlt, "selftest": cmd_selftest,
 }
 
@@ -762,7 +816,14 @@ def _naechster_schritt(project: Project, args) -> list[str]:
         return [f"{ruf} beats"]
 
     if not project.edit.exists():
-        return [f"{ruf} build{_build_parameter(project, manifest, beats)}"]
+        schritte = [f"{ruf} build{_build_parameter(project, manifest, beats)}"]
+        # Kapitel sind optional; der Hinweis kommt nur, solange es weder eine
+        # chapters.yaml noch eine Edit-List gibt — also genau einmal, an der
+        # Stelle, an der er noch etwas aendert.
+        if not (project.root / "chapters.yaml").exists():
+            schritte.append(f"[dim]oder vorher Kapitel vorschlagen lassen: "
+                            f"{ruf} chapters[/dim]")
+        return schritte
 
     if not (project.out / "master.mp4").exists():
         return [f"{ruf} render"]

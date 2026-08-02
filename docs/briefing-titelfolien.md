@@ -1,26 +1,25 @@
 # Briefing: Titel- und Zwischenfolien
 
-**Status:** Stufe 2 (Einbettung) **umgesetzt**, Stufe 1 (Generator) und Stufe 3
-(Kapitelerkennung) offen · **Betrifft:** neues Modul `src/slideshow/titles.py`,
+**Status:** **vollständig umgesetzt** (Stufen 1–3) · **Betrifft:** neues Modul `src/slideshow/titles.py`,
 `models.py`, `build.py`, `planner.py`, `mlt.py`, `cli.py`,
 `docs/edit-yaml.md` · **Vorbedingung:** keine
 
-> **Was heute läuft.** `slideshow build --chapters chapters.yaml` erzeugt eine
-> vollständige Edit-List mit `type: title`-Segmenten: Phrasenlage ausgerichtet,
-> Stille-Regel angewandt, Fokusblende mit gekoppelter `kb:` gesetzt, Rundlauf
-> und Deckungsrechnung stimmen. Was fehlt, ist das **Bild**:
-> `titles.render_title` wirft noch einen `SlideshowError`, `render` kann eine
-> Titelfolie also nicht encodieren. Die Nahtstelle dorthin — Schriftfindung,
-> Layoutparameter, Assetpfad, Frische-Schlüssel — steht bereits und ist
-> beschrieben in Abschnitt 5.
+> **Was heute läuft.** Der ganze Weg:
 >
-> **Eine Abweichung vom Plan:** Schrift- und Hintergrund-Hash gehen nicht in
-> den *Dateinamen* des Assets ein, sondern in den *Frische-Schlüssel* daneben
-> (`.key`-Datei, Muster aus `preprocess.py`). Damit lässt sich der Pfad ohne
-> Datei-I/O berechnen, `plan_from_edit` bleibt eine reine Funktion über
-> `edit.yaml`, und die Zusage aus Abschnitt 8 bleibt trotzdem erhalten: eine
-> unter WSL erzeugte Folie wird unter Windows neu gebacken. Begründung im
-> Modul-Docstring von `titles.py`.
+> ```
+> slideshow chapters          # Grenzen aus Zeitlücken und GPS -> chapters.yaml
+> # Überschriften ausfüllen
+> slideshow build             # findet chapters.yaml von selbst
+> slideshow render            # backt die Folien und encodiert
+> ```
+>
+> Phrasenlage, Stille-Regel, Fokusblende mit gekoppelter Kamerafahrt, Rundlauf,
+> Deckungsrechnung, Generator und MLT-Export sind umgesetzt und getestet. Die
+> Abweichungen vom hier Aufgeschriebenen stehen gesammelt in Abschnitt 5.
+>
+> Offen bleibt allein die **Sichtprüfung in Bewegung** (Anhang C, Punkte 1–3
+> und 5): sie braucht ffmpeg und eine echte Tonspur und lässt sich nicht
+> automatisieren.
 
 Eine Urlaubs-Slideshow über drei Wochen und vier Städte ist ohne Gliederung ein
 Strom aus 100 gleichwertigen Bildern. Was fehlt, ist die Zäsur: *hier endet
@@ -649,7 +648,7 @@ Stufe 1 und 3 stehen noch aus.
     mit allen Feldern und der `defaults.title`-Block. Dazu die Zeile in der
     Tabelle „Offene Baustellen" in `CLAUDE.md`.
 
-**Stufe 3 — die Kapitelerkennung** *(offen)*
+**Stufe 3 — die Kapitelerkennung** *(umgesetzt)*
 
 13. `slideshow chapters` mit Zeitlücken-Heuristik, schreibt `chapters.yaml`
     mit leeren Überschriften und vorbelegten Untertiteln.

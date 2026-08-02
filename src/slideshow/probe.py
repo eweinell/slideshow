@@ -179,6 +179,64 @@ def _parse_from_name(name: str) -> float | None:
         return None
 
 
+_ISO6709 = re.compile(r"([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)")
+
+
+def gps_from_exif(exif: dict) -> tuple[float, float] | None:
+    """Aufnahmeort aus den EXIF-Daten, als ``(lat, lon)`` in Grad.
+
+    ``exiftool -n`` liefert je nach Tag-Gruppe entweder den vorzeichenbehafteten
+    Composite-Wert oder den rohen Betrag samt ``Ref``. Deshalb wird der Betrag
+    genommen und das Vorzeichen aus ``Ref`` gesetzt, wo es eines gibt — sonst
+    kippte ein Suedhalbkugel-Foto je nach exiftool-Version einmal zu viel.
+    """
+    lat, lon = exif.get("GPSLatitude"), exif.get("GPSLongitude")
+    if lat is None or lon is None:
+        return None
+    try:
+        lat, lon = float(lat), float(lon)
+    except (TypeError, ValueError):
+        return None
+    ref_lat = str(exif.get("GPSLatitudeRef") or "").strip().upper()[:1]
+    ref_lon = str(exif.get("GPSLongitudeRef") or "").strip().upper()[:1]
+    if ref_lat in ("N", "S"):
+        lat = -abs(lat) if ref_lat == "S" else abs(lat)
+    if ref_lon in ("E", "W"):
+        lon = -abs(lon) if ref_lon == "W" else abs(lon)
+    return _gps_plausibel(lat, lon)
+
+
+def gps_from_tags(tags: dict) -> tuple[float, float] | None:
+    """Aufnahmeort aus Container-Tags (``ISO 6709``, wie Handys ihn schreiben).
+
+    ``+52.5200+013.4050+031.000/`` — Breite, Laenge, optional Hoehe.
+    """
+    for key in ("com.apple.quicktime.location.ISO6709", "location",
+                "location-eng"):
+        wert = (tags or {}).get(key)
+        if not wert:
+            continue
+        m = _ISO6709.match(str(wert).strip())
+        if m:
+            try:
+                return _gps_plausibel(float(m.group(1)), float(m.group(2)))
+            except ValueError:
+                continue
+    return None
+
+
+def _gps_plausibel(lat: float, lon: float) -> tuple[float, float] | None:
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None
+    # Genau 0/0 ist die "Nullinsel" im Golf von Guinea — praktisch immer ein
+    # leerer Fix, kein Aufenthaltsort.
+    if abs(lat) < 1e-9 and abs(lon) < 1e-9:
+        return None
+    # Auf sechs Nachkommastellen (~0,1 m) runden: mehr ist Messrauschen und
+    # laesst das Manifest zwischen zwei Laeufen wackeln.
+    return (round(lat, 6), round(lon, 6))
+
+
 def capture_time(*, exif: dict, container_tags: dict, path: Path) -> tuple[float | None, str]:
     """Fallback-Kaskade aus 4.4: EXIF -> container creation_time -> mtime -> Name."""
     for key in ("DateTimeOriginal", "CreateDate", "MediaCreateDate"):
@@ -223,7 +281,8 @@ def parse_clock_offset(spec: str) -> tuple[str, float]:
 
 _EXIF_TAGS = ["-DateTimeOriginal", "-CreateDate", "-Model", "-Make", "-Orientation",
               "-ProfileDescription", "-ColorSpace", "-ImageWidth", "-ImageHeight",
-              "-FileType"]
+              "-FileType", "-GPSLatitude", "-GPSLongitude", "-GPSLatitudeRef",
+              "-GPSLongitudeRef"]
 
 
 def read_exif_batch(paths: list[Path]) -> dict[str, dict]:
@@ -393,6 +452,7 @@ def _probe_image(project: Project, path: Path, exif: dict, taken: set[str]) -> M
         camera=camera,
         capture_time=ts,
         time_source=source,
+        gps=gps_from_exif(exif),
         image=ImageInfo(width=disp_w, height=disp_h, orientation=orientation, icc=icc,
                         portrait=bool(disp_h > disp_w)),
     )
@@ -504,6 +564,7 @@ def _probe_clip(project: Project, path: Path, taken: set[str], *,
         camera=camera,
         capture_time=ts,
         time_source=source,
+        gps=gps_from_tags(tags),
         clip=info,
     )
     if confirmed:

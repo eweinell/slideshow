@@ -106,7 +106,8 @@ def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
     if defaults.xfade.auto:
         apply_transitions(plan, defaults, explicit=_title_transitions(plan, defaults))
     clamp_transitions_for_handles(plan, manifest)
-    plan.warnings.extend(kapitel_warnungen + lage_warnungen)
+    plan.warnings.extend(kapitel_warnungen + lage_warnungen
+                         + chapter_placement_hints(plan))
     if hinweis:
         plan.warnings.insert(0, hinweis)
     cov = coverage(plan, defaults)
@@ -567,6 +568,57 @@ def _couple_focus_motion(plan: Plan, defaults: Defaults) -> None:
 
 def _klemme(v: float) -> float:
     return max(0.0, min(1.0, v))
+
+
+def chapter_placement_hints(plan: Plan) -> list[str]:
+    """Schlaegt vor, ein Kapitel zu verschieben, wenn nebenan eine Zaesur liegt.
+
+    Die Kapitel haengen an Medien-IDs, die Stille aber an der Zeitachse — beides
+    trifft erst nach dem Planen aufeinander. Faellt ein Titel *knapp* neben eine
+    Pause zwischen zwei Tracks oder eine Regionsgrenze, ist das schade: dort
+    waere die Zaesur ohnehin, und die Folie muesste den Fluss gar nicht erst
+    unterbrechen.
+
+    Ein **Vorschlag im Bericht**, keine automatische Verschiebung. Welches Foto
+    zu welcher Stadt gehoert, weiss das Werkzeug nicht — es verschoebe sonst
+    eine Kapitelgrenze mitten in einen Ort hinein.
+    """
+    hinweise: list[str] = []
+    kanten = [(r.start, r.quiet) for r in plan.regions[1:]]
+    if not kanten:
+        return hinweise
+
+    for i, slot in enumerate(plan.slots):
+        seg = slot.intent.title
+        if seg is None:
+            continue
+        if plan.regions[slot.region_index].quiet:
+            continue                    # steht bereits in der Stille
+        start = to_time(slot.start_f, plan.fps)
+        # Bezug ist die Laenge eines *Bildes*, nicht die der Folie: eine
+        # Titelfolie steht laenger als ein Foto, und "zwei Bilder spaeter" soll
+        # heissen, dass zwei Fotos die Grenze wechseln.
+        bezug = to_time(plan.slots[i - 1].frames if i else slot.frames, plan.fps)
+        # Fenster: rund zwei Bildlaengen in jede Richtung. Weiter zu schauen
+        # hiesse, eine Verschiebung vorzuschlagen, die den Abschnitt zerreisst.
+        fenster = 2.0 * bezug
+        nah = [(abs(k - start), k, quiet) for k, quiet in kanten
+               if abs(k - start) <= fenster]
+        if not nah:
+            continue
+        # Eine echte Stille ist der bessere Platz als eine blosse Regionsgrenze.
+        nah.sort(key=lambda x: (not x[2], x[0]))
+        abstand, kante, quiet = nah[0]
+        if abstand <= 1.0 / plan.fps:
+            continue                    # sitzt schon darauf
+        bilder = max(1, round(abstand / max(1e-6, bezug)))
+        richtung = "spaeter" if kante > start else "frueher"
+        was = "eine Pause im Ton" if quiet else "eine Regionsgrenze"
+        hinweise.append(
+            f"Titel {seg.title!r} beginnt bei {start:.1f} s; bei {kante:.1f} s liegt "
+            f"{was} — dort faellt die Zaesur mit dem Ton zusammen. Kapitel etwa "
+            f"{bilder} {'Bild' if bilder == 1 else 'Bilder'} {richtung} ansetzen.")
+    return hinweise
 
 
 def check_title_phrases(plan: Plan, defaults: Defaults) -> list[str]:

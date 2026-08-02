@@ -478,6 +478,41 @@ gegen Umsortieren und gegen zusätzliche Bilder stabil, alles andere verrutscht
 beim nächsten `build`. Eine ID, die es nicht gibt, ist ein Fehler mit Nennung
 des Kapitels — kein stilles Überspringen.
 
+### Die Grenzen finden lassen
+
+```
+slideshow chapters                 # -> chapters.yaml mit leeren Überschriften
+slideshow chapters --min-jump 20   # Ortssprung-Schwelle in km (Default 30)
+slideshow chapters --min-gap 12    # Zeitlücke in Stunden (Default 20)
+```
+
+Zwei Signale, beide aus dem Manifest:
+
+| Signal | Woher | Stärke |
+|---|---|---|
+| **Ortssprung** | GPS aus EXIF (Fotos) bzw. ISO-6709-Tag (Handyvideos) | Ein Sprung über 30 km *ist* der neue Ort — das treffsicherste Signal. |
+| **Zeitlücke** | `capture_time` | Ab 8 h eine Tagesgrenze, ab 20 h fast immer ein Ortswechsel. Immer verfügbar, aber grob. |
+
+**Wo Koordinaten vorliegen, entscheiden sie — auch *gegen* die Uhr.** Eine
+24-Stunden-Pause bei unveränderten Koordinaten ist eine Nacht im selben Hotel
+und kein neuer Abschnitt; ohne dieses Veto bekäme eine Reise so viele Kapitel
+wie Tage. Fehlt GPS, bleibt nur die Zeitlücke, und der Bericht sagt das:
+„kein Foto trägt Koordinaten — erkannt wird allein über Zeitlücken, und die
+sind gegenüber einem Ortswechsel blind."
+
+Die erzeugte Datei ist ein **Formular**: starke Grenzen stehen als Einträge
+drin, schwächere Kandidaten darunter auskommentiert samt Begründung (`# 24 h
+Pause, aber nur 0 km, gleicher Ort`). Ein Handgriff macht daraus einen Eintrag.
+Eine vorhandene `chapters.yaml` wird **nicht** überschrieben — sie enthält
+Handarbeit; dafür gibt es `--force`, und `--dry-run` zeigt den Vorschlag nur an.
+
+`build` prüft im Nachgang noch, **wo** ein Kapitel auf der Timeline landet: fällt
+die Zäsur knapp neben eine Pause zwischen zwei Tracks, schlägt der Bericht vor,
+sie um ein oder zwei Bilder zu verschieben. Dort fiele sie mit dem Ton zusammen,
+und die Folie müsste den Fluss gar nicht erst unterbrechen. Ein Vorschlag, keine
+automatische Verschiebung — welches Foto zu welcher Stadt gehört, weiß das
+Werkzeug nicht.
+
 Aufgerufen wird das mit `slideshow build --chapters chapters.yaml`; liegt die
 Datei unter diesem Namen im Projektverzeichnis, findet `build` sie von selbst.
 Ohne auffindbare Schriftdatei bricht der Lauf sofort ab, mit
