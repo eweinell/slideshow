@@ -200,7 +200,7 @@ gerechnet, nicht geraten — die Begründungen stehen in
 | `subtitle_scale` | float | `0.42` | Größe der zweiten Zeile, Anteil der Überschrift. |
 | `blur` | float | `60.0` | Blur-Sigma des Hintergrunds, auf 7680er Basis. Derselbe Wert wie das Hochformat-Komposit — die beiden Bildsprachen müssen zusammenpassen. |
 | `darken` | float | `0.55` | **Startwert** der Abdunklung. Der Generator misst die Leuchtdichte unter der Textfläche und führt den Wert in festen Schritten nach, bis der Kontrast trägt. |
-| `min_contrast` | float | `4.5` | Gefordertes Kontrastverhältnis zwischen Text und gemessenem Hintergrund (WCAG 2.1). Wird es bis zur Untergrenze nicht erreicht, folgt eine Warnung statt stiller Unlesbarkeit. |
+| `min_contrast` | float | `4.5` | Gefordertes Kontrastverhältnis zwischen Text und Hintergrund (WCAG 2.1). Gemessen wird das **95. Perzentil** der Leuchtdichte unter der Textfläche, nicht ihr Mittel — sonst bleibt die Folie im Durchschnitt lesbar und über ihrer hellsten Stelle trotzdem nicht. Wird der Wert bis zur Untergrenze nicht erreicht, folgt eine Warnung statt stiller Unlesbarkeit. |
 | `safe` | float | `0.10` | Safe Area ringsum, Anteil der Kante. Überlebt TV-Overscan und einen 4:5-Beschnitt. |
 | `xfade_in` | float | `1.5` | Blende **in** die Folie hinein, als Faktor auf die Standardblende. Der Film atmet in die Zäsur ein. |
 | `xfade_out` | float | `1.0` | Blende **aus** der Folie heraus, ohne Fokusblende. |
@@ -209,6 +209,14 @@ gerechnet, nicht geraten — die Begründungen stehen in
 Die drei `xfade_*`-Faktoren ändern nur die Choreografie, nicht das Bild — sie
 gehen deshalb **nicht** in den Cache-Key des Titelassets ein. Alles andere
 schon: eine Änderung an `size` oder `darken` erzeugt eine neue Datei.
+
+> **Der Rechenweg steht nicht im Hash, nur die Parameter.** Ändert sich der
+> Generator selbst, ohne dass ein Wert hier anders wird, merkt das niemand —
+> das alte Asset gälte weiter als aktuell. Dafür gibt es `TITLE_VERSION` in
+> `titles.py`, die bei jeder Änderung an Satz, Größen oder Kontrastregel
+> hochgezählt wird und damit jeden Assetpfad neu vergibt. Die alte Datei bleibt
+> als Waise in `cache/` liegen; das ist der Preis dafür, dass zwei Codestände
+> nebeneinander bestehen können, ohne sich dieselbe Datei streitig zu machen.
 
 ---
 

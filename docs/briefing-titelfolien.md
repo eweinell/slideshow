@@ -102,8 +102,20 @@ Der Generator misst die Leuchtdichte des Hintergrunds **unter der
 Textbounding-Box** und zieht die Abdunklung (bzw. einen Verlaufs-Scrim von
 unten) nach, bis das Kontrastverhältnis ≥ 4,5:1 liegt — deterministisch, in
 festen Schritten, mit Obergrenze und Warnung, wenn die Grenze nicht erreicht
-wird. Das ist billig (Pillow, ein `resize` auf 64 px genügt) und macht aus einer
-Geschmacksfrage ein Abnahmekriterium (T6). Der Messcode steht im Anhang.
+wird. Das ist billig (Pillow, ein `resize` auf ein kleines Raster genügt) und
+macht aus einer Geschmacksfrage ein Abnahmekriterium (T6). Der Messcode steht im
+Anhang.
+
+> **Gemessen wird am hellen Ende, nicht im Mittel.** Der erste Entwurf dieses
+> Briefings nahm den Mittelwert unter der Bounding-Box. Die fertige Folie hat
+> gezeigt, warum das zu wenig ist: gemittelt lag sie bei 4,5:1, während die
+> hellsten 5 % der Fläche unter dem Text nur **3,8:1** trugen — dort steht die
+> Überschrift über einer aufgehellten Stelle und wird grenzwertig. Ein
+> Mittelwert sagt eben nichts darüber, ob der Text an seiner *schlechtesten*
+> Stelle noch lesbar ist, und genau das meint das Kriterium. Seit
+> `TITLE_VERSION: 2` zählt das 95. Perzentil; dieselbe Folie trägt damit
+> gemessene 4,5:1. Das Maximum wäre die nächste Stufe, reagiert aber auf ein
+> einzelnes Feld und zöge eine ganze Folie wegen eines Lichtpunkts ins Dunkle.
 
 **Zweite Zeile automatisch.** `subtitle: auto` formatiert den
 Aufnahmezeitpunkt des folgenden Bildes aus dem Manifest
@@ -634,6 +646,7 @@ Nicht anzufassen: `planner.py` (außer der Zählung in `coverage`), `beats.py`,
 | `plan_slots` nur einmal aufrufen | Die Lagekorrektur braucht das Ergebnis des Planens (in welcher Region landet die Folie?) und ändert danach die Absicht. `plan_with_titles` iteriert deshalb bis zu viermal; der Planer selbst bleibt unberührt. |
 | — | `mlt.py:299` nimmt Titelfolien im `--reimport` bereits mit; ohne das wäre der Reimport eines Projekts mit Titeln abgestürzt. Der Export selbst brauchte keine Änderung — er geht über `plan.slots`, und dort ist eine Folie ein Standbild. |
 | `ensure_title_assets` in `titles.py` (Punkt 8) | Liegt in `preprocess.py`. Dort wohnen `_is_fresh`/`_mark_fresh` und der Begriff „Erzeugnis in `cache/`" ohnehin; `titles.py` bleibt dadurch reine Rechnung ohne Datei-I/O. |
+| Kontrast als Mittelwert (Anhang A) | 95. Perzentil, `TITLE_VERSION: 2`. Am fertigen Bild gemessen: der Mittelwert lag bei 4,5:1, die hellsten 5 % der Fläche unter dem Text bei 3,8:1 — das Kriterium war erfüllt und der Text trotzdem grenzwertig. Nach der Umstellung 4,5:1 an derselben Stelle. |
 | Folie in Ausgabegröße | Folie auf der **Normalform** (`title_canvas`, 7680 × 4320). Abschnitt 4 nennt die Oversampling-Zusage, die Umsetzung hätte sie ohne diesen Schritt gebrochen: `edit.size` ist 3840 × 2160, und bei 1,3-fachem Zoom wäre der eingebrannte Text weich geworden. Nebeneffekt: der Assetpfad hängt nicht mehr an der Ausgabegröße. |
 
 ---
@@ -690,9 +703,12 @@ Nicht anzufassen: `planner.py` (außer der Zählung in `coverage`), `beats.py`,
   `snap_back: true` **muss** der Test fehlschlagen — sonst prüft er die Falle
   aus Entscheidung 3b gar nicht.
 - **T6 — Lesbarkeit.** Auf dem erzeugten Asset liegt das Kontrastverhältnis
-  zwischen Textfarbe und der gemessenen mittleren Leuchtdichte unter der
-  Textbounding-Box bei ≥ 4,5:1 — geprüft gegen ein absichtlich helles
-  Testbild (weißer Verlauf) und ein dunkles.
+  zwischen Textfarbe und dem **95. Perzentil** der Leuchtdichte unter der
+  Textbounding-Box bei ≥ 4,5:1 — geprüft gegen ein absichtlich helles Testbild
+  (weißer Verlauf) und ein dunkles. Das Perzentil, nicht das Mittel: sonst
+  bleibt die Folie im Durchschnitt lesbar und über ihrer hellsten Stelle
+  trotzdem nicht. Gegenprobe ist ein überwiegend dunkler Hintergrund mit einer
+  hellen Fläche unter dem Text — gemittelt fiele er nicht auf.
 - **T7 — Safe Area.** Die Bounding-Box beider Zeilen liegt vollständig
   innerhalb der um `safe` eingerückten Fläche; Überlauf einer langen
   Überschrift führt zu automatischer Verkleinerung bis 0,7 × und danach zu
@@ -774,23 +790,38 @@ def _contrast(a: float, b: float) -> float:
 
 
 def fit_darkening(bg, box, text_rgb=(255, 255, 255), *, start=0.55,
-                  minimum=4.5, floor=0.25, step=0.05) -> float:
+                  minimum=4.5, floor=0.25, step=0.05,
+                  grid=32, percentile=0.95) -> float:
     """Abdunklungsfaktor, der unter der Textfläche den Kontrast trägt.
 
-    Deterministisch: feste Schrittweite, feste Untergrenze. Zwei Läufe auf
-    demselben Bild liefern denselben Wert — Voraussetzung für den Cache.
+    Deterministisch: festes Raster, feste Schrittweite, feste Untergrenze. Zwei
+    Läufe auf demselben Bild liefern denselben Wert — Voraussetzung für den
+    Cache.
+
+    Getragen werden muss der Kontrast am **hellen Ende** der Fläche, nicht im
+    Mittel: sonst ist die Folie im Durchschnitt lesbar und über der hellsten
+    Stelle trotzdem nicht.
+
+    Je Feld erst die Abdunklung, dann die Leuchtdichte. Die Reihenfolge ist
+    nicht beliebig — die Transferkurve ist nicht linear, und ein Perzentil über
+    Mittelwerte wäre kein Perzentil der Leuchtdichte mehr.
     """
-    patch = bg.crop(box).resize((16, 16))          # 256 Pixel genügen völlig
-    px = list(patch.getdata())
-    mean = tuple(sum(c[i] for c in px) / len(px) for i in range(3))
+    raster = bg.crop(box).resize((grid, grid)).convert("RGB")
+    raw = raster.tobytes()                          # 3 Bytes je Feld
+    fields = [raw[i:i + 3] for i in range(0, len(raw), 3)]
     lt = _relative_luminance(text_rgb)
+    rank = min(len(fields) - 1, int(len(fields) * percentile))
+
+    def contrast_at(factor):
+        hi = sorted(_relative_luminance([c * factor for c in f])
+                    for f in fields)[rank]
+        return _contrast(lt, hi)
 
     factor = start
     while factor > floor:
-        lb = _relative_luminance(tuple(v * factor for v in mean))
-        if _contrast(lt, lb) >= minimum:
+        if contrast_at(factor) >= minimum:
             return round(factor, 3)
-        factor -= step
+        factor = round(factor - step, 3)
     return floor        # + Warnung: Motiv trägt keinen hellen Text
 ```
 

@@ -47,7 +47,17 @@ from .models import Defaults, TitleDefaults, TitleSegment
 
 #: Version des Layouts. Muss bei **jeder** Aenderung an Satz, Groessen oder
 #: Kontrastregel hoch — dieselbe Disziplin wie bei ``PREPROC_VERSION``.
-TITLE_VERSION = 1
+#:
+#: Im Hash stehen die *Parameter* (``darken``, ``min_contrast``, ``size``), nicht
+#: der *Rechenweg*. Aendert man nur letzteren, bliebe der Frische-Schluessel
+#: gleich, und ein Asset mit dem alten Aussehen ueberlebte unbemerkt. Diese Zahl
+#: ist der einzige Griff, mit dem sich "der Code dahinter ist ein anderer"
+#: ausdruecken laesst.
+#:
+#: 2 — Kontrast wird am hellen Ende der Textflaeche gemessen statt im Mittel
+#:     (``MEASURE_PERCENTILE``).
+#: 1 — erste Fassung.
+TITLE_VERSION = 2
 
 #: Lesezeit einer Folie: Grundzeit plus Zuschlag je Wort. Untergrenze fuer die
 #: Standzeit; darunter wird gewarnt (Entscheidung 3).
@@ -283,6 +293,24 @@ HARD_MIN_SCALE = 0.20
 #: macht die Messung deterministisch und damit cachefaehig.
 DARKEN_STEP = 0.05
 DARKEN_FLOOR = 0.25
+
+#: Rastergroesse der Kontrastmessung. Der Hintergrund ist unter dem Text immer
+#: weichgezeichnet, hat dort also keine feinen Strukturen — 1024 Felder genuegen
+#: fuer ein belastbares Perzentil und kosten nichts.
+MEASURE_GRID = 32
+
+#: Welches Perzentil der Leuchtdichte den Kontrast tragen muss.
+#:
+#: **Nicht der Mittelwert**, obwohl Anhang A des Briefings ihn vorschlug. Ein
+#: Mittelwert sagt nichts darueber, ob der Text an seiner *hellsten* Stelle noch
+#: lesbar ist: gemessen an der Beispielfolie lag er bei 4,5:1, waehrend die
+#: hellsten 5 % der Flaeche unter dem Text nur 3,8:1 trugen — dort steht die
+#: Ueberschrift ueber einer aufgehellten Stelle und wird grenzwertig. Das
+#: Kriterium meint die Lesbarkeit, nicht den Durchschnitt.
+#:
+#: Das Maximum waere die naechste Stufe, reagiert aber auf ein einzelnes Feld
+#: und zoege eine ganze Folie wegen eines Lichtpunkts ins Dunkle.
+MEASURE_PERCENTILE = 0.95
 
 #: Der Blur laeuft auf 1/8 der Kantenlaenge — derselbe Trick wie im
 #: Hochformat-Komposit, dort mit ~50-fachem Gewinn gemessen.
@@ -611,23 +639,36 @@ def _fit_darkening(bg, box, *, start: float, minimum: float,
                    step: float = DARKEN_STEP) -> tuple[float, float]:
     """Abdunklungsfaktor, der **unter der Textflaeche** den Kontrast traegt.
 
-    Deterministisch: feste Schrittweite, feste Untergrenze. Zwei Laeufe auf
-    demselben Bild liefern denselben Wert — Voraussetzung fuer den Cache (T2).
-    Gemessen wird nur unter dem Text; ein heller Himmel am Bildrand darf die
-    ganze Folie nicht schwarz ziehen.
-    """
-    from PIL import ImageStat
+    Deterministisch: festes Raster, feste Schrittweite, feste Untergrenze. Zwei
+    Laeufe auf demselben Bild liefern denselben Wert — Voraussetzung fuer den
+    Cache (T2). Gemessen wird nur unter dem Text; ein heller Himmel am Bildrand
+    darf die ganze Folie nicht schwarz ziehen.
 
-    # 256 Pixel genuegen voellig. ``ImageStat`` statt der Summe ueber
-    # ``getdata()`` aus dem Anhang: identischer Wert, aber ohne die in Pillow 12
-    # veraltete Schnittstelle.
-    mittel = ImageStat.Stat(bg.crop(box).resize((16, 16))).mean[:3]
+    Getragen werden muss der Kontrast am **hellen Ende** der Flaeche
+    (``MEASURE_PERCENTILE``), nicht im Mittel. Die Begruendung steht dort.
+
+    Gerechnet wird je Feld: erst die Abdunklung auf die sRGB-Werte, dann die
+    Leuchtdichte. Die Reihenfolge ist nicht beliebig — die Transferkurve ist
+    nicht linear, und ein Perzentil ueber Mittelwerte waere kein Perzentil der
+    Leuchtdichte mehr.
+    """
+    raster = bg.crop(box).resize((MEASURE_GRID, MEASURE_GRID)).convert("RGB")
+    # ``tobytes`` statt ``getdata``: Letzteres ist in Pillow 12 als veraltet
+    # markiert, und drei Bytes je Feld sind hier ohnehin die direktere Form.
+    roh = raster.tobytes()
+    felder = [roh[i:i + 3] for i in range(0, len(roh), 3)]
     lt = _relative_luminance(TEXT_RGB)
+    rang = min(len(felder) - 1, int(len(felder) * MEASURE_PERCENTILE))
+
+    def kontrast_bei(faktor: float) -> float:
+        hell = sorted(_relative_luminance([c * faktor for c in feld])
+                      for feld in felder)[rang]
+        return _contrast(lt, hell)
 
     faktor = start
     while faktor > floor:
-        k = _contrast(lt, _relative_luminance([v * faktor for v in mittel]))
+        k = kontrast_bei(faktor)
         if k >= minimum:
             return (round(faktor, 3), k)
         faktor = round(faktor - step, 3)
-    return (floor, _contrast(lt, _relative_luminance([v * floor for v in mittel])))
+    return (floor, kontrast_bei(floor))

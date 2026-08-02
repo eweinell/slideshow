@@ -304,12 +304,56 @@ def test_ein_unlesbarer_hintergrund_wird_gemeldet_statt_zu_werfen(tmp_path):
     assert any("nicht lesbar" in w for w in info["warnungen"])
 
 
+def test_eine_helle_stelle_unter_dem_text_zieht_die_abdunklung_nach(tmp_path):
+    """Der Grund, warum am hellen Ende gemessen wird und nicht im Mittel.
+
+    Der Hintergrund ist ueberwiegend dunkel und traegt eine helle Flaeche, die
+    unter dem Text liegt — der Sonnenfleck im Bild. Ueber die ganze Textflaeche
+    gemittelt bliebe er unauffaellig, und die Ueberschrift stuende dort, wo sie
+    hell ist, auf hellem Grund.
+
+    Gegenprobe ist derselbe Hintergrund ohne den Fleck: er darf **nicht**
+    nachgedunkelt werden, sonst prueft der Test nur, dass irgendwann
+    abgedunkelt wird.
+    """
+    def kulisse(pfad, *, mit_fleck: bool):
+        bild = Image.new("RGB", (800, 500), (24, 26, 30))
+        if mit_fleck:
+            # Etwa ein Fuenftel der Breite, auf Hoehe der Ueberschrift.
+            bild.paste((235, 232, 220), (300, 170, 470, 260))
+        bild.save(pfad, format="JPEG", quality=95)
+        return pfad
+
+    ohne_blur = Defaults()
+    ohne_blur.title.blur = 0.0          # sonst verwischt der Fleck ins Umfeld
+    seg = _folie(bg="cache/img_005.jpg")
+
+    _p, mit = _backen(tmp_path, seg, kulisse(tmp_path / "fleck.jpg", mit_fleck=True),
+                      name="mit.jpg", defaults=ohne_blur)
+    _p, ohne = _backen(tmp_path, seg, kulisse(tmp_path / "glatt.jpg", mit_fleck=False),
+                       name="ohne.jpg", defaults=ohne_blur)
+
+    assert ohne["abdunklung"] == ohne_blur.title.darken, \
+        "ein durchgehend dunkler Grund braucht keine Nachfuehrung"
+    assert mit["abdunklung"] < ohne["abdunklung"], \
+        "die helle Stelle unter dem Text muss die Abdunklung nachziehen"
+    assert mit["kontrast"] >= ohne_blur.title.min_contrast
+
+
 def test_der_hintergrund_wird_weichgezeichnet(tmp_path):
     """Der Titelhintergrund muss dieselbe Unschaerfe tragen wie das
     Hochformat-Komposit, sonst wirken die beiden wie zwei verschiedene Filme.
 
     Gemessen an der Streuung ueber ein hartes Streifenmuster: mit Blur ist sie
     deutlich geringer als ohne.
+
+    Gemessen wird der **Variationskoeffizient** (Streuung durch Mittelwert),
+    nicht die Streuung selbst. Die Abdunklung ist eine Multiplikation, sie
+    skaliert beide Groessen gleich und faellt im Quotienten heraus. Die blosse
+    Streuung taugt hier nicht: das scharfe Streifenmuster traegt hellere Stellen
+    unter dem Text, bekommt deshalb eine staerkere Abdunklung — und verliert
+    dadurch selbst an Streuung. Der Test maesse dann Blur und Abdunklung
+    zugleich und wuerde umso schwaecher, je besser die Kontrastregel arbeitet.
     """
     from PIL import ImageStat
 
@@ -325,7 +369,9 @@ def test_der_hintergrund_wird_weichgezeichnet(tmp_path):
     scharf, _ = _backen(tmp_path, seg, quelle, name="scharf.jpg", defaults=ohne)
     weich, _ = _backen(tmp_path, seg, quelle, name="weich.jpg")
 
-    with Image.open(scharf) as a, Image.open(weich) as b:
-        streuung_scharf = ImageStat.Stat(a.convert("L")).stddev[0]
-        streuung_weich = ImageStat.Stat(b.convert("L")).stddev[0]
-    assert streuung_weich < streuung_scharf * 0.75
+    def variation(pfad):
+        with Image.open(pfad) as im:
+            st = ImageStat.Stat(im.convert("L"))
+        return st.stddev[0] / max(1e-9, st.mean[0])
+
+    assert variation(weich) < variation(scharf) * 0.8
