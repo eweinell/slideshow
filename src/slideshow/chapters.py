@@ -192,10 +192,16 @@ def dump_chapters_yaml(vorschlaege: list[Vorschlag], *, hinweis: str = "",
     zeilen += ["", "chapters:"]
 
     if auftakt:
+        # Ohne `beats:`. Ein Film faengt haeufig mit einer free-Region an — die
+        # ersten Sekunden eines Stuecks lassen sich selten rastern —, und dort
+        # bliebe die Angabe wirkungslos. Die Standzeit kommt aus
+        # `defaults.title`, und wer sie anders will, nimmt `dur:` in Sekunden.
         zeilen += [
             "  # Auftakt vor allem Material. `bg` als Farbflaeche, weil es hier",
             "  # noch kein 'naechstes Bild' gibt, das etwas ankuendigen koennte.",
-            '  - {at: 0, title: "", subtitle: "", bg: "#1b2a3a", beats: 16}',
+            "  # Laenger stehen lassen: `dur: 6` (Sekunden, gilt ueberall) oder",
+            "  # `beats: 16` (nur in einer Beat-Region wirksam).",
+            '  - {at: 0, title: "", subtitle: "", bg: "#1b2a3a"}',
         ]
 
     stark = [v for v in vorschlaege if v.staerke == "stark"]

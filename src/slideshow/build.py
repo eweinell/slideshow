@@ -266,9 +266,16 @@ def insert_titles(intents: list[Intent], chapters: list[Chapter],
 
         seg = TitleSegment(title=kap.title, subtitle=subtitle, bg=bg,
                            beats=kap.beats, dur=kap.dur, style=kap.style, kb=kap.kb)
+        # ``beats``/``dur`` bleiben hier bewusst **leer**. Welches der beiden
+        # gilt, haengt an der Region, in der die Folie landet — und die steht
+        # erst nach dem ersten Planen fest. Gaebe man ``beats`` schon jetzt
+        # mit, scheiterte ``plan_slots`` an einem Titel, der in einer
+        # free-Region beginnt ("`beats:` ist nur in einer beat-Region
+        # gueltig"), bevor die Lagekorrektur ueberhaupt zum Zug kaeme. Der
+        # Wunsch des Kapitels steht in ``seg`` und wird dort abgeholt.
         intents.insert(pos + versatz,
                        Intent(kind="still", src=title_asset(seg, defaults, title_canvas(size)),
-                              beats=kap.beats, dur=kap.dur, kb=kap.kb, title=seg))
+                              kb=kap.kb, title=seg))
 
     # Die Positionen der nachfolgenden Intents haben sich verschoben; ``index``
     # zeigt in Fehlermeldungen auf das Segment und muss stimmen.
@@ -467,6 +474,15 @@ def _titel_in_freeregion(plan: Plan, i: int, defaults: Defaults,
     if seg.dur is not None:
         return _setze(slot.intent, beats=None, dur=seg.dur)
 
+    if seg.beats is not None:
+        # `beats` gilt hier nicht, und stillschweigend zu ignorieren waere die
+        # schlechteste Antwort: die Zahl steht sichtbar in chapters.yaml und
+        # taete offenbar etwas.
+        lage.meldungen[("beats-frei", seg.title)] = (
+            f"Titel {seg.title!r} liegt in einer free-Region ohne Beat-Raster — "
+            f"`beats: {seg.beats:g}` bleibt dort wirkungslos. Fuer eine feste "
+            f"Standzeit `dur:` in Sekunden angeben.")
+
     if not slot.hold:
         if to_time(slot.frames, plan.fps) < lese - 1e-6:
             lage.meldungen[("kurz", seg.title)] = (
@@ -591,6 +607,10 @@ def chapter_placement_hints(plan: Plan) -> list[str]:
     for i, slot in enumerate(plan.slots):
         seg = slot.intent.title
         if seg is None:
+            continue
+        if i == 0:
+            # Der Auftakt gehoert an den Anfang, nicht auf eine Zaesur — davor
+            # gibt es nichts, wovon er sich absetzen koennte.
             continue
         if plan.regions[slot.region_index].quiet:
             continue                    # steht bereits in der Stille

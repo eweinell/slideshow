@@ -181,6 +181,48 @@ def test_in_langer_stille_wird_snap_back_abgeschaltet():
         "ohne snap_back: false frisst die Folie die ganze Stille"
 
 
+def test_ein_auftakt_mit_beats_in_einer_free_region_bricht_nicht_ab():
+    """Regression aus dem ersten Smoketest.
+
+    `slideshow chapters` schrieb dem Auftakt ein `beats:` mit, und ein Film
+    beginnt haeufig mit einer free-Region — die ersten Sekunden eines Stuecks
+    lassen sich selten rastern. ``beats`` wurde damals schon beim Einsetzen auf
+    den Intent gelegt, also **bevor** feststand, in welcher Region die Folie
+    landet: der erste ``plan_slots``-Lauf scheiterte an "`beats:` ist nur in
+    einer beat-Region gueltig", noch bevor die Lagekorrektur zum Zug kam.
+    """
+    regions = [Region(type="free", start=0.0, end=4.015,
+                      reason="niedrige Rhythmus-Konfidenz"),
+               _beat_region(4.015, 90.0)]
+    edit, plan, _cov = _bauen(_manifest(), regions,
+                              [Chapter(at=0, title="Skandinavien", beats=16)])
+
+    folie = next(s for s in edit.segments if isinstance(s, TitleSegment))
+    assert folie.beats is None, "in einer free-Region gibt es keine Beats"
+    assert plan.slots[0].intent.title is not None
+    # Wirkungslos, aber nicht stillschweigend: die Zahl steht sichtbar in
+    # chapters.yaml und taete offenbar etwas.
+    assert any("wirkungslos" in w for w in plan.warnings)
+
+
+def test_der_auftakt_bekommt_keinen_verschiebevorschlag():
+    """Er gehoert an den Anfang, nicht auf eine Zaesur — davor ist nichts."""
+    regions = [Region(type="free", start=0.0, end=4.015, reason="Intro"),
+               _beat_region(4.015, 90.0)]
+    _edit, plan, _cov = _bauen(_manifest(), regions,
+                               [Chapter(at=0, title="Skandinavien")])
+    assert not [w for w in plan.warnings if "Regionsgrenze" in w
+                and "Skandinavien" in w]
+
+
+def test_ein_kapitel_mit_beats_in_einer_beat_region_wirkt():
+    """Die Gegenprobe: dort ist `beats` genau richtig und wird uebernommen."""
+    edit, _plan, _cov = _bauen(_manifest(), [_beat_region()],
+                               [Chapter(before="img_005", title="Malmoe", beats=16)])
+    folie = next(s for s in edit.segments if isinstance(s, TitleSegment))
+    assert folie.beats == 16
+
+
 def test_kurze_stille_braucht_keinen_override():
     """Der Normalfall: unter ``hold_seconds`` kachelt die Region von selbst."""
     regions = [_beat_region(0.0, 40.0),
