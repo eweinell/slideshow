@@ -5,14 +5,15 @@ der Normalform gebacken wird, dass ein Projekt ohne Titel keine Schrift
 braucht, dass der Hintergrund aus dem Original kommt und nicht aus dem
 Zwischenprodukt, und dass ein fehlendes Asset die richtige Diagnose bekommt.
 
-``render_title`` selbst wirft derzeit noch (Stufe 1 des Briefings ist offen).
-Die Tests hier fassen es deshalb nur ueber ``--dry-run`` an oder pruefen die
-Wege davor und danach.
+Das Aussehen der Folie steht in ``test_titles_generator.py``; hier interessiert
+nur, dass sie an der richtigen Stelle, in der richtigen Groesse und genau
+einmal entsteht.
 """
 
 from __future__ import annotations
 
 import pytest
+from PIL import Image
 
 from slideshow.build import check_sources_exist
 from slideshow.errors import SchemaError, SlideshowError
@@ -98,13 +99,34 @@ def test_dry_run_erzeugt_nichts(titelprojekt):
     assert "Malmoe" in " ".join(dry.commands[0])
 
 
-def test_der_generator_meldet_sich_verstaendlich(titelprojekt):
-    """Solange Stufe 1 offen ist, ist das die ehrlichste Antwort — kein
-    Traceback und kein leeres Bild."""
-    with pytest.raises(SlideshowError) as exc:
-        ensure_title_assets(titelprojekt["project"], titelprojekt["edit"],
-                            titelprojekt["manifest"])
-    assert "Titelgenerator" in str(exc.value)
+def test_die_folie_entsteht_einmal_und_kommt_danach_aus_dem_cache(titelprojekt,
+                                                                  monkeypatch):
+    """Die Cache-Haelfte von T2.
+
+    ``ensure_title_assets`` laeuft vor **jedem** Render- und MLT-Export; kostete
+    sie jedes Mal eine Neuerzeugung, waere das Asset jedes Mal ein anderes
+    Byte-Muster und der Segment-Cache dahinter wertlos.
+
+    Die Leinwand wird kleingestellt: geprueft wird das Zusammenspiel, und
+    7680 px waeren dafuer reine Wartezeit — dieselbe Ueberlegung wie bei
+    ``TEST_LONG_EDGE`` in ``conftest.py``.
+    """
+    monkeypatch.setattr("slideshow.preprocess.LONG_EDGE", 1280)
+    p, edit, manifest = (titelprojekt["project"], titelprojekt["edit"],
+                         titelprojekt["manifest"])
+    canvas = title_canvas(tuple(edit.size))
+    folie = next(s for s in edit.segments if isinstance(s, TitleSegment))
+    out = p.abs(title_asset(folie, edit.defaults, canvas))
+
+    stats = ensure_title_assets(p, edit, manifest)
+    assert (stats.erzeugt, stats.aus_cache) == (1, 0)
+    with Image.open(out) as bild:
+        assert bild.size == canvas
+    zustand = (out.read_bytes(), out.stat().st_mtime_ns)
+
+    stats = ensure_title_assets(p, edit, manifest)
+    assert (stats.erzeugt, stats.aus_cache) == (0, 1)
+    assert (out.read_bytes(), out.stat().st_mtime_ns) == zustand
 
 
 # --------------------------------------------------------------------------

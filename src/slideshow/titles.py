@@ -11,8 +11,9 @@ Dieses Modul haelt deshalb zwei sehr verschiedene Dinge auseinander:
 Frische-Schluessel. Sie ist rein rechnend, macht kein Datei-I/O und bestimmt,
 **wie** eine Folie heisst. ``build`` braucht nur das.
 
-*Der Generator* — :func:`render_title`, der die Pixel erzeugt. Er ist die
-zweite Stufe des Briefings und noch nicht umgesetzt.
+*Der Generator* — :func:`render_title`, der die Pixel erzeugt. Er arbeitet
+zweischichtig (:func:`_background`, :func:`_text_layer`) und flacht die beiden
+Ebenen erst beim Schreiben zusammen.
 
 .. rubric:: Warum der Dateiname nicht vom Bildinhalt abhaengt
 
@@ -42,7 +43,7 @@ from pathlib import Path
 
 from .cache import cache_key, param_hash
 from .errors import SlideshowError
-from .models import Defaults, TitleSegment
+from .models import Defaults, TitleDefaults, TitleSegment
 
 #: Version des Layouts. Muss bei **jeder** Aenderung an Satz, Groessen oder
 #: Kontrastregel hoch — dieselbe Disziplin wie bei ``PREPROC_VERSION``.
@@ -251,6 +252,43 @@ def reading_seconds(seg: TitleSegment) -> float:
 # Generator (Stufe 1 des Briefings)
 # --------------------------------------------------------------------------
 
+#: Textfarbe. Nur fuer Weiss auf abgedunkeltem Grund ist die Kontrastregel aus
+#: Abschnitt 2 gerechnet; eine zweite Farbe waere eine zweite Messung.
+TEXT_RGB = (255, 255, 255)
+
+#: Die Masse aus der Tabelle in Abschnitt 2, jeweils als Anteil. Sie stehen
+#: hier und nicht in ``TitleDefaults``, weil sie die Gestalt *festlegen*: wer
+#: sie aendert, aendert das Aussehen aller Folien und erhoeht ``TITLE_VERSION``.
+#: Einstellbar ist, was der Anwender je Projekt anders wollen kann — Groesse,
+#: Blur, Abdunklung, Safe Area —, und das steht bereits dort.
+LINE_GAP = 0.55          # Zeilenabstand, Anteil der Versalhoehe
+RULE_LENGTH = 0.12       # Trennlinie, Anteil der Bildhoehe
+RULE_WEIGHT = 0.045      # Staerke der Trennlinie, Anteil der Versalhoehe
+TRACK_TITLE = 0.04       # Sperrung der Ueberschrift, em
+TRACK_SUBTITLE = 0.10    # Sperrung der zweiten Zeile, em
+OPTICAL_AXIS = 0.52      # optische Satzachse; geometrisch mittig wirkt zu tief
+
+#: Schriftgroesse, bei der die Versalhoehe einmal ausgemessen wird. Gross
+#: genug, dass die Rundung der Hinting-Stufen nicht durchschlaegt.
+_PROBE_SIZE = 200
+
+#: Ueberlauf: bis hierher wird stillschweigend verkleinert (T7), danach folgt
+#: eine Warnung. ``HARD_MIN_SCALE`` ist die Notbremse davor, dass Text am
+#: Bildrand abgeschnitten wird — das Ergebnis, das es nie geben darf.
+MIN_SCALE = 0.70
+SCALE_STEP = 0.02
+HARD_MIN_SCALE = 0.20
+
+#: Abdunklung: feste Schritte, feste Untergrenze (Anhang A). Beides zusammen
+#: macht die Messung deterministisch und damit cachefaehig.
+DARKEN_STEP = 0.05
+DARKEN_FLOOR = 0.25
+
+#: Der Blur laeuft auf 1/8 der Kantenlaenge — derselbe Trick wie im
+#: Hochformat-Komposit, dort mit ~50-fachem Gewinn gemessen.
+BLUR_SHRINK = 8
+
+
 def render_title(seg: TitleSegment, defaults: Defaults, *, bg_source: Path | None,
                  out: Path, size: tuple[int, int], font: Path) -> dict:
     """Erzeugt das Titelasset.
@@ -270,7 +308,326 @@ def render_title(seg: TitleSegment, defaults: Defaults, *, bg_source: Path | Non
 
     Gibt die Kennzahlen der Kontrastmessung zurueck (Abnahmekriterium T6).
     """
-    raise SlideshowError(
-        "Der Titelgenerator ist noch nicht umgesetzt (Stufe 1 aus "
-        "docs/briefing-titelfolien.md). `slideshow build` erzeugt die Edit-List "
-        "mit Titelfolien bereits vollstaendig; zum Rendern fehlt das Asset.")
+    t = defaults.title
+    warnungen: list[str] = []
+
+    # Reihenfolge: erst der Satz, dann der Hintergrund. Die Abdunklung wird
+    # unter der Textflaeche gemessen, und die kennt man erst, wenn der Text
+    # steht — ein Sonnenuntergang bleibt auch unscharf hell, aber eben nicht
+    # ueberall gleich.
+    satz = _layout(seg, t, size, font)
+    warnungen += satz["warnungen"]
+    text = _text_layer(size, satz)
+    box = _messbox(text, size)
+
+    grund, bg_warnungen, art = _background(seg, t, bg_source, size)
+    warnungen += bg_warnungen
+
+    # Startwert nur fuer Fotos. Eine ausdruecklich gewaehlte Farbflaeche pauschal
+    # auf 55 % zu daempfen hiesse, die Wahl des Anwenders zu ueberschreiben;
+    # nachgefuehrt wird sie trotzdem, wenn sie den Text nicht traegt.
+    start = t.darken if art == "image" else 1.0
+    faktor, kontrast = _fit_darkening(grund, box, start=start,
+                                      minimum=t.min_contrast)
+    if kontrast < t.min_contrast:
+        warnungen.append(
+            f"Der Hintergrund traegt den hellen Text nicht: gemessener Kontrast "
+            f"{kontrast:.1f}:1 bei maximaler Abdunklung ({DARKEN_FLOOR:g}), "
+            f"gefordert sind {t.min_contrast:g}:1.")
+    if faktor < 1.0:
+        grund = grund.point(lambda v: int(v * faktor))
+
+    # Das Zusammenflachen ist der einzige Schritt, der in Stufe 2 entfaellt,
+    # wenn der Text als eigene Ebene stehen bleiben soll (Entscheidung 1c).
+    grund.paste(text, (0, 0), text)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    grund.save(out, format="JPEG", quality=95, subsampling=0, optimize=True,
+               progressive=False)
+    return {"warnungen": warnungen, "kontrast": round(kontrast, 2),
+            "abdunklung": faktor, "schrift_faktor": satz["scale"],
+            "box": list(box), "canvas": list(size)}
+
+
+# --- Satz -----------------------------------------------------------------
+
+def _layout(seg: TitleSegment, t: TitleDefaults, size: tuple[int, int],
+            font: Path) -> dict:
+    """Der Satzplan: Schriftgroessen, Grundlinien, Trennlinie, Ueberlauf.
+
+    Rein rechnend und ohne Leinwand — dadurch kostet die Verkleinerungsschleife
+    nur ein paar Metrikabfragen statt eines Neuzeichnens.
+    """
+    from PIL import ImageFont
+
+    w, h = size
+    warnungen: list[str] = []
+    kopf = _versalien(seg.title)
+    unter = (seg.subtitle or "").strip()
+
+    # Versalhoehe je Pixel Schriftgroesse. Einmal gemessen statt je Durchlauf:
+    # FreeType skaliert linear, die Rundung wird danach nachgemessen.
+    probe = ImageFont.truetype(str(font), _PROBE_SIZE)
+    verhaeltnis = _versalhoehe(probe) / _PROBE_SIZE or 0.7
+
+    safe = (t.safe * w, t.safe * h, w - t.safe * w, h - t.safe * h)
+    scale = 1.0
+    plan = _satz(kopf, unter, t, size, font, verhaeltnis, scale)
+    while not _passt(plan["box"], safe) and scale > MIN_SCALE:
+        scale = round(scale - SCALE_STEP, 4)
+        plan = _satz(kopf, unter, t, size, font, verhaeltnis, scale)
+
+    if not _passt(plan["box"], safe):
+        # Notbremse: abgeschnittener Text ist das eine Ergebnis, das nie
+        # herauskommen darf. Die Safe Area ist dann verloren, das Bild nicht.
+        leinwand = (0.0, 0.0, float(w), float(h))
+        while not _passt(plan["box"], leinwand) and scale > HARD_MIN_SCALE:
+            scale = round(scale - SCALE_STEP, 4)
+            plan = _satz(kopf, unter, t, size, font, verhaeltnis, scale)
+        warnungen.append(
+            f"Die Ueberschrift passt auch bei {MIN_SCALE:.2f}x nicht in die Safe "
+            f"Area ({t.safe:.0%} ringsum); gesetzt wird mit {plan['scale']:.2f}x. "
+            f"Kuerzere Fassung waehlen oder defaults.title.size senken.")
+
+    plan["warnungen"] = warnungen
+    return plan
+
+
+def _satz(kopf: str, unter: str, t: TitleDefaults, size: tuple[int, int], font: Path,
+          verhaeltnis: float, scale: float) -> dict:
+    """Ein vollstaendiger Satzplan fuer genau einen Verkleinerungsfaktor."""
+    from PIL import ImageFont
+
+    w, h = size
+    kopf_font = ImageFont.truetype(str(font),
+                                   max(1, round(t.size * h * scale / verhaeltnis)))
+    cap = _versalhoehe(kopf_font)
+    sperr_kopf = TRACK_TITLE * kopf_font.size
+
+    unter_font = None
+    cap_unter = 0.0
+    sperr_unter = 0.0
+    if unter:
+        unter_font = ImageFont.truetype(
+            str(font), max(1, round(cap * t.subtitle_scale / verhaeltnis)))
+        cap_unter = _versalhoehe(unter_font)
+        sperr_unter = TRACK_SUBTITLE * unter_font.size
+
+    abstand = LINE_GAP * cap
+    linie_h = max(1, round(RULE_WEIGHT * cap))
+    linie_w = RULE_LENGTH * h * scale
+
+    # Blockhoehe ueber die Versalhoehen, nicht ueber die Tintenhoehe: sonst
+    # sitzt derselbe Titel je nach Umlaut oder Unterlaenge anders im Bild.
+    linie_oben = cap + abstand
+    linie_unten = linie_oben + linie_h
+    unter_grund = linie_unten + abstand + cap_unter if unter else 0.0
+    block = unter_grund if unter else linie_unten
+    oben = OPTICAL_AXIS * h - block / 2
+    mitte = w / 2
+
+    zeilen = []
+    kasten = []
+    kopf_breite = _zeilenbreite(kopf_font, kopf, sperr_kopf)
+    zeilen.append({"font": kopf_font, "text": kopf, "x": mitte - kopf_breite / 2,
+                   "baseline": oben + cap, "spacing": sperr_kopf})
+    kasten.append(_zeilenkasten(kopf_font, kopf, mitte - kopf_breite / 2,
+                                oben + cap, kopf_breite))
+
+    linie = (mitte - linie_w / 2, oben + linie_oben,
+             mitte + linie_w / 2, oben + linie_unten)
+    kasten.append(linie)
+
+    if unter:
+        unter_breite = _zeilenbreite(unter_font, unter, sperr_unter)
+        zeilen.append({"font": unter_font, "text": unter,
+                       "x": mitte - unter_breite / 2, "baseline": oben + unter_grund,
+                       "spacing": sperr_unter})
+        kasten.append(_zeilenkasten(unter_font, unter, mitte - unter_breite / 2,
+                                    oben + unter_grund, unter_breite))
+
+    return {"zeilen": zeilen, "linie": linie, "scale": scale,
+            "box": (min(k[0] for k in kasten), min(k[1] for k in kasten),
+                    max(k[2] for k in kasten), max(k[3] for k in kasten))}
+
+
+def _versalien(text: str) -> str:
+    """Die Ueberschrift steht in Versalien (Abschnitt 2, "gesperrte Versalien
+    wirken ruhig"). Nur so ist die Versalhoehe auch das, was man sieht."""
+    return text.strip().upper()
+
+
+def _versalhoehe(font) -> float:
+    """Hoehe eines ``H`` ueber der Grundlinie — das Mass aus der Masstabelle.
+
+    Nicht die Schriftgroesse: die enthaelt Ober- und Unterlaengen und faellt je
+    nach Schriftschnitt um bis zu 30 % anders aus.
+    """
+    return float(-font.getbbox("H", anchor="ls")[1]) or font.size * 0.7
+
+
+def _zeilenbreite(font, text: str, spacing: float) -> float:
+    """Breite einer gesperrten Zeile.
+
+    Summiert die Einzelvorschuebe, weil auch gezeichnet wird, Zeichen fuer
+    Zeichen — Pillow kennt keine Sperrung, und ein gesperrter Lauf haette
+    ohnehin kein Kerning mehr, gegen das sich das aufrechnen liesse.
+    """
+    if not text:
+        return 0.0
+    return sum(font.getlength(c) for c in text) + spacing * (len(text) - 1)
+
+
+def _zeilenkasten(font, text: str, x: float, baseline: float,
+                  breite: float) -> tuple[float, float, float, float]:
+    """Tintenkasten einer Zeile. Die Hoehe kommt aus der Metrik des ganzen
+    Laufs — Umlautpunkte oben und Unterlaengen unten gehoeren dazu, sonst
+    meldet die Safe-Area-Pruefung ein Ö als passend, das oben herausragt."""
+    _x0, y0, _x1, y1 = font.getbbox(text, anchor="ls")
+    return (x, baseline + y0, x + breite, baseline + y1)
+
+
+def _passt(box, rahmen) -> bool:
+    return (box[0] >= rahmen[0] and box[1] >= rahmen[1]
+            and box[2] <= rahmen[2] and box[3] <= rahmen[3])
+
+
+def _text_layer(size: tuple[int, int], plan: dict):
+    """Die Textebene mit Alpha — ohne jede Kenntnis des Hintergrunds."""
+    from PIL import Image, ImageDraw
+
+    layer = Image.new("RGBA", size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    for zeile in plan["zeilen"]:
+        x = zeile["x"]
+        for zeichen in zeile["text"]:
+            draw.text((x, zeile["baseline"]), zeichen, font=zeile["font"],
+                      fill=TEXT_RGB + (255,), anchor="ls")
+            x += zeile["font"].getlength(zeichen) + zeile["spacing"]
+    x0, y0, x1, y1 = plan["linie"]
+    draw.rectangle((round(x0), round(y0), round(x1), round(y1)),
+                   fill=TEXT_RGB + (255,))
+    return layer
+
+
+def _messbox(text, size: tuple[int, int]) -> tuple[int, int, int, int]:
+    """Der tatsaechliche Tintenkasten der gezeichneten Ebene.
+
+    Gemessen wird an den Pixeln, nicht am Satzplan: der Plan rechnet mit
+    Vorschubbreiten und ist damit geringfuegig grosszuegiger.
+    """
+    w, h = size
+    box = text.getbbox()
+    if not box:
+        return (0, 0, w, h)
+    x0, y0, x1, y1 = box
+    return (max(0, x0), max(0, y0), min(w, max(x0 + 1, x1)),
+            min(h, max(y0 + 1, y1)))
+
+
+# --- Hintergrund ----------------------------------------------------------
+
+def _background(seg: TitleSegment, t: TitleDefaults, bg_source: Path | None,
+                size: tuple[int, int]) -> tuple[object, list[str], str]:
+    """Die Hintergrundebene, noch **ohne** Abdunklung.
+
+    Die Abdunklung haengt an der Messung und wird deshalb erst danach
+    angewandt; sonst muesste der Blur je Messschritt neu laufen.
+
+    Gibt zusaetzlich zurueck, woraus der Grund tatsaechlich entstanden ist —
+    ein fehlendes Hintergrundbild wird zur Schwarzflaeche, und die vertraegt
+    keine Anfangsabdunklung mehr.
+    """
+    from PIL import Image, ImageCms, ImageFilter, ImageOps
+
+    from .preprocess import LONG_EDGE, _cover_crop
+
+    w, h = size
+    art = bg_kind(seg.bg)
+    if art == "color":
+        return (Image.new("RGB", size, _hex_rgb(seg.bg)), [], "color")
+    if art == "none":
+        return (Image.new("RGB", size, (0, 0, 0)), [], "none")
+    if bg_source is None:
+        # Kein Absturz: `_titel_hintergrund` hat den fehlenden Pfad bereits
+        # gemeldet, und eine Folie auf Schwarz ist ein brauchbares Ergebnis.
+        return (Image.new("RGB", size, (0, 0, 0)), [], "none")
+
+    warnungen: list[str] = []
+    try:
+        with Image.open(bg_source) as roh:
+            im = ImageOps.exif_transpose(roh)
+            icc = roh.info.get("icc_profile")
+    except (OSError, ValueError) as exc:
+        return (Image.new("RGB", size, (0, 0, 0)),
+                [f"Hintergrundbild {bg_source.name} ist nicht lesbar "
+                 f"({type(exc).__name__}) — die Folie bekommt eine Schwarzflaeche."],
+                "none")
+
+    if icc:
+        try:
+            import io
+            src_prof = ImageCms.ImageCmsProfile(io.BytesIO(icc))
+            im = ImageCms.profileToProfile(im, src_prof,
+                                           ImageCms.createProfile("sRGB"),
+                                           outputMode="RGB")
+        except Exception as exc:                        # noqa: BLE001
+            warnungen.append(f"ICC-Konvertierung fehlgeschlagen ({exc}), das "
+                             f"Profil wird als sRGB gelesen.")
+    if im.mode != "RGB":
+        im = im.convert("RGB")
+
+    # Shrink-8 wie im Hochformat-Komposit (`preprocess._portrait_composite`):
+    # sigma 60 direkt auf 7680 px zu blurren kostet spuerbar Zeit, und Gauss und
+    # Skalierung kommutieren naeherungsweise. Hier ist der Trick keine Kuer —
+    # die Leinwand ist die groesste im ganzen Werkzeug.
+    sigma = t.blur * w / LONG_EDGE          # blur gilt auf 7680er Basis
+    klein_w, klein_h = max(1, w // BLUR_SHRINK), max(1, h // BLUR_SHRINK)
+    klein = _cover_crop(im, klein_w, klein_h, Image=Image)
+    klein = klein.filter(ImageFilter.GaussianBlur(radius=sigma / BLUR_SHRINK))
+    return (klein.resize((w, h), Image.BICUBIC), warnungen, "image")
+
+
+def _hex_rgb(bg: str) -> tuple[int, int, int]:
+    return (int(bg[1:3], 16), int(bg[3:5], 16), int(bg[5:7], 16))
+
+
+# --- Kontrast (Anhang A des Briefings) ------------------------------------
+
+def _relative_luminance(rgb) -> float:
+    """WCAG 2.1, Kanaele auf 0..1 normiert."""
+    def lin(c: float) -> float:
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (lin(v / 255.0) for v in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _contrast(a: float, b: float) -> float:
+    hi, lo = max(a, b), min(a, b)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _fit_darkening(bg, box, *, start: float, minimum: float,
+                   floor: float = DARKEN_FLOOR,
+                   step: float = DARKEN_STEP) -> tuple[float, float]:
+    """Abdunklungsfaktor, der **unter der Textflaeche** den Kontrast traegt.
+
+    Deterministisch: feste Schrittweite, feste Untergrenze. Zwei Laeufe auf
+    demselben Bild liefern denselben Wert — Voraussetzung fuer den Cache (T2).
+    Gemessen wird nur unter dem Text; ein heller Himmel am Bildrand darf die
+    ganze Folie nicht schwarz ziehen.
+    """
+    from PIL import ImageStat
+
+    # 256 Pixel genuegen voellig. ``ImageStat`` statt der Summe ueber
+    # ``getdata()`` aus dem Anhang: identischer Wert, aber ohne die in Pillow 12
+    # veraltete Schnittstelle.
+    mittel = ImageStat.Stat(bg.crop(box).resize((16, 16))).mean[:3]
+    lt = _relative_luminance(TEXT_RGB)
+
+    faktor = start
+    while faktor > floor:
+        k = _contrast(lt, _relative_luminance([v * faktor for v in mittel]))
+        if k >= minimum:
+            return (round(faktor, 3), k)
+        faktor = round(faktor - step, 3)
+    return (floor, _contrast(lt, _relative_luminance([v * floor for v in mittel])))

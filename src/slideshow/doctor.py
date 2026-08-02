@@ -54,6 +54,11 @@ _INSTALL = {
     "melt": ("winget install KDE.Kdenlive   # oder: scoop install extras/kdenlive\n"
              "  # liegt melt woanders: setx SLIDESHOW_MELT \"C:\\Pfad\\zu\\melt.exe\"",
              "sudo apt install -y melt"),
+    # Die Schriftdatei der Titelfolien wird wie melt gesucht: SLIDESHOW_FONT
+    # gewinnt, danach bekannte Orte je Plattform (titles._FONT_CANDIDATES).
+    "font": ("Segoe UI und Arial gehoeren zu Windows — fehlen beide:\n"
+             "  # setx SLIDESHOW_FONT \"C:\\Pfad\\zu\\schrift.ttf\"",
+             "sudo apt install -y fonts-dejavu-core"),
     "nvidia-smi": ("NVIDIA-Treiber >= 550 installieren (GeForce Experience oder nvidia.com)",
                    "Treiber gehoert auf die Windows-Seite; unter WSL nicht noetig"),
 }
@@ -527,6 +532,7 @@ def build_report(project: Project | None = None, *, deep: bool = True,
                   note="optional, Fallback: Pillow + lcms")
     _check_binary(rep, "melt", ["-version"], None, hard=False,
                   note="nur fuer den MLT-Renderpfad")
+    _check_font(rep)
 
     if is_windows():
         _check_binary(rep, "nvidia-smi", [], (550, 0), hard=False,
@@ -664,6 +670,26 @@ def _check_binary(rep: DoctorReport, exe: str, args: list[str],
     if path and not which(exe):
         detail = f"{detail}  [nicht im PATH: {path}]"
     rep.add(exe, OK, detail)
+
+
+def _check_font(rep: DoctorReport) -> None:
+    """Zeile "Schrift" — dieselbe Rolle wie die melt-Zeile.
+
+    Kein Binary, deshalb kein Versionsaufruf: gesucht wird eine Datei, und
+    ``titles.font_available`` sucht sie bereits nach derselben Regel wie
+    ``resolve_tool`` ein Werkzeug. Und kein FAIL: ein Projekt ohne Titelfolien
+    braucht keine Schrift und soll nicht an einer Abhaengigkeit scheitern, die
+    es gar nicht benutzt. Wer Titel setzt, hat es hier vorher gelesen (T8).
+    """
+    from .titles import font_available
+
+    pfad = font_available()
+    if pfad is None:
+        rep.add("Schrift", WARN,
+                "keine Schriftdatei gefunden — nur fuer Titelfolien noetig",
+                install_hint("font"))
+    else:
+        rep.add("Schrift", OK, f"{pfad}  (fuer Titelfolien)")
 
 
 def _check_disk(rep: DoctorReport, project: Project) -> None:
