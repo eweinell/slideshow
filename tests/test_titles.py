@@ -276,6 +276,43 @@ def test_titel_werden_getrennt_gezaehlt():
 
 
 # --------------------------------------------------------------------------
+# T3 — Lokalitaet der Aenderung
+# --------------------------------------------------------------------------
+
+def test_ein_eingefuegtes_kapitel_laesst_die_folgenden_bilder_in_ruhe():
+    """Abnahmekriterium T3, und der Grund fuer Entscheidung 7.
+
+    Solange die Bewegung am Slot-Index hing, verschob eine eingefuegte
+    Titelfolie die Richtung **jedes** folgenden Bildes — damit dessen
+    Cache-Key, damit rendert der halbe Film neu. Die Zusage aus Prinzip 2,
+    dass eine Korrektur genau drei Neurenderungen ausloest, galt fuers
+    Einfuegen gar nicht.
+
+    Geprueft wird an der Bewegung selbst, nicht am Index: gleiche Kennung,
+    gleiche Richtung. Die *Dauer* darf sich sehr wohl aendern — der Titel
+    verschiebt die Nachbarn auf dem Raster, und daraus leitet sich der
+    Zoombetrag ab. Verglichen wird deshalb die Richtung, nicht der Betrag.
+    """
+    from slideshow.kenburns import plan_motion
+
+    def richtungen(chapters):
+        _edit, plan, _cov = _bauen(_manifest(), [_beat_region()], chapters)
+        d = _edit.defaults.kb
+        return {s.intent.src: (plan_motion(s.intent.src, 4.0, d).z1
+                               > plan_motion(s.intent.src, 4.0, d).z0,
+                               plan_motion(s.intent.src, 4.0, d).c1)
+                for s in plan.slots if s.intent.title is None}
+
+    ohne = richtungen([])
+    mit = richtungen([Chapter(before="img_005", title="Malmoe")])
+
+    gemeinsam = set(ohne) & set(mit)
+    assert len(gemeinsam) >= 10, "die Bilder muessen in beiden Laeufen vorkommen"
+    for src in gemeinsam:
+        assert mit[src] == ohne[src], f"{src} bewegt sich nur wegen der Einfuegung anders"
+
+
+# --------------------------------------------------------------------------
 # Fokusblende (Entscheidung 5d)
 # --------------------------------------------------------------------------
 

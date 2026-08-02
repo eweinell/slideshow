@@ -65,11 +65,16 @@ class RenderStats:
 # --------------------------------------------------------------------------
 
 def _motion_for(plan: Plan, slot_index: int, slot: Slot, edit: EditList) -> KBMotion:
-    """Die Bewegung eines Stills — ueber seine **volle sichtbare Dauer**."""
+    """Die Bewegung eines Stills — ueber seine **volle sichtbare Dauer**.
+
+    Die Richtung haengt an der Kennung des Bildes, nicht an ``slot_index``:
+    sonst verschoebe ein eingefuegtes Segment die Bewegung jedes folgenden
+    Bildes und damit dessen Cache-Key.
+    """
     vs, ve = (slot.start_f - plan.transitions[slot_index] // 2,
               slot.end_f + plan.transitions[slot_index + 1] // 2)
     duration = (ve - vs) / plan.fps
-    return plan_motion(slot_index, duration, edit.defaults.kb, slot.intent.kb)
+    return plan_motion(slot.intent.src, duration, edit.defaults.kb, slot.intent.kb)
 
 
 def _still_stream(project: Project, plan: Plan, edit: EditList, slot_index: int,

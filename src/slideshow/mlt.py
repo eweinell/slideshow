@@ -123,7 +123,8 @@ def export_mlt(project: Project, edit: EditList, manifest: Manifest | None = Non
 
         filters: list[ET.Element] = []
         if slot.intent.kind == "still":
-            motion = plan_motion(i, length / fps, edit.defaults.kb, slot.intent.kb)
+            motion = plan_motion(slot.intent.src, length / fps, edit.defaults.kb,
+                                 slot.intent.kb)
             f = ET.Element("filter", {"id": counter.next("filter")})
             _prop(f, "mlt_service", "qtblend")
             _prop(f, "kdenlive_id", "qtblend")

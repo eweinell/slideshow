@@ -111,7 +111,7 @@ Gelten für jedes Segment, das nichts Eigenes sagt.
 | `pan_rate` | float | `0.03` | Schwenkweg **pro Sekunde**, normalisiert auf die Bildkante. Dieselbe Regel wie beim Zoom. |
 | `pan_total` | [float, float] | `[0.05, 0.18]` | Klemmung des Gesamt-Schwenkwegs. |
 | `ease` | enum | `smoothstep` | `smoothstep` (weich an- und abbremsend) oder `linear`. |
-| `alternate` | bool | `true` | Zoomrichtung von Bild zu Bild wechseln. Hundertmal hineinzoomen ermüdet. |
+| `alternate` | bool | `true` | Zoomrichtung wechseln lassen. Hundertmal hineinzoomen ermüdet. Der Wechsel ist **statistisch, nicht streng abwechselnd** — siehe unten. `false` zoomt immer hinein. |
 | `engine` | enum | `zoompan` | `zoompan` ist schnell, rechnet aber **8-bittig** — ffmpeg schiebt eine Konvertierung davor. `scale16` rechnet durchgehend in 16 Bit, kostet mehr CPU. Bei sichtbarem Banding in Himmelsverläufen umstellen. |
 
 #### Rate und Klemmung — wo die Rate wirklich gilt
@@ -152,9 +152,31 @@ Zwei weitere Feinheiten:
 #### Schwenk: Richtung und Reichweite
 
 Der Schwenk läuft symmetrisch um die Bildmitte: von `0.5 − a` nach `0.5 + a`
-mit `a = Schwenkweg / 2`. Die Richtung rotiert deterministisch über acht auf
-Länge 1 normierte Vektoren nach Segmentindex — alle acht legen denselben Weg
-zurück.
+mit `a = Schwenkweg / 2`. Die Richtung wird deterministisch aus acht auf Länge 1
+normierten Vektoren gewählt — alle acht legen denselben Weg zurück.
+
+#### Woran die Richtung hängt
+
+An der **Kennung des Bildes** (seinem `src`), nicht an seiner Position. Das ist
+der Unterschied zwischen einem billigen und einem teuren Eingriff: hinge sie am
+Segmentindex, verschöbe ein eingefügtes Segment die Bewegung jedes folgenden
+Bildes, damit dessen Cache-Key, damit rendert der halbe Film neu — obwohl sich
+an ihm nichts geändert hat. Über die Kennung sind Einfügen, Löschen und
+Umsortieren dauerhaft billig.
+
+Zwei Folgen, die man kennen sollte:
+
+- **Der Zoomwechsel ist statistisch.** Das unterste Bit der Kennung entscheidet,
+  ob hinein- oder herausgezoomt wird. Über eine ganze Bildmenge ist das
+  ausgeglichen, aber es kommen ein paar gleiche Richtungen hintereinander vor —
+  bei 40 Bildern typischerweise bis zu vier. Strenge Alternierung wäre nur über
+  die Position zu haben, und die ist genau das, was hier aufgegeben wird.
+- **Dasselbe Bild zweimal im Film bewegt sich beide Male gleich.** Bei einer
+  bewussten Wiederholung ist das eher erwünscht; wer es anders will, setzt `kb:`
+  am zweiten Vorkommen.
+
+Die Kennung wird mit `blake2b` gehasht, nicht mit Pythons `hash()` — der ist für
+Strings je Prozess gesalzen und lieferte bei jedem Lauf andere Bewegungen.
 
 Wie weit der Schwenk tatsächlich sichtbar wird, begrenzt der Bildrand: der
 Ausschnitt hat bei Zoom `z` die Breite `1/z`, seine Mitte darf sich also nur

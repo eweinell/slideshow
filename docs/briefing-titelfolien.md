@@ -573,6 +573,27 @@ weiterhin sichtbar, hängt aber nicht mehr an der Position.
 > die halbe Invalidierung. Das ist eine bewusste Abwägung und gehört als
 > Kommentar an die Funktion.
 
+> **Umgesetzt.** `plan_motion` nimmt jetzt die Kennung (`src`) statt des
+> Slot-Index; `motion_key` hasht sie mit `blake2b` — ausdrücklich nicht mit
+> Pythons `hash()`, der für Strings je Prozess gesalzen ist und bei jedem Lauf
+> andere Bewegungen geliefert hätte. Das unterste Bit steuert den Zoom, die
+> darüberliegenden die Schwenkrichtung; eigene Bits deshalb, weil sonst alle
+> geraden Schwenkrichtungen Hineinzooms wären.
+>
+> Gemessen am Fixture-Projekt: beim Einfügen eines Kapitels änderten vorher
+> **7 von 12** Bildern ihre Bewegung ohne eigenen Anlass, jetzt **keines**
+> (Abnahmekriterium T3). Über 200 Dateinamen verteilt sich die Zoomrichtung
+> 97:103, alle acht Schwenkrichtungen kommen vor, und der längste Lauf gleicher
+> Zoomrichtung liegt bei vier Bildern.
+>
+> Eine dritte Folge, die im Briefing nicht stand: **dasselbe Bild zweimal im
+> Film bewegt sich beide Male gleich.** Bei einer bewussten Wiederholung ist das
+> eher erwünscht als störend, und `kb:` am Segment überstimmt es.
+>
+> Ein Versionsfeld braucht es hier nicht — anders als bei `TITLE_VERSION`
+> stehen die Bewegungswerte selbst über `KBMotion.fingerprint()` im Cache-Key.
+> Sie ändern sich, also invalidiert der Cache von allein.
+
 ---
 
 ## 5. Vorgeschlagene Umsetzung

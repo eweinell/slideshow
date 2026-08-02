@@ -545,7 +545,8 @@ def _couple_focus_motion(plan: Plan, defaults: Defaults) -> None:
 
         d_titel = _sichtbare_dauer(plan, i)
         d_folge = _sichtbare_dauer(plan, i + 1)
-        m = plan_motion(i, d_titel, kb)          # nur fuer die Schwenkrichtung
+        # Nur fuer die Schwenkrichtung; Zoom wird unten ohnehin erzwungen.
+        m = plan_motion(slot.intent.src, d_titel, kb)
         z_titel = zoom_from_duration(d_titel, kb)
         z_folge = z_titel + (zoom_from_duration(d_folge, kb) - 1.0)
 

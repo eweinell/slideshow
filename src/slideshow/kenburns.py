@@ -27,6 +27,7 @@ hindurch weiterlaufen (8.2 / Abnahmekriterium 12).
 
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass
 
@@ -34,9 +35,9 @@ from .models import KBDefaults, KBSpec
 
 _SQRT_HALF = math.sqrt(0.5)
 
-#: Acht Schwenkrichtungen, deterministisch nach Segmentindex durchgereicht.
-#: Deterministisch heisst: derselbe Index ergibt immer dieselbe Bewegung —
-#: sonst aendert sich der Cache-Key bei jedem Lauf.
+#: Acht Schwenkrichtungen, deterministisch aus der Kennung des Bildes
+#: abgeleitet. Deterministisch heisst: dieselbe Kennung ergibt immer dieselbe
+#: Bewegung — sonst aendert sich der Cache-Key bei jedem Lauf.
 #:
 #: Die Vektoren sind auf Laenge 1 normiert. Unnormiert (``(1, 1)``) legte ein
 #: diagonaler Schwenk das ``sqrt(2)``-fache zurueck — vier von acht Richtungen
@@ -70,7 +71,24 @@ class KBMotion:
         return {**self.as_spec(), "ease": self.ease, "engine": self.engine}
 
 
-def plan_motion(index: int, duration: float, defaults: KBDefaults,
+def motion_key(key: str | int) -> int:
+    """Deterministische Zahl aus der Kennung eines Bildes.
+
+    **Nicht** Pythons ``hash()``: der ist fuer Strings je Prozess gesalzen und
+    liefert bei jedem Lauf einen anderen Wert. Der Cache-Key haengt an dieser
+    Zahl — sie muss ueber Laeufe, Rechner und Python-Versionen hinweg dieselbe
+    sein.
+
+    Ganzzahlen werden durchgereicht, damit sich eine Bewegung in Tests und im
+    Notfall auch von Hand ansteuern laesst.
+    """
+    if isinstance(key, int):
+        return key
+    return int.from_bytes(
+        hashlib.blake2b(str(key).encode("utf-8"), digest_size=8).digest(), "big")
+
+
+def plan_motion(key: str | int, duration: float, defaults: KBDefaults,
                 spec: KBSpec | None = None) -> KBMotion:
     """Leitet die Bewegung aus der Dauer ab.
 
@@ -81,13 +99,34 @@ def plan_motion(index: int, duration: float, defaults: KBDefaults,
 
     ``duration`` ist dabei die **volle sichtbare Dauer** des Bildes inklusive
     angrenzender Uebergangs-Haelften.
+
+    ``key`` ist die **Kennung des Bildes** (sein ``src``), nicht seine Position.
+    Frueher stand hier der Slot-Index, und das war teuer: eine an Position 41
+    eingefuegte Titelfolie verschob den Index jedes folgenden Bildes um eins,
+    damit dessen Bewegung, damit dessen Cache-Key — der halbe Film rendert neu.
+    Die Zusage aus Prinzip 2, dass eine Korrektur genau drei Neurenderungen
+    ausloest, galt fuers Einfuegen also gar nicht. Ueber die Kennung sind
+    Einfuegen, Loeschen und Umsortieren dauerhaft billig.
+
+    Der Preis steht in zwei Zeilen: die Alternierung ist nur noch statistisch
+    (siehe unten), und **dasselbe Bild zweimal im Film bewegt sich beide Male
+    gleich**. Letzteres ist bei einer Wiederholung eher erwuenscht als
+    stoerend; wer es anders will, setzt ``kb:`` am Segment.
     """
+    n = motion_key(key)
     lo, hi = defaults.zoom_total
     z_end = min(1.0 + defaults.zoom_rate * duration, 1.0 + hi)
     z_end = max(z_end, 1.0 + lo)
 
-    # Zoomrichtung alternieren. Hundertmal hineinzuzoomen ermuedet.
-    zoom_in = (index % 2 == 0) or not defaults.alternate
+    # Zoomrichtung wechseln. Hundertmal hineinzuzoomen ermuedet.
+    #
+    # Das unterste Bit entscheidet: statistisch ausgeglichen, aber nicht mehr
+    # streng abwechselnd — ein paar gleiche Richtungen hintereinander kommen
+    # vor. Strenge Alternierung waere nur ueber die Position zu haben, und die
+    # ist genau das, was hier aufgegeben wird. Bewusste Abwaegung: gelegentlich
+    # zwei Hineinzooms nacheinander faellt weniger auf als ein halber Film, der
+    # nach dem Einfuegen eines Kapitels neu rendert.
+    zoom_in = (n & 1 == 0) or not defaults.alternate
     z0, z1 = (1.0, z_end) if zoom_in else (z_end, 1.0)
 
     # Der Schwenk folgt derselben Regel wie der Zoom: aus der Dauer abgeleitet,
@@ -98,7 +137,9 @@ def plan_motion(index: int, duration: float, defaults: KBDefaults,
     weg = min(max(defaults.pan_rate * duration, lo_p), hi_p)
     a = weg / 2.0                       # Auslenkung je Richtung um die Mitte
 
-    dx, dy = _DIRECTIONS[index % len(_DIRECTIONS)]
+    # Eigene Bits fuer die Schwenkrichtung, damit sie nicht an der Zoomrichtung
+    # klebt: mit ``n % 8`` waeren alle geraden Richtungen Hineinzooms.
+    dx, dy = _DIRECTIONS[(n >> 1) % len(_DIRECTIONS)]
     c0 = (0.5 - dx * a, 0.5 - dy * a)
     c1 = (0.5 + dx * a, 0.5 + dy * a)
 

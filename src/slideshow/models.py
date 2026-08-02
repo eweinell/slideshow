@@ -292,7 +292,12 @@ class KBDefaults(BaseModel):
     #: Klemmung [min, max] des Gesamtzooms.
     zoom_total: tuple[float, float] = (0.08, 0.30)
     ease: Literal["smoothstep", "linear"] = "smoothstep"
-    #: Zoomrichtung alternieren. Hundertmal hineinzoomen ermuedet.
+    #: Zoomrichtung wechseln lassen. Hundertmal hineinzoomen ermuedet.
+    #:
+    #: Der Wechsel ist **statistisch, nicht streng abwechselnd**: die Richtung
+    #: haengt an der Kennung des Bildes, nicht an seiner Position. Streng
+    #: abwechselnd waere nur ueber die Position zu haben — und dann verschoebe
+    #: ein eingefuegtes Segment die Bewegung jedes folgenden Bildes.
     alternate: bool = True
     #: ``zoompan`` (8 Bit, schnell) oder ``scale16`` (16 Bit, ohne zoompan, 8.1).
     engine: Literal["zoompan", "scale16"] = "zoompan"
