@@ -35,6 +35,7 @@ from .planner import (Coverage, Intent, Plan, RenderSegment, apply_transitions,
                       coverage, default_transition_seconds, fit_regions_to,
                       material_seconds, plan_slots, resolve, standard_slot,
                       to_frame, to_time, validate_continuity, visible_span)
+from .preprocess import title_canvas
 from .probe import chronological
 from .titles import reading_seconds, resolved, title_asset
 
@@ -265,7 +266,7 @@ def insert_titles(intents: list[Intent], chapters: list[Chapter],
         seg = TitleSegment(title=kap.title, subtitle=subtitle, bg=bg,
                            beats=kap.beats, dur=kap.dur, style=kap.style, kb=kap.kb)
         intents.insert(pos + versatz,
-                       Intent(kind="still", src=title_asset(seg, defaults, size),
+                       Intent(kind="still", src=title_asset(seg, defaults, title_canvas(size)),
                               beats=kap.beats, dur=kap.dur, kb=kap.kb, title=seg))
 
     # Die Positionen der nachfolgenden Intents haben sich verschoben; ``index``
@@ -699,7 +700,8 @@ def plan_from_edit(edit: EditList, manifest: Manifest | None = None) -> Plan:
             # sich aus dem Inhalt der Folie, ohne Datei anzufassen.
             titel = resolved(edit.segments, idx)
             intents.append(Intent(
-                kind="still", src=title_asset(titel, edit.defaults, tuple(edit.size)),
+                kind="still", src=title_asset(titel, edit.defaults,
+                                              title_canvas(tuple(edit.size))),
                 index=idx, beats=seg.beats, dur=seg.dur, hold=seg.hold,
                 snap_back=seg.snap_back, kb=seg.kb, title=titel))
         elif isinstance(seg, StillSegment):
@@ -856,6 +858,18 @@ def _validate_sources(edit: EditList, manifest: Manifest) -> None:
 def check_sources_exist(project: Project, edit: EditList) -> None:
     missing: list[tuple[int, str]] = []
     for idx, seg in enumerate(edit.segments):
+        if isinstance(seg, TitleSegment):
+            # Ein fehlendes Titelasset ist kein fehlendes Material, sondern ein
+            # nicht gelaufener Erzeugungsschritt — die Diagnose muss das sagen,
+            # sonst sucht man nach einer Datei, die es nie gab.
+            rel = title_asset(resolved(edit.segments, idx), edit.defaults,
+                              title_canvas(tuple(edit.size)))
+            if not project.abs(rel).exists():
+                raise SchemaError(
+                    f"Titelasset fehlt: {rel}. Es entsteht beim Rendern von selbst "
+                    f"(`ensure_title_assets`); wer `render` umgeht, muss es "
+                    f"erzeugen lassen.", path=f"segments[{idx}].title")
+            continue
         src = getattr(seg, "src", None)
         if src and not project.abs(src).exists():
             missing.append((idx, src))

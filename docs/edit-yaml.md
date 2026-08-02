@@ -262,9 +262,18 @@ Hintergrund aus dem Material.
 Einen `src`-Schlüssel gibt es bewusst **nicht**. Der Pfad des gebackenen Assets
 (`cache/title_malmoe_<hash>.jpg`) ergibt sich aus dem Inhalt des Segments;
 stünde er zusätzlich in der Datei, gäbe es zwei Wahrheiten, und eine von Hand
-geänderte Überschrift zeigte weiter auf das alte Bild. Wer den Text ändert,
-bekommt beim nächsten Lauf automatisch ein neues Asset — und genau drei
-Segmente rendern neu.
+geänderte Überschrift zeigte weiter auf das alte Bild.
+
+Gebacken wird zu Beginn von `render` und `export-mlt`, nicht in `build` — auch
+`slideshow render meine-fassung.yaml` mit von Hand geändertem Text ist ein
+unterstützter Weg. Der Schritt ist idempotent und kostet bei unverändertem Text
+nur einen Hash je Folie. Wer den Text ändert, bekommt automatisch ein neues
+Asset, und genau drei Segmente rendern neu.
+
+Die Folie entsteht auf der **Normalform** (7680 × 4320 bei 16:9), nicht in
+Ausgabegröße: der Text ist in die Pixel eingebrannt und wird von der
+Ken-Burns-Fahrt bis zu 1,3-fach vergrößert. Ein Projekt in 4K und dasselbe in
+1080p teilen sich deshalb dieselbe Datei.
 
 #### Wo eine Titelfolie beginnen darf
 

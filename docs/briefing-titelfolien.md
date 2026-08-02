@@ -633,6 +633,8 @@ Nicht anzufassen: `planner.py` (außer der Zählung in `coverage`), `beats.py`,
 | `n_media` in `_timeline_length` erhöhen (Punkt 11) | Die Titel-Intents werden *vor* dem Aufruf eingesetzt, damit `len(intents)` von selbst stimmt. Eine Stelle statt zwei, die auseinanderlaufen können. |
 | `plan_slots` nur einmal aufrufen | Die Lagekorrektur braucht das Ergebnis des Planens (in welcher Region landet die Folie?) und ändert danach die Absicht. `plan_with_titles` iteriert deshalb bis zu viermal; der Planer selbst bleibt unberührt. |
 | — | `mlt.py:299` nimmt Titelfolien im `--reimport` bereits mit; ohne das wäre der Reimport eines Projekts mit Titeln abgestürzt. Der Export selbst brauchte keine Änderung — er geht über `plan.slots`, und dort ist eine Folie ein Standbild. |
+| `ensure_title_assets` in `titles.py` (Punkt 8) | Liegt in `preprocess.py`. Dort wohnen `_is_fresh`/`_mark_fresh` und der Begriff „Erzeugnis in `cache/`" ohnehin; `titles.py` bleibt dadurch reine Rechnung ohne Datei-I/O. |
+| Folie in Ausgabegröße | Folie auf der **Normalform** (`title_canvas`, 7680 × 4320). Abschnitt 4 nennt die Oversampling-Zusage, die Umsetzung hätte sie ohne diesen Schritt gebrochen: `edit.size` ist 3840 × 2160, und bei 1,3-fachem Zoom wäre der eingebrannte Text weich geworden. Nebeneffekt: der Assetpfad hängt nicht mehr an der Ausgabegröße. |
 
 ---
 

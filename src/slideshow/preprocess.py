@@ -21,7 +21,7 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
-from .cache import HashIndex, cache_key
+from .cache import HashIndex, cache_key, hash_file
 from .doctor import Capabilities
 from .encoders import intermediate_args
 from .errors import SlideshowError
@@ -39,6 +39,24 @@ LONG_EDGE = 7680
 #: Version der Preprocessing-Logik — geht in den Cache-Key ein, damit eine
 #: Aenderung hier alte Zwischenprodukte ungueltig macht.
 PREPROC_VERSION = 3
+
+
+def title_canvas(size: tuple[int, int]) -> tuple[int, int]:
+    """Leinwand, auf der eine Titelfolie gebacken wird.
+
+    Dieselbe Normalform wie jedes andere Zwischenprodukt: das
+    Ausgabe-Seitenverhaeltnis bei ``LONG_EDGE`` Breite. Entscheidend ist das
+    wegen des eingebrannten Textes — die Folie wird von der Ken-Burns-Fahrt bis
+    zu 1,3-fach vergroessert, und nur mit dem Subpixel-Vorrat bleibt der Text
+    dabei durchgehend mindestens zweifach ueberabgetastet. In Ausgabegroesse
+    gebacken wuerde er weich, und zwar genau dort, wo er am meisten auffaellt.
+
+    Nebeneffekt, der ebenfalls erwuenscht ist: die Folie haengt damit nicht mehr
+    an ``edit.size``. Ein Projekt in 4K und dasselbe in 1080p teilen sich
+    dieselbe Datei, weil die Pixel dieselben sind.
+    """
+    w, h = size
+    return (LONG_EDGE, int(round(LONG_EDGE * h / w)))
 
 
 @dataclass
@@ -184,6 +202,113 @@ def _preprocess_one_image(args) -> tuple[str, str, dict | None, str | None]:
         return (mid, dst, info, None)
     except Exception as exc:                        # noqa: BLE001
         return (mid, dst, None, f"{type(exc).__name__}: {exc}")
+
+
+# --------------------------------------------------------------------------
+# Titelfolien
+# --------------------------------------------------------------------------
+
+@dataclass
+class TitleAssetStats:
+    erzeugt: int = 0
+    aus_cache: int = 0
+    warnungen: list[str] = None
+
+    def __post_init__(self):
+        if self.warnungen is None:
+            self.warnungen = []
+
+
+def ensure_title_assets(project: Project, edit, manifest: Manifest | None = None, *,
+                        dry: DryRun | None = None) -> TitleAssetStats:
+    """Erzeugt die Assets aller Titelfolien, soweit sie fehlen oder veraltet sind.
+
+    ``render`` darf sich nicht darauf verlassen, dass ``build`` gelaufen ist:
+    ``slideshow render edit.yaml`` mit von Hand geaenderter Ueberschrift ist ein
+    unterstuetzter Weg, und dann existiert das Asset unter dem neuen Namen noch
+    gar nicht. Die Funktion ist deshalb idempotent und kostet bei unveraendertem
+    Text nichts ausser einem Hash je Folie.
+
+    Die Frische haengt an mehr als am Dateinamen: der Name ergibt sich aus der
+    *Absicht* (Text, Hintergrundangabe, Layout), der Schluessel zusaetzlich aus
+    dem *Inhalt* von Hintergrundbild und Schriftdatei. Nur so erkennt ein
+    zweiter Rechner mit anderer Schrift, dass die vorhandene Datei nicht seine
+    ist — die Folie saehe sonst anders aus, und der Cache waere zufrieden.
+    """
+    from .models import TitleSegment
+    from .titles import find_font, freshness_key, render_title, resolved, title_asset
+
+    stats = TitleAssetStats()
+    folien = [(idx, resolved(edit.segments, idx))
+              for idx, seg in enumerate(edit.segments) if isinstance(seg, TitleSegment)]
+    if not folien:
+        return stats
+
+    project.ensure_dirs()
+    # Erst hier, nicht beim Import: ein Projekt ohne Titelfolien braucht keine
+    # Schrift und soll auch nicht daran scheitern.
+    font = find_font(edit.defaults.title.font)
+    font_hash = hash_file(font)
+    canvas = title_canvas(tuple(edit.size))
+
+    for idx, seg in folien:
+        rel = title_asset(seg, edit.defaults, canvas)
+        out = project.abs(rel)
+        quelle, bg_hash, hinweis = _titel_hintergrund(project, manifest, seg)
+        if hinweis:
+            stats.warnungen.append(f"segments[{idx}]: {hinweis}")
+
+        key = freshness_key(seg, edit.defaults, canvas, bg_hash=bg_hash,
+                            font_hash=font_hash)
+        if _is_fresh(out, key):
+            stats.aus_cache += 1
+            continue
+        if dry is not None and dry.enabled:
+            dry.record(["slideshow", "titel", seg.title, "->", str(out)])
+            continue
+
+        info = render_title(seg, edit.defaults, bg_source=quelle, out=out,
+                            size=canvas, font=font)
+        _mark_fresh(out, key)
+        stats.erzeugt += 1
+        for w in (info or {}).get("warnungen", []):
+            stats.warnungen.append(f"segments[{idx}] {seg.title!r}: {w}")
+    return stats
+
+
+def _titel_hintergrund(project: Project, manifest: Manifest | None,
+                       seg) -> tuple[Path | None, str, str]:
+    """Quelldatei und Inhaltshash des Hintergrunds.
+
+    Als Quelle dient das **Original** aus dem Manifest, nicht das
+    Zwischenprodukt: bei einem Hochformat ist Letzteres bereits ein
+    Blur-Komposit, und ein zweiter Blur darueber ergaebe einen verwaschenen
+    Rahmen um ein leicht verwaschenes Hochformat. In ``edit.yaml`` steht
+    trotzdem der ``cache/``-Pfad — das ist die Kennung, unter der ein Bild im
+    ganzen Projekt auftritt.
+    """
+    from .titles import bg_kind
+
+    if bg_kind(seg.bg) != "image":
+        return (None, "", "")
+
+    if manifest is not None:
+        item = manifest.by_cache_path(seg.bg)
+        if item is not None:
+            original = project.abs(item.path)
+            if original.exists():
+                return (original, hash_file(original), "")
+
+    # Ohne Manifest oder ohne Original bleibt das Zwischenprodukt. Das ist
+    # brauchbar, aber bei einem Hochformat sichtbar schlechter — deshalb gesagt.
+    ersatz = project.abs(seg.bg)
+    if ersatz.exists():
+        return (ersatz, hash_file(ersatz),
+                f"Original zu {seg.bg} nicht auffindbar, der Hintergrund entsteht aus "
+                f"dem Zwischenprodukt. Bei einem Hochformat wird er dadurch doppelt "
+                f"unscharf.")
+    return (None, "",
+            f"Hintergrundbild {seg.bg} fehlt — die Folie bekommt eine Farbflaeche.")
 
 
 # --------------------------------------------------------------------------

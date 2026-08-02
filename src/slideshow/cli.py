@@ -601,6 +601,7 @@ def cmd_render(args, project: Project) -> int:
     mpath = Path(args.manifest) if args.manifest else project.manifest
     manifest = Manifest.load(mpath) if mpath.exists() else None
 
+    _titelassets(project, edit, manifest, dry=DryRun(enabled=args.dry_run))
     check_sources_exist(project, edit)
     plan = validate_edit(edit, manifest)
 
@@ -614,6 +615,22 @@ def cmd_render(args, project: Project) -> int:
         return 0
     print_report(stats, out)
     return 0
+
+
+def _titelassets(project: Project, edit, manifest, *, dry=None) -> None:
+    """Titelfolien backen, bevor irgendetwas sie zu lesen versucht.
+
+    Steht vor ``check_sources_exist``: das Asset ist ein Erzeugnis, kein
+    Material, und "Datei fehlt" waere hier die falsche Diagnose.
+    """
+    from .preprocess import ensure_title_assets
+
+    stats = ensure_title_assets(project, edit, manifest, dry=dry)
+    if stats.erzeugt or stats.aus_cache:
+        console().print(f"Titelfolien: {stats.erzeugt} erzeugt, "
+                        f"{stats.aus_cache} aus Cache")
+    for w in stats.warnungen:
+        console().print(f"  [yellow]{w}[/]")
 
 
 def cmd_export_mlt(args, project: Project) -> int:
@@ -633,6 +650,7 @@ def cmd_export_mlt(args, project: Project) -> int:
         console().print(f"{len(changes)} Zeiten aus Kdenlive uebernommen -> {epath}")
         return 0
 
+    _titelassets(project, edit, manifest, dry=DryRun(enabled=args.dry_run))
     out = Path(args.output) if args.output else (project.out / "project.kdenlive")
     xml = export_mlt(project, edit, manifest)
     if args.dry_run:
