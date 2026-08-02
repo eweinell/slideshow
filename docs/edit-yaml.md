@@ -198,7 +198,7 @@ Grundzoom schafft erst den Spielraum, in dem der Schwenk stattfinden kann.
 
 | Schlüssel | Typ | Vorgabe | Bedeutung |
 |---|---|---|---|
-| `auto` | bool | `true` | Automatisch zwischen alle benachbarten Segmente Blenden setzen. Harte Schnitte zwischen hundert Standbildern wirken abgehackt. |
+| `auto` | bool | `true` | Automatisch zwischen alle benachbarten Segmente Blenden setzen. Harte Schnitte zwischen hundert Standbildern wirken abgehackt. **Wirkt nur in `build`**, nicht beim Laden — siehe Kasten unten. |
 | `beats` | float | `1.0` | Standarddauer einer Blende in Beats (Beat-Region). |
 | `dur` | float | – | Standarddauer in Sekunden. In `free`-Regionen der einzig sinnvolle Weg. |
 | `mode` | string | `dissolve` | Siehe [Blendenmodi](#blendenmodi). |
@@ -206,6 +206,14 @@ Grundzoom schafft erst den Spielraum, in dem der Schwenk stattfinden kann.
 Der Schnittpunkt liegt **auf** dem Beat; eine Blende der Dauer `T` belegt
 `[t − T/2, t + T/2]`. Der Schnitt bleibt also auf dem Raster, die Blende ist
 darüber zentriert.
+
+> **`auto` ist eine Einstellung für `build`, keine Laufzeitregel.** Beim Laden
+> einer bestehenden `edit.yaml` gilt ausschließlich, was als `xfade`-Segment in
+> der Datei steht — `auto: true` fügt dort nichts nach. Das ist Absicht und die
+> Kehrseite davon, dass ein gelöschtes `xfade`-Segment einen harten Schnitt
+> bedeutet: würde `auto` beim Laden nachfüllen, ließe sich eine Blende nie
+> entfernen. Wer alle Blenden aus der Datei löscht, bekommt also einen Film aus
+> lauter harten Schnitten, nicht die Standardblenden zurück.
 
 ### `defaults.title` — Titelfolien
 
@@ -534,9 +542,28 @@ dem Takt bringen.
 
 **Reihenfolge ändern**
 
-Die Segmente umsortieren. Die `from`/`to` der Übergänge müssen mitwandern —
-einfacher ist es, die Blenden zu entfernen und mit `auto: true` neu setzen zu
-lassen.
+Die `still`/`clip`-Segmente umsortieren — und die `from`/`to` der Übergänge
+mitziehen. Sie sind Indizes in `segments`, gezählt über das ganze Array
+einschließlich der Blenden selbst; die Blende zwischen Segment 0 und 2 ist
+Segment 1, die nächste sitzt bei 3 und verbindet 2 und 4.
+
+Die Blenden einfach zu löschen, hilft **nicht**: `auto: true` füllt beim Laden
+nichts nach (siehe Kasten oben), das Ergebnis wären harte Schnitte. Wer
+umsortiert und die Standardblenden behalten will, hat zwei Wege:
+
+- **Neu bauen.** `slideshow build` erzeugt Blenden und Indizes von selbst,
+  leitet die Reihenfolge aber wieder chronologisch aus dem Manifest ab. Für
+  eine *systematische* Verschiebung — eine Kamera geht eine Stunde falsch —
+  ist das der richtige Weg: `--clock-offset` setzen und neu bauen.
+- **Von Hand nachziehen.** Für eine freie Reihenfolge, die sich nicht aus
+  Zeitstempeln ergibt, führt derzeit kein Weg daran vorbei. Bei vielen
+  Segmenten ist das mühsam; ein Kommando, das eine bestehende Reihenfolge über
+  einen Neubau rettet, gibt es noch nicht.
+
+Seit die Ken-Burns-Richtung an der Bildkennung hängt statt an der Position
+(siehe [Woran die Richtung hängt](#woran-die-richtung-hängt)), kostet das
+Umsortieren beim Rendern fast nichts: die Bilder behalten ihre Bewegung, nur
+die angrenzenden Blenden werden neu berechnet.
 
 ---
 
