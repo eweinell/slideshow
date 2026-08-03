@@ -1,25 +1,28 @@
 # Briefing: Manuelle Reihenfolge
 
-**Status:** **Stufe 1 umgesetzt**, Stufe 2 offen · **Betrifft:** neues Modul
+**Status:** **Stufen 1–2 umgesetzt** · **Betrifft:** neues Modul
 `src/slideshow/order.py`, `models.py`, `build.py`, `chapters.py`, `cli.py`,
 `docs/edit-yaml.md` · **Vorbedingung:** keine
 
-> **Was heute läuft.** `order.yaml` von Hand schreiben — an Medien-IDs, in
-> Gruppen oder flach —, dann:
+> **Was heute läuft.** Der ganze Weg:
 >
 > ```
+> slideshow order             # -> order.yaml, chronologisch vorbelegt
+> # Zeilen verschieben, Gruppen umbenennen
+> slideshow chapters          # optional: Titelfolien, Anker `group:`
 > slideshow build             # findet order.yaml von selbst
 > slideshow render
 > ```
 >
-> Auflösung, alle drei Fehlerfälle mit Datei und Zeile, `rest:`, die
-> Chronologie-Warnung und der Auftakt-Kommentar in `chapters.yaml` sind
-> umgesetzt und getestet (`tests/test_order.py`).
+> Auflösung mit allen drei Fehlerfällen (Datei und Zeile), `rest:`, der
+> Generator mit `--by day|place|none`, `--update` samt Erhalt der Handarbeit,
+> `group:` als dritter Kapitelanker, die Chronologie-Warnung und der Vorbehalt
+> in `slideshow chapters` sind umgesetzt und getestet (`tests/test_order.py`,
+> 51 Tests).
 >
-> Offen ist **Stufe 2**: der Generator `slideshow order` samt `--update`, der
-> `group:`-Anker in `chapters.yaml` und der Vorbehalt in `slideshow chapters`.
-> Bis dahin schreibt man die Datei von Hand; die IDs stehen in jedem `src:`
-> der Edit-List.
+> Offen ist nur noch **Stufe 3** — Wiederholtes Material,
+> `order --from edit.yaml`, Kontaktbogen. Alle drei bewusst zurückgestellt,
+> bis sich zeigt, dass sie gebraucht werden.
 
 Die Abfolge des Films kommt heute aus `chronological(manifest)` — Fotos in der
 Reihenfolge ihrer Aufnahmezeit. Für eine Reisedokumentation ist das richtig.
@@ -383,7 +386,7 @@ Kommentare bei und hängt das neue Material als eigene Gruppe mit dem Kommentar
 6. **`chapters.py:150` `first_image_id`** nimmt die aufgelöste Folge entgegen
    statt selbst `chronological` zu rufen.
 
-**Stufe 2 — die Datei entsteht** *(offen)*
+**Stufe 2 — die Datei entsteht** *(umgesetzt)*
 
 7. **`slideshow order`** in `cli.py` und `dump_order_yaml` in `order.py`:
    Formular mit Kontextkommentaren, Gruppierung nach `--by`, `--force`,

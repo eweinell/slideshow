@@ -32,6 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
                "  slideshow audio track1.mp3 track2.mp3 --gap 6\n"
                "  slideshow preprocess\n"
                "  slideshow beats cache/mix.flac        # Regionenkarte pruefen!\n"
+               "  slideshow order                       # optional: Reihenfolge sortieren\n"
                "  slideshow chapters                    # optional: Titelfolien\n"
                "  slideshow build\n"
                "  slideshow render edit.yaml -o out/master.mp4\n")
@@ -107,6 +108,17 @@ def build_parser() -> argparse.ArgumentParser:
     ch.add_argument("--no-auftakt", action="store_true",
                     help="keinen Titel vor dem Material vorschlagen")
     ch.add_argument("--force", action="store_true",
+                    help="vorhandene Datei ueberschreiben")
+
+    od = sub.add_parser("order", help="Reihenfolge zum Sortieren erzeugen -> order.yaml")
+    od.add_argument("-o", "--output", default=None, metavar="order.yaml")
+    od.add_argument("--manifest", default=None)
+    od.add_argument("--by", choices=("day", "place", "none"), default="day",
+                    help="Vorgruppierung: nach Kalendertag (Default), nach "
+                         "Ortscluster aus GPS, oder gar nicht")
+    od.add_argument("--update", action="store_true",
+                    help="neues Material einpflegen und die Sortierung behalten")
+    od.add_argument("--force", action="store_true",
                     help="vorhandene Datei ueberschreiben")
 
     bu.add_argument("--chapters", default=None, metavar="chapters.yaml",
@@ -471,6 +483,7 @@ def cmd_build(args, project: Project) -> int:
     from .build import build_edit_list, validate_edit, write_timeline
     from .doctor import preflight
     from .models import BeatMap, Defaults, Manifest, Region
+    from .order import anchor_chapters
     from .planner import coverage_advice, resolve
     preflight(project, "build")
 
@@ -501,7 +514,11 @@ def cmd_build(args, project: Project) -> int:
     defaults.xfade.auto = not args.no_xfade
 
     chapters = _load_chapters(project, args.chapters, defaults)
-    order, order_notes = _load_order(project, args.order, manifest)
+    order, order_notes, olist = _load_order(project, args.order, manifest)
+    # `group:` zeigt auf einen Block in order.yaml; ``build`` kennt nur noch
+    # eine Liste. Aufgeloest wird das hier, an der einzigen Stelle, die beide
+    # Dateien vor sich hat.
+    chapters = anchor_chapters(chapters, olist, order)
 
     size = _parse_size(args.size) if args.size else (3840, 2160)
     edit, plan, cov = build_edit_list(project, manifest, beatmap, defaults=defaults,
@@ -536,9 +553,11 @@ def cmd_build(args, project: Project) -> int:
 
 
 def cmd_chapters(args, project: Project) -> int:
-    from .chapters import (GAP_PLACE_HOURS, JUMP_KM, coverage_note,
-                           dump_chapters_yaml, first_image_id, suggest)
+    from .chapters import (GAP_PLACE_HOURS, JUMP_KM, ORDER_VORBEHALT,
+                           coverage_note, dump_chapters_yaml, first_image_id,
+                           suggest)
     from .models import Manifest
+    from .order import is_chronological
 
     manifest = Manifest.load(Path(args.manifest) if args.manifest else project.manifest)
     vorschlaege = suggest(manifest,
@@ -552,13 +571,19 @@ def cmd_chapters(args, project: Project) -> int:
     # *Kommentar*, und wer gerade sortiert, hat regelmaessig einen Zwischenstand
     # liegen, den `build` zu Recht ablehnen wuerde.
     try:
-        reihenfolge, _ = _load_order(project, None, manifest)
+        reihenfolge, _notes, _olist = _load_order(project, None, manifest)
     except SlideshowError as exc:
         reihenfolge = None
         console().print(f"[yellow]order.yaml bleibt aussen vor:[/] {exc}")
+    # Bei manueller Sortierung sind die Nachbarn im Film thematisch benachbart,
+    # nicht zeitlich — die Zeitluecken-Heuristik unten rechnet dann an der
+    # fertigen Abfolge vorbei. Das muss in der Datei stehen, nicht nur hier.
+    vorbehalt = (ORDER_VORBEHALT if reihenfolge
+                 and not is_chronological(manifest, reihenfolge) else "")
     text = dump_chapters_yaml(vorschlaege, hinweis=coverage_note(manifest),
                               auftakt=not args.no_auftakt,
-                              auftakt_bild=first_image_id(manifest, reihenfolge))
+                              auftakt_bild=first_image_id(manifest, reihenfolge),
+                              vorbehalt=vorbehalt)
 
     out = Path(args.output) if args.output else (project.root / "chapters.yaml")
     con = console()
@@ -581,6 +606,51 @@ def cmd_chapters(args, project: Project) -> int:
     con.print(f"[dim]{coverage_note(manifest)}[/dim]")
     con.print("[yellow]Die Ueberschriften sind leer und muessen ausgefuellt "
               "werden.[/yellow] Danach: `slideshow build`")
+    return 0
+
+
+def cmd_order(args, project: Project) -> int:
+    from .models import Manifest
+    from .order import (dump_order_yaml, group_media, load_order,
+                        update_order_text)
+
+    manifest = Manifest.load(Path(args.manifest) if args.manifest else project.manifest)
+    out = Path(args.output) if args.output else (project.root / "order.yaml")
+    con = console()
+
+    if args.update:
+        if not out.exists():
+            raise SlideshowError(f"{out} gibt es noch nicht — `--update` pflegt eine "
+                                 f"bestehende Datei nach. Ohne den Schalter wird sie "
+                                 f"neu erzeugt.")
+        olist, _zeilen = load_order(out)
+        text, meldungen = update_order_text(out.read_text(encoding="utf-8"),
+                                            olist, manifest)
+    else:
+        bloecke = group_media(manifest, by=args.by)
+        text = dump_order_yaml(bloecke, manifest, by=args.by)
+        meldungen = [f"{len(bloecke)} Gruppen, "
+                     f"{sum(len(b.items) for b in bloecke)} Medien"]
+
+    if args.dry_run:
+        con.print(text)
+        return 0
+    # Wie bei den Kapiteln: die Datei ist Handarbeit, sobald einmal sortiert
+    # wurde. Sie kommentarlos zu ueberschreiben hiesse, die Sortierung zu
+    # loeschen — dafuer gibt es `--update`, und erst danach `--force`.
+    if out.exists() and not (args.force or args.update):
+        raise SlideshowError(
+            f"{out} gibt es bereits und enthaelt die Sortierung. `--update` pflegt "
+            f"neues Material ein und behaelt sie, `--force` wirft sie weg, "
+            f"`--dry-run` zeigt den Vorschlag nur an.")
+    out.write_text(text, encoding="utf-8")
+
+    con.print(f"Reihenfolge: {out}")
+    for m in meldungen:
+        con.print(f"  [dim]{m}[/dim]")
+    if not args.update:
+        con.print("[yellow]Die Reihenfolge ist noch chronologisch.[/yellow] Zum "
+                  "Sortieren die Zeilen verschieben. Danach: `slideshow build`")
     return 0
 
 
@@ -615,7 +685,7 @@ def _load_chapters(project: Project, angabe: str | None, defaults) -> list:
 
 
 def _load_order(project: Project, angabe: str | None,
-                manifest) -> tuple[list[str] | None, list[str]]:
+                manifest) -> tuple[list[str] | None, list[str], object | None]:
     """Reihenfolge laden und aufloesen — dieselbe Regel wie bei den Kapiteln.
 
     Ein *ausdruecklich* genannter Pfad, den es nicht gibt, ist ein Fehler; die
@@ -631,14 +701,14 @@ def _load_order(project: Project, angabe: str | None,
     else:
         pfad = project.root / "order.yaml"
         if not pfad.exists():
-            return (None, [])
+            return (None, [], None)
 
     olist, zeilen = load_order(pfad)
     ids, meldungen = resolve_order(manifest, olist, quelle=str(pfad), zeilen=zeilen)
     gruppen = len([g for g in olist.blocks if g.items])
     console().print(f"Reihenfolge: {pfad}  ({len(ids)} von {len(manifest.media)} "
                     f"Medien" + (f", {gruppen} Gruppen" if olist.groups else "") + ")")
-    return (ids, meldungen)
+    return (ids, meldungen, olist)
 
 
 def _print_coverage(cov, defaults, plan) -> None:
@@ -782,7 +852,7 @@ def cmd_selftest(args, project: Project) -> int:
 _COMMANDS = {
     "doctor": cmd_doctor, "probe": cmd_probe, "audio": cmd_audio,
     "preprocess": cmd_preprocess, "beats": cmd_beats, "chapters": cmd_chapters,
-    "build": cmd_build,
+    "order": cmd_order, "build": cmd_build,
     "render": cmd_render, "export-mlt": cmd_export_mlt, "selftest": cmd_selftest,
 }
 

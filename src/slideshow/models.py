@@ -612,6 +612,12 @@ class Chapter(BaseModel):
     before: str | None = None
     #: Position in der Medienfolge; ``0`` ist der Auftakt vor allem Material.
     at: int | None = None
+    #: Name einer Gruppe aus ``order.yaml``; die Folie steht vor deren erstem
+    #: Medium. Genauer als ``before:``, sobald von Hand sortiert wird: eine
+    #: Medien-ID zeigt kommentarlos mitten in den Block hinein, sobald man sie
+    #: dort nach hinten schiebt. Aufgeloest wird das vor dem Bauen
+    #: (:func:`slideshow.order.anchor_chapters`).
+    group: str | None = None
     title: str
     subtitle: str | None = "auto"
     #: ``auto`` | **Medien-ID** | ``cache/…``-Pfad | ``#rrggbb`` | ``none``.
@@ -638,9 +644,11 @@ class Chapter(BaseModel):
 
     @model_validator(mode="after")
     def _genau_ein_anker(self) -> "Chapter":
-        if (self.before is None) == (self.at is None):
-            raise ValueError("genau eines von `before:` (Medien-ID) und `at:` "
-                             "(Position) angeben")
+        anker = [self.before, self.at, self.group]
+        if sum(a is not None for a in anker) != 1:
+            raise ValueError("genau eines von `before:` (Medien-ID), `at:` "
+                             "(Position) und `group:` (Gruppe aus order.yaml) "
+                             "angeben")
         return self
 
 

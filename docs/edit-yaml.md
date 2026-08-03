@@ -498,8 +498,9 @@ chapters:
 
 | Schlüssel | Typ | Vorgabe | Bedeutung |
 |---|---|---|---|
-| `before` | string | – | [Medien-ID](#medien-ids), **vor** der die Folie steht. Genau eines von `before` und `at`. |
+| `before` | string | – | [Medien-ID](#medien-ids), **vor** der die Folie steht. Genau eines von `before`, `at` und `group`. |
 | `at` | int | – | Position in der Medienfolge. `at: 0` ist der Auftakt vor allem Material. |
+| `group` | string | – | Name einer Gruppe aus [`order.yaml`](#orderyaml--die-reihenfolge-von-hand); die Folie steht vor deren erstem Medium. Siehe unten. |
 | `title` | string | – | Überschrift. Pflicht und nicht leer. |
 | `subtitle` | string | `auto` | Zweite Zeile. `auto` bildet `Tag 11 · 24. Juli` aus dem Aufnahmezeitpunkt des folgenden Bildes; Tag 1 ist das früheste Aufnahmedatum des Projekts. Weglassen mit `subtitle: null`. |
 | `bg` | string | `auto` | Wie am Segment, **zusätzlich als [Medien-ID](#medien-ids)** (`bg: img_075`). In dieser Datei stehen IDs; einen Cache-Pfad müsste man erst nachschlagen. `build` löst sie auf und schreibt den Pfad nach `edit.yaml`. Was weder ID noch bekannter Pfad, Farbfläche oder `none` ist, bricht mit Nennung des Kapitels ab. |
@@ -512,6 +513,24 @@ Verankert wird an **Medien-IDs**, nicht an Segmentindizes oder Zeiten: IDs sind
 gegen Umsortieren und gegen zusätzliche Bilder stabil, alles andere verrutscht
 beim nächsten `build`. Eine ID, die es nicht gibt, ist ein Fehler mit Nennung
 des Kapitels — kein stilles Überspringen.
+
+#### `group:` — der Anker für manuell Sortiertes
+
+Wer thematisch sortiert, will die Zäsur an der **Blockgrenze**, nicht an einem
+bestimmten Bild. `before: img_042` bricht in dem Moment, in dem man img_042
+innerhalb seines Blocks nach hinten schiebt: der Anker zeigt dann kommentarlos
+mitten in den Block hinein.
+
+```yaml
+chapters:
+  - {group: am-wasser, title: "Am Wasser", subtitle: null}
+```
+
+`group:` meint den gleichnamigen Block aus [`order.yaml`](#orderyaml--die-reihenfolge-von-hand)
+und überlebt jedes Umsortieren *innerhalb* des Blocks. Hat `rest: drop` das
+erste Bild der Gruppe weggenommen, rückt die Folie vor das erste noch
+vorhandene. Ein `group:` ohne `order.yaml`, eine unbekannte und eine leer
+geräumte Gruppe sind jeweils ein Fehler mit Nennung des Kapitels.
 
 #### Medien-IDs
 
@@ -659,8 +678,54 @@ bleibt es chronologisch.
 
 **Eine Gruppe ist keine Titelfolie.** Der Name steht nirgends im Bild — sonst
 gäbe es zwei Wege, eine Überschrift zu erklären, und sie liefen auseinander.
-Wer an einer Blockgrenze eine Zäsur will, schreibt sie in `chapters.yaml`:
-`{before: img_DSC06401, title: "Am Wasser"}`.
+Wer an einer Blockgrenze eine Zäsur will, schreibt sie in `chapters.yaml`, und
+zwar mit `group:` als Anker: `{group: am-wasser, title: "Am Wasser"}`. Der Text
+wohnt damit weiter in `chapters.yaml`, die Reihenfolge weiter hier, und beide
+Dateien behalten genau eine Aufgabe.
+
+### Die Datei erzeugen lassen
+
+```
+slideshow order                 # -> order.yaml, chronologisch vorbelegt, nach Tagen gruppiert
+slideshow order --by place      # nach Ortsclustern aus GPS statt nach Tagen
+slideshow order --by none       # ein einziger Block
+slideshow order --update        # neues Material einpflegen, Sortierung behalten
+slideshow --dry-run order       # nur anzeigen
+slideshow order --force         # bestehende Datei überschreiben
+```
+
+Niemand tippt 90 Medien-IDs ab. Die erzeugte Datei ist ein **Formular**:
+vorbelegt in chronologischer Reihenfolge, nach Kalendertagen gruppiert, und
+jede Zeile trägt als Kommentar, was man zum Sortieren wissen muss — Tag,
+Uhrzeit, Hoch- oder Querformat, bei Clips die Länge. Sortieren heißt dann
+Zeilen verschieben.
+
+Gruppiert wird nach **Kalendertag**, nicht nach Zeitlücke: eine Aufnahme um
+23:50 und eine um 00:10 liegen 20 Minuten auseinander und trotzdem an
+verschiedenen Tagen. Nur so heißt der Block `tag-2` auch das, was
+`subtitle: auto` später als „Tag 2" ausschreibt. Material ohne Zeitstempel
+landet in einer eigenen Gruppe `ohne-datum`.
+
+Eine vorhandene Datei wird **nicht** überschrieben — sie enthält die Sortierung.
+
+### Neues Material einpflegen
+
+Nach einem erneuten `slideshow probe` kennt das Manifest Bilder, die
+`order.yaml` nicht nennt — und `rest: error` bricht dann zu Recht ab.
+`slideshow order --update` ist der Weg zurück:
+
+- die bestehende Reihenfolge, die Gruppennamen und **alle Kommentare** bleiben,
+- neues Material kommt als eigene Gruppe `neu` ans Ende, zum Einsortieren,
+- Einträge, die es im Manifest nicht mehr gibt, werden an Ort und Stelle
+  auskommentiert statt gelöscht — die Zeile steht dort, wo das Bild einsortiert
+  war, und wer eine Datei umbenannt hat, findet die Stelle so wieder.
+
+Gearbeitet wird dafür auf dem **Quelltext**, nicht auf dem Modell. Ein
+Neuschreiben verlöre die eigenen Kommentare, und die sind hier keine Zierde:
+bei `rest: drop` ist eine auskommentierte Zeile die Auswahl, und der Kommentar
+davor sagt, warum das Bild draußen bleibt. Aus demselben Grund bietet
+`--update` ein auskommentiertes Bild **nicht** erneut als „neu" an — sonst
+stünde jedes verworfene Foto nach dem dritten Lauf dreimal in der Datei.
 
 ### Was mit nicht genanntem Material geschieht
 
@@ -701,7 +766,9 @@ etwas, das er nicht getan hat.
 Aus demselben Grund taugt `slideshow chapters` bei manueller Sortierung nur
 noch bedingt: es sucht Zeitlücken zwischen *Nachbarn*, und die sind dann
 thematisch benachbart, nicht zeitlich. Die Reihenfolge zuerst festlegen, die
-Kapitel danach.
+Kapitel danach — und dort `group:` statt `before:` als Anker nehmen. Ist die
+Folge nicht chronologisch, schreibt `slideshow chapters` diesen Vorbehalt in
+den Kopf der erzeugten Datei.
 
 ---
 

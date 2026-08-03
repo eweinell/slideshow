@@ -258,6 +258,15 @@ def insert_titles(intents: list[Intent], chapters: list[Chapter],
 
     aufgeloest: list[tuple[int, Chapter]] = []
     for kap in chapters:
+        if kap.group is not None:
+            # Hier ist die Reihenfolge nur noch eine Liste, die Gruppen sind
+            # vergessen. Ein `group:` muss deshalb vorher aufgeloest sein
+            # (`order.anchor_chapters`); kaeme es bis hierher durch, faende die
+            # Folie stillschweigend keinen Platz.
+            raise SchemaError(
+                f"Kapitel {kap.title!r} traegt einen unaufgeloesten `group:`-Anker "
+                f"({kap.group!r}). `slideshow.order.anchor_chapters` muss vor dem "
+                f"Bauen laufen.", path="chapters")
         if kap.at is not None:
             aufgeloest.append((max(0, min(int(kap.at), len(verwendet))), kap))
             continue

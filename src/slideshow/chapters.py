@@ -100,7 +100,7 @@ def suggest(manifest: Manifest, *, min_gap_hours: float = GAP_PLACE_HOURS,
     reihe = [m for m in chronological(manifest)
              if effective_capture_time(m, manifest.clock_offsets) is not None]
     offsets = manifest.clock_offsets
-    erster_tag = _erster_tag(reihe, offsets)
+    ersterer = first_day(reihe, offsets)
 
     out: list[Vorschlag] = []
     for vorher, danach in zip(reihe, reihe[1:]):
@@ -122,14 +122,14 @@ def suggest(manifest: Manifest, *, min_gap_hours: float = GAP_PLACE_HOURS,
         if not (stark or schwach):
             continue
         out.append(Vorschlag(
-            before=danach.id, subtitle=_datum(t1, erster_tag),
+            before=danach.id, subtitle=day_label(t1, ersterer),
             luecke_h=round(luecke_h, 2),
             sprung_km=(round(sprung, 1) if sprung is not None else None),
             staerke="stark" if stark else "schwach"))
     return out
 
 
-def _erster_tag(reihe: list[MediaItem], offsets: dict[str, float]) -> _dt.date | None:
+def first_day(reihe: list[MediaItem], offsets: dict[str, float]) -> _dt.date | None:
     for m in reihe:
         ts = effective_capture_time(m, offsets)
         if ts is not None:
@@ -137,7 +137,7 @@ def _erster_tag(reihe: list[MediaItem], offsets: dict[str, float]) -> _dt.date |
     return None
 
 
-def _datum(ts: float, erster_tag: _dt.date | None) -> str:
+def day_label(ts: float, erster_tag: _dt.date | None) -> str:
     """"Tag 11 · 24. Juli" — dieselbe Form, die ``subtitle: auto`` erzeugt."""
     wann = _dt.datetime.fromtimestamp(ts)
     datum = f"{wann.day}. {_MONATE[wann.month - 1]}"
@@ -168,6 +168,17 @@ def first_image_id(manifest: Manifest, reihenfolge: list[str] | None = None) -> 
     return ""
 
 
+#: Was von den Vorschlaegen bleibt, wenn von Hand sortiert wurde.
+ORDER_VORBEHALT = (
+    "ACHTUNG: order.yaml sortiert nicht chronologisch. Die Grenzen unten sind\n"
+    "aus Zeitluecken zwischen *zeitlichen* Nachbarn gerechnet — im Film stehen\n"
+    "dort aber thematische Nachbarn. Als Anker taugt hier `group:` statt\n"
+    "`before:`: `- {group: am-wasser, title: \"Am Wasser\"}`. Und `subtitle: auto`\n"
+    "nimmt das Datum des folgenden Bildes, was ueber einem Block aus mehreren\n"
+    "Tagen irrefuehrt — dann `subtitle:` von Hand setzen oder mit `null` weglassen."
+)
+
+
 def coverage_note(manifest: Manifest) -> str:
     """Wie gut das GPS-Signal ueberhaupt traegt.
 
@@ -193,7 +204,8 @@ def coverage_note(manifest: Manifest) -> str:
 # --------------------------------------------------------------------------
 
 def dump_chapters_yaml(vorschlaege: list[Vorschlag], *, hinweis: str = "",
-                       auftakt: bool = True, auftakt_bild: str = "") -> str:
+                       auftakt: bool = True, auftakt_bild: str = "",
+                       vorbehalt: str = "") -> str:
     """Schreibt die Datei — von Hand, nicht ueber ``yaml.dump``.
 
     Der Grund sind die Kommentare: die Datei ist ein Formular, kein Erzeugnis.
@@ -210,6 +222,8 @@ def dump_chapters_yaml(vorschlaege: list[Vorschlag], *, hinweis: str = "",
     ]
     if hinweis:
         zeilen += ["#", f"# Signal: {hinweis}"]
+    if vorbehalt:
+        zeilen += ["#"] + [f"# {z}" for z in vorbehalt.splitlines()]
     zeilen += ["", "chapters:"]
 
     if auftakt:

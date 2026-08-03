@@ -9,6 +9,7 @@ slideshow probe /material/urlaub              # → manifest.json
 slideshow audio track1.mp3 track2.mp3 --gap 6 # → cache/mix.flac
 slideshow preprocess                          # → cache/
 slideshow beats                               # → beats.yaml  ← ansehen!
+slideshow order                               # → order.yaml  ← optional, zum Sortieren
 slideshow build                               # → edit.yaml
 slideshow render edit.yaml -o out/master.mp4
 ```

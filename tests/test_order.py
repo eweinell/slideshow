@@ -1,24 +1,33 @@
-"""Manuelle Reihenfolge (``docs/briefing-manuelle-reihenfolge.md``, Stufe 1).
+"""Manuelle Reihenfolge (``docs/briefing-manuelle-reihenfolge.md``, Stufen 1–2).
 
-Geprueft wird, dass die Reihenfolge **wirkt** und dass kein Bild dabei still
-verschwindet. Alles ohne ffmpeg: gearbeitet wird auf einem von Hand gestellten
-Manifest und einer von Hand gestellten Regionenkarte, damit die Abfolge
-*bekannt* ist statt bloss plausibel.
+Geprueft wird, dass die Reihenfolge **wirkt**, dass kein Bild dabei still
+verschwindet und dass das erzeugte Formular die Handarbeit ueberlebt. Alles ohne
+ffmpeg: gearbeitet wird auf einem von Hand gestellten Manifest und einer von Hand
+gestellten Regionenkarte, damit die Abfolge *bekannt* ist statt bloss plausibel.
 """
 
 from __future__ import annotations
 
 import pytest
+import yaml
+from pydantic import ValidationError
 
 from slideshow.build import build_edit_list, plan_from_edit
 from slideshow.chapters import first_image_id
 from slideshow.errors import SchemaError
-from slideshow.models import (BeatMap, Chapter, Defaults, Manifest, MediaItem,
-                              OrderList, Region, StillSegment, dump_edit_yaml)
-from slideshow.order import item_lines, load_order, resolve_order
+from slideshow.models import (BeatMap, Chapter, Defaults, ImageInfo, Manifest,
+                              MediaItem, OrderList, Region, StillSegment,
+                              dump_edit_yaml)
+from slideshow.order import (anchor_chapters, dump_order_yaml, group_media,
+                             is_chronological, item_lines, load_order,
+                             resolve_order, update_order_text)
 
 FPS = 60.0
 T0 = 1_753_000_000                   # 20. Juli 2025, lokale Zeit
+
+#: Echte Koordinaten — der Abstand soll die JUMP_KM-Schwelle wirklich reissen.
+KOPENHAGEN = (55.6761, 12.5683)
+STOCKHOLM = (59.3293, 18.0686)       # gut 500 km
 
 
 # --------------------------------------------------------------------------
@@ -29,7 +38,10 @@ def _manifest(n: int = 8, *, stunden: float = 6.0) -> Manifest:
     """``n`` Bilder im Abstand von ``stunden`` — Tagesgrenzen sind damit bekannt."""
     media = [MediaItem(id=f"img_{i:03d}", path=f"src/img_{i:03d}.jpg", kind="image",
                        cache_path=f"cache/img_{i:03d}.jpg", time_source="exif",
-                       capture_time=T0 + int(i * stunden * 3600))
+                       capture_time=T0 + int(i * stunden * 3600),
+                       # Wie nach einem `probe`: jedes dritte Bild hochkant.
+                       # Der Generator schreibt das als Kontext neben die Zeile.
+                       image=ImageInfo(width=6000, height=4000, portrait=i % 3 == 0))
              for i in range(n)]
     m = Manifest(media=media, fps_suggestion=FPS)
     m.audio.file = "cache/mix.flac"
@@ -51,6 +63,10 @@ def _folge(edit) -> list[str]:
     """Die Kennungen der Standbilder in der Reihenfolge der Edit-List."""
     return [s.src.rsplit("/", 1)[-1].rsplit(".", 1)[0]
             for s in edit.segments if isinstance(s, StillSegment)]
+
+
+def _olist(text: str) -> OrderList:
+    return OrderList.model_validate(yaml.safe_load(text))
 
 
 def _datei(tmp_path, text: str):
@@ -357,3 +373,221 @@ def test_slideshow_chapters_scheitert_nicht_an_einem_zwischenstand(tmp_path, cap
     ausgabe = capsys.readouterr().out
     assert "bleibt aussen vor" in ausgabe
     assert (tmp_path / "chapters.yaml").exists()
+
+
+# --------------------------------------------------------------------------
+# Stufe 2 — der Generator
+# --------------------------------------------------------------------------
+
+def _mit_orten(manifest: Manifest, ab: int, ort) -> Manifest:
+    for m in manifest.media[:ab]:
+        m.gps = KOPENHAGEN
+    for m in manifest.media[ab:]:
+        m.gps = ort
+    return manifest
+
+
+def test_nach_tagen_gruppiert_der_generator_am_kalendertag():
+    """Nicht an der Zeitluecke: 23:50 und 00:10 sind 20 Minuten auseinander und
+    trotzdem zwei Tage. Nur so heisst `tag-2` auch, was `subtitle: auto` als
+    "Tag 2" ausschreibt."""
+    bloecke = group_media(_manifest(n=6, stunden=12.0), by="day")
+    assert [b.name for b in bloecke] == ["tag-1", "tag-2", "tag-3"]
+    assert [len(b.items) for b in bloecke] == [2, 2, 2]
+
+
+def test_nach_orten_gruppiert_der_generator_am_gps_sprung():
+    bloecke = group_media(_mit_orten(_manifest(n=6), 4, STOCKHOLM), by="place")
+    assert [b.name for b in bloecke] == ["ort-1", "ort-2"]
+    assert [len(b.items) for b in bloecke] == [4, 2]
+    assert "km weiter" in bloecke[1].grund
+
+
+def test_ohne_gruppierung_bleibt_alles_ein_block():
+    bloecke = group_media(_manifest(n=6, stunden=12.0), by="none")
+    assert [b.name for b in bloecke] == ["alle"]
+    assert len(bloecke[0].items) == 6
+
+
+def test_material_ohne_zeitstempel_landet_in_einer_eigenen_gruppe():
+    manifest = _manifest(n=4)
+    manifest.media[2].capture_time = None
+    manifest.media[2].time_source = "none"
+    bloecke = group_media(manifest, by="day")
+    assert bloecke[-1].name == "ohne-datum"
+    assert [m.id for m in bloecke[-1].items] == ["img_002"]
+
+
+def test_die_erzeugte_datei_laedt_sich_zurueck(tmp_path):
+    """Das Formular muss gueltiges YAML sein — sonst ist es ein Aufsatz."""
+    manifest = _manifest(n=6, stunden=12.0)
+    p = _datei(tmp_path, dump_order_yaml(group_media(manifest, by="day"), manifest))
+    olist, zeilen = load_order(p)
+    ids, meldungen = resolve_order(manifest, olist, quelle=str(p), zeilen=zeilen)
+    assert ids == [m.id for m in manifest.media]
+    assert meldungen == []              # vollstaendig, also nichts zu melden
+    assert zeilen["img_000"]            # die Kontextkommentare stoeren die Zeilen nicht
+
+
+def test_jede_zeile_traegt_den_kontext_zum_sortieren():
+    manifest = _manifest(n=2)
+    text = dump_order_yaml(group_media(manifest, by="day"), manifest)
+    zeile = next(z for z in text.splitlines() if "img_000" in z)
+    assert "Tag 1" in zeile and ("quer" in zeile or "hoch" in zeile)
+
+
+def test_der_kopf_sagt_dass_gruppen_keine_titel_sind():
+    manifest = _manifest(n=2)
+    text = dump_order_yaml(group_media(manifest, by="day"), manifest)
+    assert "NICHT im Film" in text and "chapters.yaml" in text
+
+
+# --------------------------------------------------------------------------
+# Stufe 2 — nachpflegen
+# --------------------------------------------------------------------------
+
+def _bestand() -> str:
+    return ("version: 1\nrest: drop\n\ngroups:\n"
+            "  - name: am-wasser\n    items:\n"
+            "      - img_003   # Tag 1\n"
+            "      - img_001   # Tag 1\n"
+            "    # - img_002   # zu dunkel, bleibt draussen\n")
+
+
+def test_update_behaelt_die_sortierung_und_haengt_neues_an():
+    manifest = _manifest(n=6)
+    text, meldungen = update_order_text(_bestand(), _olist(_bestand()), manifest)
+    assert text.index("img_003") < text.index("img_001")       # Sortierung steht
+    assert "- name: neu" in text
+    assert "img_000" in text.split("- name: neu")[1]
+    assert any("neue Medien angehaengt" in m for m in meldungen)
+
+
+def test_update_wirft_handgeschriebene_kommentare_nicht_weg():
+    """Bei `rest: drop` ist eine auskommentierte Zeile die Auswahl, und ihr
+    Kommentar sagt, warum das Bild draussen bleibt."""
+    text, _meldungen = update_order_text(_bestand(), _olist(_bestand()), _manifest(n=6))
+    assert "# - img_002   # zu dunkel, bleibt draussen" in text
+
+
+def test_update_bietet_abgewaehltes_material_nicht_erneut_an():
+    """Sonst stuende jedes verworfene Foto nach dem dritten Lauf dreimal drin."""
+    text, meldungen = update_order_text(_bestand(), _olist(_bestand()), _manifest(n=6))
+    assert "img_002" not in text.split("- name: neu")[1]
+    assert any("bewusst abgewaehlt" in m for m in meldungen)
+
+
+def test_update_ist_idempotent():
+    manifest = _manifest(n=6)
+    einmal, _m1 = update_order_text(_bestand(), _olist(_bestand()), manifest)
+    zweimal, meldungen = update_order_text(einmal, _olist(einmal), manifest)
+    assert zweimal == einmal
+    assert any("nichts nachzupflegen" in m for m in meldungen)
+
+
+def test_verschwundenes_material_wird_auskommentiert_statt_geloescht():
+    """Die Zeile steht an der Stelle, an die das Bild einsortiert war — wer eine
+    Datei umbenannt hat, findet sie so wieder."""
+    manifest = _manifest(n=6)
+    manifest.media = [m for m in manifest.media if m.id != "img_001"]
+    text, meldungen = update_order_text(_bestand(), _olist(_bestand()), manifest)
+    assert "# - img_001   # Tag 1   # nicht mehr im Manifest" in text
+    assert any("nicht mehr im Manifest" in m for m in meldungen)
+
+
+def test_update_kommt_auch_mit_der_flachen_flow_form_zurecht():
+    """Eine Blockzeile neben `order: [...]` waere kein gueltiges YAML mehr."""
+    bestand = "version: 1\norder: [img_003, img_001]\n"
+    text, _meldungen = update_order_text(bestand, _olist(bestand), _manifest(n=4))
+    olist = _olist(text)
+    assert olist.blocks[0].items == ["img_003", "img_001", "img_000", "img_002"]
+
+
+# --------------------------------------------------------------------------
+# Stufe 2 — `group:` als Kapitelanker
+# --------------------------------------------------------------------------
+
+def test_group_zeigt_auf_das_erste_medium_der_gruppe():
+    olist = _olist("groups:\n  - {name: am-wasser, items: [img_004, img_001]}\n"
+                   "  - {name: abende, items: [img_005, img_000]}\n")
+    kapitel = [Chapter(group="abende", title="Abende", subtitle=None)]
+    aufgeloest = anchor_chapters(kapitel, olist, ["img_004", "img_001",
+                                                  "img_005", "img_000"])
+    assert aufgeloest[0].before == "img_005"
+    assert aufgeloest[0].group is None
+
+
+def test_group_ueberlebt_das_umsortieren_innerhalb_der_gruppe():
+    """Genau der Grund fuer den Anker: `before: img_005` braeche hier, `group:`
+    nicht."""
+    def anker(items):
+        olist = _olist(f"groups:\n  - {{name: abende, items: [{', '.join(items)}]}}\n")
+        return anchor_chapters([Chapter(group="abende", title="Abende", subtitle=None)],
+                               olist, items)[0].before
+
+    assert anker(["img_005", "img_000"]) == "img_005"
+    assert anker(["img_000", "img_005"]) == "img_000"
+
+
+def test_group_springt_ueber_weggelassenes_material():
+    """`rest: drop` kann das erste Bild einer Gruppe genommen haben — die Folie
+    gehoert dann vor das erste noch vorhandene."""
+    olist = _olist("groups:\n  - {name: abende, items: [img_005, img_000]}\n")
+    aufgeloest = anchor_chapters([Chapter(group="abende", title="Abende", subtitle=None)],
+                                 olist, ["img_000"])
+    assert aufgeloest[0].before == "img_000"
+
+
+def test_group_ohne_order_yaml_ist_ein_fehler():
+    with pytest.raises(SchemaError, match="keine order.yaml"):
+        anchor_chapters([Chapter(group="abende", title="Abende")], None, None)
+
+
+def test_eine_unbekannte_gruppe_wird_benannt():
+    olist = _olist("groups:\n  - {name: abende, items: [img_000]}\n")
+    with pytest.raises(SchemaError) as exc:
+        anchor_chapters([Chapter(group="am-wasser", title="X")], olist, ["img_000"])
+    assert "'am-wasser'" in str(exc.value) and "abende" in str(exc.value)
+
+
+def test_eine_leergeraeumte_gruppe_nennt_den_grund():
+    olist = _olist("groups:\n  - {name: abende, items: [img_005]}\n")
+    with pytest.raises(SchemaError, match="rest: drop"):
+        anchor_chapters([Chapter(group="abende", title="Abende")], olist, ["img_000"])
+
+
+def test_genau_ein_anker_gilt_jetzt_fuer_drei():
+    Chapter(group="abende", title="Abende")
+    with pytest.raises(ValidationError):
+        Chapter(group="abende", before="img_000", title="Abende")
+    with pytest.raises(ValidationError):
+        Chapter(title="Abende")
+
+
+def test_ein_unaufgeloester_anker_verpufft_nicht_still():
+    """Der Riegel in `insert_titles`: dort sind die Gruppen vergessen."""
+    with pytest.raises(SchemaError, match="unaufgeloesten"):
+        _bauen(_manifest(), chapters=[Chapter(group="abende", title="Abende")])
+
+
+# --------------------------------------------------------------------------
+# Stufe 2 — der Vorbehalt in `slideshow chapters`
+# --------------------------------------------------------------------------
+
+def test_monotonie_wird_gemessen_nicht_vermutet():
+    manifest = _manifest(n=5)
+    assert is_chronological(manifest, [m.id for m in manifest.media])
+    assert not is_chronological(manifest, [m.id for m in reversed(manifest.media)])
+    # Zwei getauschte Nachbarn sind bereits nicht mehr chronologisch — die
+    # Warnung darueber haengt deshalb zusaetzlich am Tagesumfang des Blocks.
+    assert not is_chronological(manifest, ["img_001", "img_000", "img_002",
+                                           "img_003", "img_004"])
+
+
+def test_der_vorbehalt_steht_im_kopf_der_erzeugten_datei():
+    from slideshow.chapters import ORDER_VORBEHALT, dump_chapters_yaml
+    text = dump_chapters_yaml([], vorbehalt=ORDER_VORBEHALT)
+    assert "# ACHTUNG: order.yaml sortiert nicht chronologisch." in text
+    assert "`group:`" in text
+    # Muss trotzdem ladbar bleiben — der Vorbehalt ist ein Kommentar.
+    assert "chapters" in yaml.safe_load(text)
