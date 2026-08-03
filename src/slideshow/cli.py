@@ -32,6 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
                "  slideshow audio track1.mp3 track2.mp3 --gap 6\n"
                "  slideshow preprocess\n"
                "  slideshow beats cache/mix.flac        # Regionenkarte pruefen!\n"
+               "  slideshow chapters                    # optional: Titelfolien\n"
                "  slideshow build\n"
                "  slideshow render edit.yaml -o out/master.mp4\n")
     p.add_argument("--version", action="version", version=f"slideshow {__version__}")
@@ -94,6 +95,23 @@ def build_parser() -> argparse.ArgumentParser:
     bu.add_argument("--kb-engine", choices=("zoompan", "scale16"), default=None)
     bu.add_argument("--fade-out", type=float, default=None, metavar="S",
                     help="Ausblende am Filmende in Sekunden (0 = keine)")
+    ch = sub.add_parser("chapters", help="Kapitelgrenzen vorschlagen -> chapters.yaml")
+    ch.add_argument("-o", "--output", default=None, metavar="chapters.yaml")
+    ch.add_argument("--manifest", default=None)
+    ch.add_argument("--min-gap", type=float, default=None, metavar="H",
+                    help="Zeitluecke in Stunden, ab der ein Kapitel vorgeschlagen "
+                         "wird (Default 20)")
+    ch.add_argument("--min-jump", type=float, default=None, metavar="KM",
+                    help="Ortssprung in km, ab dem ein Kapitel vorgeschlagen wird "
+                         "(Default 30)")
+    ch.add_argument("--no-auftakt", action="store_true",
+                    help="keinen Titel vor dem Material vorschlagen")
+    ch.add_argument("--force", action="store_true",
+                    help="vorhandene Datei ueberschreiben")
+
+    bu.add_argument("--chapters", default=None, metavar="chapters.yaml",
+                    help="Titel- und Zwischenfolien einsetzen "
+                         "(Default: chapters.yaml im Projekt, falls vorhanden)")
     bu.add_argument("--xfade-beats", type=float, default=None)
     bu.add_argument("--no-xfade", action="store_true",
                     help="keine automatischen Uebergaenge erzeugen")
@@ -479,9 +497,11 @@ def cmd_build(args, project: Project) -> int:
         defaults.xfade.beats = args.xfade_beats
     defaults.xfade.auto = not args.no_xfade
 
+    chapters = _load_chapters(project, args.chapters, defaults)
+
     size = _parse_size(args.size) if args.size else (3840, 2160)
     edit, plan, cov = build_edit_list(project, manifest, beatmap, defaults=defaults,
-                                      fps=args.fps, size=size)
+                                      fps=args.fps, size=size, chapters=chapters)
     _print_coverage(cov, defaults, plan)
 
     tips = coverage_advice(cov, defaults)
@@ -510,16 +530,94 @@ def cmd_build(args, project: Project) -> int:
     return 0
 
 
+def cmd_chapters(args, project: Project) -> int:
+    from .chapters import (GAP_PLACE_HOURS, JUMP_KM, coverage_note,
+                           dump_chapters_yaml, first_image_id, suggest)
+    from .models import Manifest
+
+    manifest = Manifest.load(Path(args.manifest) if args.manifest else project.manifest)
+    vorschlaege = suggest(manifest,
+                          min_gap_hours=(args.min_gap if args.min_gap is not None
+                                         else GAP_PLACE_HOURS),
+                          min_jump_km=(args.min_jump if args.min_jump is not None
+                                       else JUMP_KM))
+    text = dump_chapters_yaml(vorschlaege, hinweis=coverage_note(manifest),
+                              auftakt=not args.no_auftakt,
+                              auftakt_bild=first_image_id(manifest))
+
+    out = Path(args.output) if args.output else (project.root / "chapters.yaml")
+    con = console()
+    if args.dry_run:
+        con.print(text)
+        return 0
+    # Die Datei ist Handarbeit, sobald sie einmal ausgefuellt wurde. Sie
+    # kommentarlos zu ueberschreiben hiesse, zwoelf Ortsnamen zu loeschen.
+    if out.exists() and not args.force:
+        raise SlideshowError(
+            f"{out} gibt es bereits. Die Datei enthaelt von Hand eingetragene "
+            f"Ueberschriften — `--force` ueberschreibt sie, `--dry-run` zeigt den "
+            f"Vorschlag nur an.")
+    out.write_text(text, encoding="utf-8")
+
+    stark = sum(1 for v in vorschlaege if v.staerke == "stark")
+    schwach = len(vorschlaege) - stark
+    con.print(f"Kapitelvorschlaege: {out}  ({stark} Grenzen"
+              + (f", {schwach} schwaechere als Kommentar" if schwach else "") + ")")
+    con.print(f"[dim]{coverage_note(manifest)}[/dim]")
+    con.print("[yellow]Die Ueberschriften sind leer und muessen ausgefuellt "
+              "werden.[/yellow] Danach: `slideshow build`")
+    return 0
+
+
+def _load_chapters(project: Project, angabe: str | None, defaults) -> list:
+    """Kapitel laden — ausdruecklich angegeben oder als Projektdatei gefunden.
+
+    Ein *ausdruecklich* genannter Pfad, den es nicht gibt, ist ein Fehler; die
+    stillschweigend gefundene ``chapters.yaml`` ist eine Bequemlichkeit und
+    darf fehlen.
+    """
+    from .models import ChapterList
+    from .titles import find_font
+
+    if angabe:
+        pfad = Path(angabe)
+        if not pfad.exists():
+            raise SlideshowError(f"Kapiteldatei fehlt: {pfad}")
+    else:
+        pfad = project.root / "chapters.yaml"
+        if not pfad.exists():
+            return []
+
+    kapitel = ChapterList.load(pfad).chapters
+    if kapitel:
+        # Ohne Schrift gibt es keine Folie. Das jetzt zu melden ist der
+        # Unterschied zwischen einer Zeile mit Installationsbefehl und einem
+        # Traceback nach dem halben Rendern (Abnahmekriterium T8).
+        schrift = find_font(defaults.title.font)
+        console().print(f"Kapitel: {pfad}  ({len(kapitel)} Titelfolien, "
+                        f"Schrift {schrift})")
+    return kapitel
+
+
 def _print_coverage(cov, defaults, plan) -> None:
     """Laufzeit-Vorabpruefung nach 6.5."""
     from rich.table import Table
     t = Table(title="Laufzeit-Vorabpruefung (6.5)", title_justify="left")
-    for c in ("#", "Typ", "Start", "Dauer", "BPM", "Kapazitaet", "Bilder", "Clips"):
+    spalten = ["#", "Typ", "Start", "Dauer", "BPM", "Kapazitaet", "Bilder", "Clips"]
+    # Die Titelspalte nur zeigen, wenn es Titel gibt — sonst steht in jeder
+    # Zeile eine Null, die nichts erklaert.
+    mit_titeln = bool(cov.titles)
+    if mit_titeln:
+        spalten.append("Titel")
+    for c in spalten:
         t.add_column(c, justify="right" if c != "Typ" else "left")
     for r in cov.per_region:
-        t.add_row(str(r["index"]), r["type"], f"{r['start']:.2f}", f"{r['seconds']:.2f}",
-                  f"{r['bpm']:.1f}" if r["bpm"] else "-", str(r["capacity"]),
-                  str(r["stills"]), str(r["clips"]))
+        zeile = [str(r["index"]), r["type"], f"{r['start']:.2f}", f"{r['seconds']:.2f}",
+                 f"{r['bpm']:.1f}" if r["bpm"] else "-", str(r["capacity"]),
+                 str(r["stills"]), str(r["clips"])]
+        if mit_titeln:
+            zeile.append(str(r.get("titles", 0)))
+        t.add_row(*zeile)
     con = console()
     con.print(t)
     if cov.audio_seconds <= 0:
@@ -531,7 +629,8 @@ def _print_coverage(cov, defaults, plan) -> None:
         ton = f"Musik {cov.audio_seconds:.2f} s -> {wie}"
     con.print(f"Laufzeit {cov.music_seconds:.2f} s | {ton} | "
               f"geplant {cov.planned_seconds:.2f} s | "
-              f"{cov.stills} Bilder, {cov.clips} Clips")
+              f"{cov.stills} Bilder, {cov.clips} Clips"
+              + (f", {cov.titles} Titelfolien" if cov.titles else ""))
     for w in plan.warnings[:10]:
         con.print(f"  [yellow]WARN[/] {w}")
 
@@ -556,6 +655,7 @@ def cmd_render(args, project: Project) -> int:
     mpath = Path(args.manifest) if args.manifest else project.manifest
     manifest = Manifest.load(mpath) if mpath.exists() else None
 
+    _titelassets(project, edit, manifest, dry=DryRun(enabled=args.dry_run))
     check_sources_exist(project, edit)
     plan = validate_edit(edit, manifest)
 
@@ -569,6 +669,22 @@ def cmd_render(args, project: Project) -> int:
         return 0
     print_report(stats, out)
     return 0
+
+
+def _titelassets(project: Project, edit, manifest, *, dry=None) -> None:
+    """Titelfolien backen, bevor irgendetwas sie zu lesen versucht.
+
+    Steht vor ``check_sources_exist``: das Asset ist ein Erzeugnis, kein
+    Material, und "Datei fehlt" waere hier die falsche Diagnose.
+    """
+    from .preprocess import ensure_title_assets
+
+    stats = ensure_title_assets(project, edit, manifest, dry=dry)
+    if stats.erzeugt or stats.aus_cache:
+        console().print(f"Titelfolien: {stats.erzeugt} erzeugt, "
+                        f"{stats.aus_cache} aus Cache")
+    for w in stats.warnungen:
+        console().print(f"  [yellow]{w}[/]")
 
 
 def cmd_export_mlt(args, project: Project) -> int:
@@ -588,6 +704,7 @@ def cmd_export_mlt(args, project: Project) -> int:
         console().print(f"{len(changes)} Zeiten aus Kdenlive uebernommen -> {epath}")
         return 0
 
+    _titelassets(project, edit, manifest, dry=DryRun(enabled=args.dry_run))
     out = Path(args.output) if args.output else (project.out / "project.kdenlive")
     xml = export_mlt(project, edit, manifest)
     if args.dry_run:
@@ -622,7 +739,8 @@ def cmd_selftest(args, project: Project) -> int:
 
 _COMMANDS = {
     "doctor": cmd_doctor, "probe": cmd_probe, "audio": cmd_audio,
-    "preprocess": cmd_preprocess, "beats": cmd_beats, "build": cmd_build,
+    "preprocess": cmd_preprocess, "beats": cmd_beats, "chapters": cmd_chapters,
+    "build": cmd_build,
     "render": cmd_render, "export-mlt": cmd_export_mlt, "selftest": cmd_selftest,
 }
 
@@ -699,7 +817,14 @@ def _naechster_schritt(project: Project, args) -> list[str]:
         return [f"{ruf} beats"]
 
     if not project.edit.exists():
-        return [f"{ruf} build{_build_parameter(project, manifest, beats)}"]
+        schritte = [f"{ruf} build{_build_parameter(project, manifest, beats)}"]
+        # Kapitel sind optional; der Hinweis kommt nur, solange es weder eine
+        # chapters.yaml noch eine Edit-List gibt — also genau einmal, an der
+        # Stelle, an der er noch etwas aendert.
+        if not (project.root / "chapters.yaml").exists():
+            schritte.append(f"[dim]oder vorher Kapitel vorschlagen lassen: "
+                            f"{ruf} chapters[/dim]")
+        return schritte
 
     if not (project.out / "master.mp4").exists():
         return [f"{ruf} render"]

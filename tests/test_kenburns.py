@@ -19,8 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from slideshow.kenburns import (KBMotion, frames_arg, kb_filter, plan_motion,
-                                still_input_args, zoom_from_duration)
+from slideshow.kenburns import (KBMotion, frames_arg, kb_filter, motion_key,
+                                plan_motion, still_input_args, zoom_from_duration)
 from slideshow.models import Defaults, KBDefaults, KBSpec, Region
 from slideshow.planner import Intent, apply_transitions, plan_slots, resolve
 
@@ -73,14 +73,20 @@ def test_schwenkgeschwindigkeit_ist_im_fenster_konstant():
 
 
 def test_alle_acht_richtungen_schwenken_gleich_weit():
-    """Regression: unnormierte Diagonalen liefen 41 % weiter als die Geraden."""
+    """Regression: unnormierte Diagonalen liefen 41 % weiter als die Geraden.
+
+    Eine ganzzahlige Kennung wird unveraendert durchgereicht; das unterste Bit
+    steuert den Zoom, die darueber die Schwenkrichtung. ``2 * i`` spricht damit
+    Richtung ``i`` an — die Bitaufteilung steht hier ausgeschrieben, weil dieser
+    Test der einzige ist, der sie braucht.
+    """
     d = KBDefaults()
-    wege = [_weg(plan_motion(i, 4.0, d)) for i in range(8)]
+    wege = [_weg(plan_motion(2 * i, 4.0, d)) for i in range(8)]
 
     assert max(wege) == pytest.approx(min(wege)), \
         "keine Richtung darf schneller sein als die andern"
     assert len({(round(m.c1[0] - m.c0[0], 6), round(m.c1[1] - m.c0[1], 6))
-                for m in (plan_motion(i, 4.0, d) for i in range(8))}) == 8, \
+                for m in (plan_motion(2 * i, 4.0, d) for i in range(8))}) == 8, \
         "trotzdem acht verschiedene Richtungen"
 
 
@@ -119,11 +125,60 @@ def test_verdrehte_grenzen_werden_abgewiesen():
             KBDefaults.model_validate({feld: (0.5, 0.1)})
 
 
-def test_zoomrichtung_alterniert():
-    """Hundertmal hineinzuzoomen ermuedet."""
+def _bilder(n: int = 200) -> list[str]:
+    return [f"cache/img_{i:03d}.jpg" for i in range(n)]
+
+
+def test_zoomrichtung_wechselt_ueber_die_bildmenge():
+    """Hundertmal hineinzuzoomen ermuedet.
+
+    Seit die Richtung an der Kennung haengt statt an der Position, ist der
+    Wechsel **statistisch** statt streng abwechselnd. Geprueft wird deshalb die
+    Verteilung ueber eine realistische Bildmenge, nicht eine feste Reihenfolge:
+    beide Richtungen muessen deutlich vorkommen.
+    """
     d = KBDefaults(alternate=True)
-    richtungen = [plan_motion(i, 4.0, d).z1 > plan_motion(i, 4.0, d).z0 for i in range(6)]
-    assert richtungen == [True, False, True, False, True, False]
+    hinein = [plan_motion(src, 4.0, d).z1 > plan_motion(src, 4.0, d).z0
+              for src in _bilder()]
+    anteil = sum(hinein) / len(hinein)
+    assert 0.35 < anteil < 0.65, f"einseitige Verteilung: {anteil:.0%} zoomen hinein"
+
+
+def test_ohne_alternate_wird_immer_hineingezoomt():
+    """Die Gegenprobe: der Schalter muss die Kennung ueberstimmen."""
+    d = KBDefaults(alternate=False)
+    assert all(plan_motion(src, 4.0, d).z1 > plan_motion(src, 4.0, d).z0
+               for src in _bilder(40))
+
+
+def test_die_bewegung_haengt_am_bild_nicht_an_seiner_position():
+    """Der Kern von Entscheidung 7.
+
+    Frueher leitete sich die Richtung aus dem Slot-Index ab. Ein an Position 41
+    eingefuegtes Segment verschob damit die Bewegung **jedes** folgenden Bildes
+    — und mit ihr dessen Cache-Key. Der halbe Film rendert neu, obwohl sich an
+    ihm nichts geaendert hat.
+    """
+    d = KBDefaults()
+    vorher = {src: plan_motion(src, 4.0, d).fingerprint() for src in _bilder(20)}
+
+    # Umsortieren, Einfuegen, Loeschen — die Kennung bleibt, die Bewegung auch.
+    nachher = {src: plan_motion(src, 4.0, d).fingerprint()
+               for src in ["cache/title_malmoe_abc.jpg"] + list(reversed(_bilder(20)))}
+    for src, fp in vorher.items():
+        assert nachher[src] == fp
+
+
+def test_die_kennung_ist_ueber_prozesse_hinweg_stabil():
+    """Pythons ``hash()`` ist fuer Strings je Prozess gesalzen.
+
+    Wer ihn hier einsetzte, bekaeme bei jedem Lauf andere Bewegungen und damit
+    andere Cache-Keys — der Cache waere wertlos, ohne dass etwas auffiele. Der
+    feste Wert nagelt das fest; er darf sich nur mit einer bewussten Aenderung
+    an ``motion_key`` bewegen.
+    """
+    assert motion_key("cache/img_000.jpg") == 186163350704084497
+    assert motion_key(7) == 7, "Ganzzahlen werden unveraendert durchgereicht"
 
 
 def test_explizites_kb_ueberschreibt_die_ableitung():
