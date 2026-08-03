@@ -37,7 +37,7 @@ from .planner import (Coverage, Intent, Plan, RenderSegment, apply_transitions,
                       to_frame, to_time, validate_continuity, visible_span)
 from .preprocess import title_canvas
 from .probe import chronological
-from .titles import reading_seconds, resolved, title_asset
+from .titles import bg_kind, reading_seconds, resolved, title_asset, title_kb
 
 log = logging.getLogger("slideshow.build")
 
@@ -215,9 +215,10 @@ def insert_titles(intents: list[Intent], chapters: list[Chapter],
     """Setzt die Kapitel als Titel-Intents in die Medienfolge ein.
 
     Aufgeloest wird hier alles, was spaeter nicht mehr zu ermitteln ist:
-    ``bg: auto`` auf das erste Bild des neuen Abschnitts und ``subtitle: auto``
-    auf dessen Aufnahmedatum. Beides landet als konkreter Wert in ``edit.yaml``
-    — sichtbar und von Hand korrigierbar statt als Zauberei im Code.
+    ``bg: auto`` auf das erste Bild des neuen Abschnitts, eine Medien-ID im
+    ``bg:`` auf deren Cache-Pfad und ``subtitle: auto`` auf das Aufnahmedatum.
+    Alles landet als konkreter Wert in ``edit.yaml`` — sichtbar und von Hand
+    korrigierbar statt als Zauberei im Code.
     """
     warnungen: list[str] = []
     if not chapters:
@@ -226,6 +227,10 @@ def insert_titles(intents: list[Intent], chapters: list[Chapter],
     pos_von_src = {i.src: p for p, i in enumerate(intents)}
     verwendet = [m for m in media if m.cache_path in pos_von_src]
     erster_tag = _erster_aufnahmetag(verwendet)
+    # Nur Bilder: ein Clip taugt nicht als Standhintergrund — dieselbe Regel,
+    # nach der ``resolve_bg`` bei ``auto`` das naechste *Standbild* sucht.
+    bild_von_id = {m.id: m.cache_path for m in media
+                   if m.cache_path and m.kind == "image"}
 
     aufgeloest: list[tuple[int, Chapter]] = []
     for kap in chapters:
@@ -255,6 +260,23 @@ def insert_titles(intents: list[Intent], chapters: list[Chapter],
                     f"Titel {kap.title!r} steht hinter allem Material — es gibt kein "
                     f"'naechstes Bild' als Hintergrund. Faellt auf `bg: none` "
                     f"(Text auf Schwarz) zurueck.")
+        elif bg in bild_von_id:
+            # In dieser Datei stehen Medien-IDs, keine Cache-Pfade — ein
+            # bestimmtes Bild waehlt man deshalb ueber seine ID. In ``edit.yaml``
+            # steht danach der Pfad: das ist die Kennung, unter der ein Bild im
+            # ganzen Projekt auftritt, und die Fokusblende vergleicht sie.
+            bg = bild_von_id[bg]
+        elif bg_kind(bg) == "image" and bg not in bild_von_id.values():
+            clip = any(m.kind == "clip" and bg in (m.id, m.cache_path) for m in media)
+            beispiel = next(iter(bild_von_id), "img_001")
+            raise SchemaError(
+                (f"Kapitel {kap.title!r}: {bg!r} ist ein Clip. Als Hintergrund "
+                 f"taugt nur ein Standbild — ein Standbild steht still."
+                 if clip else
+                 f"Kapitel {kap.title!r}: {bg!r} ist als Hintergrund weder eine "
+                 f"Medien-ID noch der Cache-Pfad eines Bildes aus dem Manifest.")
+                + f"  IDs stehen im Manifest, z. B. `bg: {beispiel}`; eine "
+                  f'Farbflaeche waere `bg: "#1b2a3a"`.', path="chapters")
         subtitle = kap.subtitle
         if subtitle == "auto":
             subtitle = _auto_subtitle(folgebild, erster_tag)
@@ -265,7 +287,8 @@ def insert_titles(intents: list[Intent], chapters: list[Chapter],
                     f"bleibt leer.")
 
         seg = TitleSegment(title=kap.title, subtitle=subtitle, bg=bg,
-                           beats=kap.beats, dur=kap.dur, style=kap.style, kb=kap.kb)
+                           beats=kap.beats, dur=kap.dur, style=kap.style,
+                           motion=kap.motion, kb=kap.kb)
         # ``beats``/``dur`` bleiben hier bewusst **leer**. Welches der beiden
         # gilt, haengt an der Region, in der die Folie landet — und die steht
         # erst nach dem ersten Planen fest. Gaebe man ``beats`` schon jetzt
@@ -275,7 +298,7 @@ def insert_titles(intents: list[Intent], chapters: list[Chapter],
         # Wunsch des Kapitels steht in ``seg`` und wird dort abgeholt.
         intents.insert(pos + versatz,
                        Intent(kind="still", src=title_asset(seg, defaults, title_canvas(size)),
-                              kb=kap.kb, title=seg))
+                              kb=title_kb(seg, defaults), title=seg))
 
     # Die Positionen der nachfolgenden Intents haben sich verschoben; ``index``
     # zeigt in Fehlermeldungen auf das Segment und muss stimmen.
@@ -558,7 +581,11 @@ def _couple_focus_motion(plan: Plan, defaults: Defaults) -> None:
             continue
         folge = plan.slots[i + 1]
         if slot.intent.kb is not None or folge.intent.kb is not None:
-            continue                    # von Hand gesetzt gewinnt
+            # Von Hand gesetzt gewinnt — und ``motion: none`` ist genau das,
+            # nur bequemer geschrieben: eine stillstehende Folie soll nicht
+            # nachtraeglich eine gekoppelte Fahrt bekommen. Die laengere
+            # Fokusblende bleibt, der Schaerfezug findet ohne Fahrt statt.
+            continue
 
         d_titel = _sichtbare_dauer(plan, i)
         d_folge = _sichtbare_dauer(plan, i + 1)
@@ -776,7 +803,8 @@ def plan_from_edit(edit: EditList, manifest: Manifest | None = None) -> Plan:
                 kind="still", src=title_asset(titel, edit.defaults,
                                               title_canvas(tuple(edit.size))),
                 index=idx, beats=seg.beats, dur=seg.dur, hold=seg.hold,
-                snap_back=seg.snap_back, kb=seg.kb, title=titel))
+                snap_back=seg.snap_back, kb=title_kb(titel, edit.defaults),
+                title=titel))
         elif isinstance(seg, StillSegment):
             intents.append(Intent(
                 kind="still", src=seg.src, index=idx, beats=seg.beats, dur=seg.dur,

@@ -225,6 +225,7 @@ gerechnet, nicht geraten — die Begründungen stehen in
 |---|---|---|---|
 | `beats` | float | `12.0` | Standzeit in einer Beat-Region. In einer `free`-Region gilt stattdessen `still_seconds` — dort steht eine Folie so lange wie die Bilder um sie herum, ohne Sonderregel. |
 | `phrase_beats` | int | `8` | Länge einer musikalischen Phrase. Titel beginnen auf einem Vielfachen davon; `build` dehnt oder staucht dafür das **vorangehende** Bild. Muss ≥ 1 sein. |
+| `motion` | enum | `kenburns` | `kenburns` fährt über die Folie wie über jedes Standbild, `none` lässt sie stillstehen. Der Text ist in die Pixel eingebrannt und fährt sonst mit — er flimmert dabei bei dünnen Schriften und liest sich stehend ruhiger. Aufgelöst wird das als gewöhnliches `kb:` am Segment, nicht im Renderer. |
 | `font` | string | `auto` | Pfad zur Schriftdatei. `auto` sucht plattformabhängig (Windows: Segoe UI, Arial; Linux: DejaVu Sans, Noto Sans; macOS: Helvetica). Die Umgebungsvariable **`SLIDESHOW_FONT` gewinnt immer** — dieselbe Regel wie bei `SLIDESHOW_MELT`. |
 | `size` | float | `0.075` | Versalhöhe der Überschrift als Anteil der Bildhöhe. 162 px bei 2160 — auf einem 55″-Fernseher aus 3 m so groß wie eine Zeitungsschlagzeile. |
 | `subtitle_scale` | float | `0.42` | Größe der zweiten Zeile, Anteil der Überschrift. |
@@ -266,7 +267,7 @@ Die Abfolge. Vier Typen, unterschieden über `type`.
 
 | Schlüssel | Typ | Vorgabe | Bedeutung |
 |---|---|---|---|
-| `src` | string | – | Projektrelativer Pfad, üblicherweise nach `cache/`. Pflicht. |
+| `src` | string | – | Projektrelativer Pfad, üblicherweise nach `cache/`. Pflicht. Der Dateiname ohne Endung ist die [Medien-ID](#medien-ids) des Bildes. |
 | `dur` | float\|string | – | Explizite Dauer in Sekunden. **Gewinnt immer.** |
 | `beats` | float | – | Dauer in Beats. Nur in einer Beat-Region gültig — in einer `free`-Region ist es ein Fehler mit Angabe der Region. Gebrochene Werte (`1.5`) sind erlaubt. |
 | `hold` | bool | `false` | Ruhiges Bild über eine lange Stille. Wird von `build` gesetzt, lässt sich aber erzwingen. |
@@ -295,6 +296,7 @@ Hintergrund aus dem Material.
 | `hold` | bool | `false` | Wie beim Standbild. |
 | `snap_back` | bool | von `defaults` | Wie beim Standbild. **In langer Stille setzt `build` hier `false`** — siehe unten. |
 | `style` | enum | `card` | `card` ist die ganzseitige Folie. `lower-third` ist reserviert und rendert vorerst wie `card`. |
+| `motion` | enum | von `defaults.title.motion` | `none` lässt **diese** Folie stillstehen. Siehe unten. |
 | `kb` | Objekt | von `defaults.kb` | Wie beim Standbild. Bei einer Fokusblende schreibt `build` hier und am Folgebild gekoppelte Werte. |
 
 Einen `src`-Schlüssel gibt es bewusst **nicht**. Der Pfad des gebackenen Assets
@@ -379,6 +381,38 @@ Reichweite](#schwenk-richtung-und-reichweite)).
 
 Ein von Hand gesetztes `kb:` gewinnt und wird nicht überschrieben.
 
+#### Ohne Kamerafahrt
+
+Der Text einer Folie ist in die Pixel eingebrannt und fährt deshalb mit. Das
+ist gewollt — er gehört zum Bild und nicht darüber —, kostet aber Lesbarkeit:
+ein stehender Satz liest sich ruhiger als ein wandernder, und dünne Schriften
+flimmern in der Bewegung. `motion: none` lässt die Folie stillstehen:
+
+```yaml
+- {type: title, title: Malmö, subtitle: 'Tag 11 · 24. Juli',
+   bg: cache/img_042.jpg, beats: 12, motion: none,
+   kb: {z: [1.0, 1.0], c: [0.5, 0.5, 0.5, 0.5]}}   # von build materialisiert
+```
+
+Für alle Folien auf einmal: `defaults.title.motion: none`.
+
+Aufgelöst wird das nicht im Renderer, sondern als **gewöhnliches `kb:`** am
+Segment — genau der Block aus [Bewegung für ein Bild
+abschalten](#häufige-eingriffe). Weder `planner.py` noch `render.py` bekommen
+dadurch eine Zeile über Titel, und in der Datei steht sichtbar, warum diese
+eine Folie stillsteht. Ein von Hand gesetztes `kb:` gewinnt gegen `motion:`;
+wer beides schreibt, meint das `kb:`.
+
+Zwei Folgen sind beabsichtigt:
+
+- **Die Fokusblende bleibt, ihre Kopplung entfällt.** Der Schärfezug dauert
+  weiter `xfade_focus` lang, aber `build` schreibt keine gekoppelte Fahrt mehr
+  in Folie und Folgebild — sonst bekäme eine stillstehende Folie über die
+  Hintertür doch eine Bewegung. Das Folgebild behält seine eigene.
+- **Das Asset ändert sich nicht.** `motion` gehört zur Choreografie, nicht zu
+  den Pixeln; ein Umschalten backt keine Folie neu. Neu gerendert werden nur die
+  drei betroffenen Segmente.
+
 ### `clip` — Videoausschnitt
 
 ```yaml
@@ -457,26 +491,86 @@ Deshalb sind die Kapitel eine eigene Eingabedatei:
 # chapters.yaml — Kapitel der Reise. Wird von `slideshow build` eingelesen.
 chapters:
   - {at: 0,           title: Skandinavien 2026, subtitle: "Drei Wochen, vier Städte",
-     bg: "#1b2a3a", beats: 16}
+     bg: auto, motion: none, beats: 16}
   - {before: img_042, title: Malmö,     subtitle: auto}
-  - {before: img_071, title: Stockholm, subtitle: auto, bg: cache/img_075.jpg}
+  - {before: img_071, title: Stockholm, subtitle: auto, bg: img_075}
 ```
 
 | Schlüssel | Typ | Vorgabe | Bedeutung |
 |---|---|---|---|
-| `before` | string | – | Medien-ID, **vor** der die Folie steht. Genau eines von `before` und `at`. |
+| `before` | string | – | [Medien-ID](#medien-ids), **vor** der die Folie steht. Genau eines von `before` und `at`. |
 | `at` | int | – | Position in der Medienfolge. `at: 0` ist der Auftakt vor allem Material. |
 | `title` | string | – | Überschrift. Pflicht und nicht leer. |
 | `subtitle` | string | `auto` | Zweite Zeile. `auto` bildet `Tag 11 · 24. Juli` aus dem Aufnahmezeitpunkt des folgenden Bildes; Tag 1 ist das früheste Aufnahmedatum des Projekts. Weglassen mit `subtitle: null`. |
-| `bg` | string | `auto` | Wie am Segment. |
+| `bg` | string | `auto` | Wie am Segment, **zusätzlich als [Medien-ID](#medien-ids)** (`bg: img_075`). In dieser Datei stehen IDs; einen Cache-Pfad müsste man erst nachschlagen. `build` löst sie auf und schreibt den Pfad nach `edit.yaml`. Was weder ID noch bekannter Pfad, Farbfläche oder `none` ist, bricht mit Nennung des Kapitels ab. |
 | `beats`, `dur` | float | von `defaults.title` | Standzeit. |
 | `style` | enum | `card` | Wie am Segment. |
+| `motion` | enum | von `defaults.title.motion` | Wie am Segment. `none` lässt die Folie stillstehen. |
 | `kb` | Objekt | – | Wie am Segment. Setzt die Fokusblenden-Kopplung außer Kraft. |
 
 Verankert wird an **Medien-IDs**, nicht an Segmentindizes oder Zeiten: IDs sind
 gegen Umsortieren und gegen zusätzliche Bilder stabil, alles andere verrutscht
 beim nächsten `build`. Eine ID, die es nicht gibt, ist ein Fehler mit Nennung
 des Kapitels — kein stilles Überspringen.
+
+#### Medien-IDs
+
+Die ID ist der Name, unter dem ein Foto oder ein Clip im ganzen Projekt
+auftritt. `probe` bildet sie aus dem Dateinamen und schreibt sie ins Manifest:
+
+```
+img_DSC06273        aus src/2026/DSC06273.JPG
+clip_MVI_1234       aus src/MVI_1234.MOV
+img_kopenhagen_2    zweite Datei mit dem Stamm „kopenhagen"
+```
+
+Gebildet aus **Art und Dateinamen**: `img_` für Bilder, `clip_` für Videos,
+dahinter der Dateiname ohne Endung, alles außer `A–Z a–z 0–9 _ -` zu `_`
+zusammengezogen. Zwei Dateien mit demselben Stamm in verschiedenen Ordnern
+bekommen `_2`, `_3` … in der Reihenfolge, in der `probe` sie findet.
+
+**Wo sie stehen:** in `manifest.json` unter `media[].id` — und, praktischer, in
+jedem `src:` der Edit-List. Das Zwischenprodukt heißt exakt wie die ID:
+
+```
+cache/img_DSC06273.jpg   ->   ID  img_DSC06273
+cache/clip_MVI_1234.mov  ->   ID  clip_MVI_1234
+```
+
+Wer also in `edit.yaml` sieht, welches Bild er meint, kann die ID direkt
+ablesen — Ordner und Endung weg, der Rest ist sie.
+
+Die ID hängt **nur am Dateinamen**, nicht an Position, Aufnahmezeit oder Anzahl
+des Materials. Genau deshalb taugt sie als Anker: ein nachgereichtes Foto
+verschiebt keine einzige andere ID, und eine `chapters.yaml` überlebt jedes
+`probe` und jedes `build`. Die Kehrseite ist dieselbe Regel von hinten gelesen —
+wer eine Datei **umbenennt**, ändert ihre ID, und die Kapitel darauf zeigen ins
+Leere. Das bricht mit Nennung des Kapitels ab, bevor etwas gerendert wird.
+Denselben Effekt hat der Sonderfall der Doppelnamen: kommt eine *dritte* Datei
+mit dem Stamm „kopenhagen" hinzu, kann der `_2`-Zähler die Zuordnung neu
+verteilen. Wer gleichnamige Dateien in mehreren Ordnern hat, prüft die Kapitel
+nach einem `probe` besser noch einmal.
+
+#### Der Auftakt
+
+`at: 0` steht vor allem Material — und `bg: auto` bedeutet auch dort etwas: das
+„nächste Bild" gibt es sehr wohl, es ist das erste des Films. Der Titel steht
+also über dem ersten Foto, unscharf und abgedunkelt, und die Blende danach löst
+ihn in genau dieses Bild scharf auf. Ein üblicher Filmanfang, und das, was
+`slideshow chapters` vorschlägt.
+
+Die Alternativen stehen als Handgriff im Kommentar der erzeugten Datei:
+
+```yaml
+  - {at: 0, title: "Skandinavien 2026", bg: "#1b2a3a"}   # ruhige Farbfläche
+  - {at: 0, title: "Skandinavien 2026", bg: img_042}     # ein bestimmtes Bild
+```
+
+Ein bestimmtes Bild lohnt, wenn das erste Foto als Grund nichts hergibt — zu
+dunkel, zu unruhig, zu wenig Himmel für zwei Zeilen Text. Welches Bild `auto`
+hier trifft, nennt `slideshow chapters` im Kommentar, damit man es austauschen
+kann, ohne es erst zu suchen. Zeigt `bg` auf ein Bild, das **nicht** das
+folgende ist, entfällt die Fokusblende: es gibt dann nichts scharf aufzulösen.
 
 ### Die Grenzen finden lassen
 
@@ -561,6 +655,11 @@ dem Takt bringen.
   kb: {z: [1.0, 1.0], c: [0.5, 0.5, 0.5, 0.5]}
 ```
 
+**Titelfolien ohne Kamerafahrt**
+
+`defaults.title.motion: none` für alle, `motion: none` am einzelnen Segment
+oder Kapitel. Der eingebrannte Text steht dann still und liest sich ruhiger.
+
 **Alle Übergänge weg, nur harte Schnitte**
 
 `defaults.xfade.auto: false` setzen und neu bauen (`slideshow build --no-xfade`)
@@ -606,7 +705,7 @@ die angrenzenden Blenden werden neu berechnet.
 
 | Datei | Rolle |
 |---|---|
-| `manifest.json` | Was für Material vorliegt (`probe`, `preprocess`). |
+| `manifest.json` | Was für Material vorliegt (`probe`, `preprocess`) — und unter `media[].id` die [Medien-IDs](#medien-ids), an denen `chapters.yaml` hängt. |
 | `beats.yaml` | Regionenkarte der Tonspur (`beats`) — vor dem Bauen ansehen. |
 | `chapters.yaml` | Kapitel der Reise, Eingabe für `build --chapters`. Überlebt das Neubauen der Edit-List. |
 | `edit.yaml` | **Diese Datei** (`build`). |

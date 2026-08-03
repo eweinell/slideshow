@@ -43,7 +43,7 @@ from pathlib import Path
 
 from .cache import cache_key, param_hash
 from .errors import SlideshowError
-from .models import Defaults, TitleDefaults, TitleSegment
+from .models import Defaults, KBSpec, TitleDefaults, TitleSegment
 
 #: Version des Layouts. Muss bei **jeder** Aenderung an Satz, Groessen oder
 #: Kontrastregel hoch — dieselbe Disziplin wie bei ``PREPROC_VERSION``.
@@ -182,6 +182,37 @@ def bg_kind(bg: str) -> str:
 
 
 _HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+# --------------------------------------------------------------------------
+# Bewegung
+# --------------------------------------------------------------------------
+
+def motion_mode(seg: TitleSegment, defaults: Defaults) -> str:
+    """``kenburns`` | ``none`` — was fuer *diese* Folie gilt."""
+    return seg.motion or defaults.title.motion
+
+
+def title_kb(seg: TitleSegment, defaults: Defaults) -> KBSpec | None:
+    """Die Ken-Burns-Vorgabe einer Folie — oder der Stillstand.
+
+    ``motion: none`` wird hier in **gewoehnliche Absicht** uebersetzt: in genau
+    das ``kb:``, das ``docs/edit-yaml.md`` unter "Bewegung fuer ein Bild
+    abschalten" nennt. Damit muss keine Zeile in ``planner.py`` oder
+    ``render.py`` von Titeln wissen, und in ``edit.yaml`` steht sichtbar, warum
+    diese eine Folie stillsteht — derselbe Weg wie bei Phrasenlage und
+    Fokusblende.
+
+    Ein von Hand gesetztes ``kb:`` gewinnt. Wer beides schreibt, meint das
+    ``kb:``; ``motion`` ist die bequeme Schreibweise, nicht die staerkere.
+    """
+    if seg.kb is not None:
+        return seg.kb
+    if motion_mode(seg, defaults) != "none":
+        return None
+    # Frische Instanz je Aufruf: der Wert haengt sich an einen Intent und landet
+    # von dort in der Edit-List. Eine geteilte waere dieselbe fuer alle Folien.
+    return KBSpec(z=(1.0, 1.0), c=(0.5, 0.5, 0.5, 0.5))
 
 
 # --------------------------------------------------------------------------

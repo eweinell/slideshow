@@ -442,8 +442,164 @@ def test_explizites_kb_gewinnt_gegen_die_kopplung():
 
 
 # --------------------------------------------------------------------------
+# Bewegung (`motion`)
+# --------------------------------------------------------------------------
+
+#: Die Bewegung, die keine ist — Zoom 1,0 und eine Bildmitte, die sich nicht
+#: ruehrt. Genau der Block, den `docs/edit-yaml.md` unter "Bewegung fuer ein
+#: Bild abschalten" nennt.
+STILLSTAND = ((1.0, 1.0), (0.5, 0.5, 0.5, 0.5))
+
+
+def _folie(edit) -> TitleSegment:
+    return next(s for s in edit.segments if isinstance(s, TitleSegment))
+
+
+def test_eine_folie_ohne_bewegung_steht_still():
+    """Der Text ist in die Pixel eingebrannt und faehrt sonst mit."""
+    edit, _plan, _cov = _bauen(_manifest(), [_beat_region()],
+                               [Chapter(before="img_005", title="Malmoe",
+                                        motion="none")])
+    folie = _folie(edit)
+    assert (folie.kb.z, folie.kb.c) == STILLSTAND
+
+
+def test_der_stillstand_steht_als_gewoehnliches_kb_in_der_datei():
+    """Uebersetzt in Absicht, nicht in eine Sonderregel: weder ``planner.py``
+    noch ``render.py`` bekommen eine Zeile ueber Titel."""
+    edit, _plan, _cov = _bauen(_manifest(), [_beat_region()],
+                               [Chapter(before="img_005", title="Malmoe",
+                                        motion="none")])
+    text = dump_edit_yaml(edit)
+    assert "motion: none" in text
+    assert "z: [1.0, 1.0]" in text
+
+
+def test_motion_none_ueberlebt_den_rundlauf(tmp_path):
+    edit, _plan, _cov = _bauen(_manifest(), [_beat_region()],
+                               [Chapter(before="img_005", title="Malmoe",
+                                        motion="none")])
+    p = tmp_path / "edit.yaml"
+    p.write_text(dump_edit_yaml(edit), encoding="utf-8")
+    folie = _folie(EditList.load(p))
+    assert folie.motion == "none"
+    assert (folie.kb.z, folie.kb.c) == STILLSTAND
+
+
+def test_motion_gilt_auch_ohne_kb_in_der_datei(tmp_path):
+    """Der Fall, an dem eine zweite Wahrheit entstuende.
+
+    Kennte nur ``build`` die Regel, faehre eine von Hand geschriebene Folie mit
+    ``motion: none`` beim Rendern trotzdem — die Datei saehe richtig aus und der
+    Film waere es nicht.
+    """
+    p = tmp_path / "edit.yaml"
+    p.write_text(
+        "version: 2\nfps: 60.0\nsize: [1280, 720]\n"
+        "audio: {file: '', duration: 20.0, regions: "
+        "[{type: beat, start: 0.0, end: 20.0, bpm: 120.0, offset: 0.0}]}\n"
+        "defaults: {}\n"
+        "segments:\n  - {type: title, title: Malmoe, motion: none, beats: 8}\n",
+        encoding="utf-8")
+    slot = next(s for s in plan_from_edit(EditList.load(p)).slots if s.intent.title)
+    assert (slot.intent.kb.z, slot.intent.kb.c) == STILLSTAND
+
+
+def test_die_vorgabe_gilt_fuer_alle_folien():
+    defaults = Defaults()
+    defaults.title.motion = "none"
+    edit, _plan, _cov = _bauen(_manifest(), [_beat_region()],
+                               [Chapter(at=0, title="Skandinavien"),
+                                Chapter(before="img_005", title="Malmoe")],
+                               defaults=defaults)
+    folien = [s for s in edit.segments if isinstance(s, TitleSegment)]
+    assert len(folien) == 2
+    assert all((f.kb.z, f.kb.c) == STILLSTAND for f in folien)
+
+
+def test_handgesetztes_kb_gewinnt_gegen_motion_none():
+    """``motion`` ist die bequeme Schreibweise, nicht die staerkere."""
+    from slideshow.models import KBSpec
+    edit, _plan, _cov = _bauen(_manifest(), [_beat_region()],
+                               [Chapter(before="img_005", title="Malmoe",
+                                        motion="none", kb=KBSpec(z=(1.0, 1.2)))])
+    assert _folie(edit).kb.z == (1.0, 1.2)
+
+
+def test_eine_stillstehende_folie_bekommt_keine_gekoppelte_fahrt():
+    """Die Fokusblende bleibt, ihre Kopplung entfaellt.
+
+    Sonst bekaeme die Folie ueber die Hintertuer doch eine Fahrt — und das
+    Folgebild muesste sie fortsetzen, statt seine eigene zu behalten.
+    """
+    edit, plan, _cov = _bauen(_manifest(), [_beat_region()],
+                              [Chapter(before="img_005", title="Malmoe",
+                                       motion="none")])
+    (i, _slot), = _titelslots(plan)
+    assert (_folie(edit).kb.z, _folie(edit).kb.c) == STILLSTAND
+    assert plan.slots[i + 1].intent.kb is None, "das Folgebild behaelt seine Bewegung"
+    assert plan.transitions[i + 1] > plan.transitions[2], "der Schaerfezug bleibt lang"
+
+
+def test_die_bewegung_aendert_das_asset_nicht():
+    """``motion`` gehoert zur Choreografie, nicht zu den Pixeln — wie
+    ``xfade_in``. Ginge es in den Hash ein, backte ein Umschalten alle Folien neu."""
+    d = Defaults()
+    ruhig = TitleSegment(title="Malmoe", motion="none")
+    fahrend = TitleSegment(title="Malmoe", motion="kenburns")
+    assert title_asset(ruhig, d, (3840, 2160)) == title_asset(fahrend, d, (3840, 2160))
+
+
+# --------------------------------------------------------------------------
 # Hintergrund und zweite Zeile
 # --------------------------------------------------------------------------
+
+def test_bg_darf_eine_medien_id_nennen():
+    """In ``chapters.yaml`` stehen IDs; einen Cache-Pfad muesste man nachschlagen."""
+    edit, _plan, _cov = _bauen(_manifest(), [_beat_region()],
+                               [Chapter(before="img_005", title="Malmoe",
+                                        bg="img_009")])
+    assert _folie(edit).bg == "cache/img_009.jpg"
+
+
+def test_pfad_und_farbflaeche_bleiben_unangetastet():
+    for wunsch, erwartet in (("cache/img_009.jpg", "cache/img_009.jpg"),
+                             ("#1b2a3a", "#1b2a3a"), ("none", "none")):
+        edit, _plan, _cov = _bauen(_manifest(), [_beat_region()],
+                                   [Chapter(before="img_005", title="Malmoe",
+                                            bg=wunsch)])
+        assert _folie(edit).bg == erwartet
+
+
+def test_ein_clip_taugt_nicht_als_hintergrund():
+    """Dieselbe Regel, nach der ``bg: auto`` das naechste *Standbild* sucht.
+
+    Geprueft an ``insert_titles`` statt am ganzen Lauf: ein Clip im Manifest
+    braucht ein Intermediate mit Laengenangabe, und darum geht es hier nicht.
+    """
+    from slideshow.build import insert_titles
+    from slideshow.planner import Intent
+
+    media = [MediaItem(id="clip_001", path="src/clip_001.mov", kind="clip",
+                       cache_path="cache/clip_001.mov"),
+             MediaItem(id="img_001", path="src/img_001.jpg", kind="image",
+                       cache_path="cache/img_001.jpg")]
+    intents = [Intent(kind="clip", src="cache/clip_001.mov", index=0),
+               Intent(kind="still", src="cache/img_001.jpg", index=1)]
+    with pytest.raises(SchemaError) as exc:
+        insert_titles(intents, [Chapter(at=0, title="Malmoe", bg="clip_001")],
+                      media, Defaults(), (1280, 720))
+    assert "ist ein Clip" in str(exc.value)
+
+
+def test_ein_unbekannter_hintergrund_nennt_das_kapitel():
+    """Sonst kaeme die Meldung erst aus ``_validate_sources`` — mit einem
+    Segmentindex, den man in ``chapters.yaml`` nicht wiederfindet."""
+    with pytest.raises(SchemaError) as exc:
+        _bauen(_manifest(), [_beat_region()],
+               [Chapter(before="img_005", title="Malmoe", bg="img_999")])
+    assert "img_999" in str(exc.value) and "Malmoe" in str(exc.value)
+
 
 def test_bg_auto_wird_in_der_datei_materialisiert():
     edit, _plan, _cov = _bauen(_manifest(), [_beat_region()],

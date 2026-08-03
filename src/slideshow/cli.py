@@ -532,7 +532,7 @@ def cmd_build(args, project: Project) -> int:
 
 def cmd_chapters(args, project: Project) -> int:
     from .chapters import (GAP_PLACE_HOURS, JUMP_KM, coverage_note,
-                           dump_chapters_yaml, suggest)
+                           dump_chapters_yaml, first_image_id, suggest)
     from .models import Manifest
 
     manifest = Manifest.load(Path(args.manifest) if args.manifest else project.manifest)
@@ -542,7 +542,8 @@ def cmd_chapters(args, project: Project) -> int:
                           min_jump_km=(args.min_jump if args.min_jump is not None
                                        else JUMP_KM))
     text = dump_chapters_yaml(vorschlaege, hinweis=coverage_note(manifest),
-                              auftakt=not args.no_auftakt)
+                              auftakt=not args.no_auftakt,
+                              auftakt_bild=first_image_id(manifest))
 
     out = Path(args.output) if args.output else (project.root / "chapters.yaml")
     con = console()

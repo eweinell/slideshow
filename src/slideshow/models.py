@@ -364,6 +364,14 @@ class TitleDefaults(BaseModel):
     phrase_beats: int = 8
     #: Pfad zur Schriftdatei. ``SLIDESHOW_FONT`` gewinnt (analog SLIDESHOW_MELT).
     font: str = "auto"
+    #: Bewegung der Folien: ``kenburns`` faehrt wie ueber jedem Standbild,
+    #: ``none`` laesst sie stillstehen.
+    #:
+    #: Der Text ist in die Pixel eingebrannt und faehrt deshalb mit — bei duennen
+    #: Schriften flimmert er dabei, und lesen laesst sich ein stehender Satz
+    #: ohnehin ruhiger. Aufgeloest wird das nicht im Renderer, sondern als
+    #: gewoehnliches ``kb:`` am Segment (:func:`slideshow.titles.title_kb`).
+    motion: Literal["kenburns", "none"] = "kenburns"
     #: Versalhoehe der Ueberschrift als Anteil der Bildhoehe.
     size: float = 0.075
     subtitle_scale: float = 0.42
@@ -465,6 +473,8 @@ class TitleSegment(BaseModel):
     snap_back: bool | None = None
     #: ``lower-third`` ist fuer Stufe 2 reserviert und rendert vorerst wie ``card``.
     style: Literal["card", "lower-third"] = "card"
+    #: Bewegung nur fuer diese Folie; ohne Angabe gilt ``defaults.title.motion``.
+    motion: Literal["kenburns", "none"] | None = None
     kb: KBSpec | None = None
 
     @field_validator("title")
@@ -604,10 +614,16 @@ class Chapter(BaseModel):
     at: int | None = None
     title: str
     subtitle: str | None = "auto"
+    #: ``auto`` | **Medien-ID** | ``cache/…``-Pfad | ``#rrggbb`` | ``none``.
+    #: Die ID ist die Bequemlichkeit dieser Datei — in ``chapters.yaml`` stehen
+    #: sonst nur IDs, und einen Cache-Pfad muesste man nachschlagen. ``build``
+    #: loest sie auf und schreibt den Pfad nach ``edit.yaml``.
     bg: str = "auto"
     beats: float | None = None
     dur: float | None = None
     style: Literal["card", "lower-third"] = "card"
+    #: Wie am Segment; ohne Angabe gilt ``defaults.title.motion``.
+    motion: Literal["kenburns", "none"] | None = None
     kb: KBSpec | None = None
 
     @field_validator("title")

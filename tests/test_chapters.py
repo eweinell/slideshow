@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from slideshow.chapters import (GAP_DAY_HOURS, coverage_note, distance_km,
-                                dump_chapters_yaml, suggest)
+                                dump_chapters_yaml, first_image_id, suggest)
 from slideshow.models import ChapterList, Manifest, MediaItem
 
 #: Echte Koordinaten — die Abstaende sollen stimmen.
@@ -172,6 +172,33 @@ def test_schwache_kandidaten_stehen_auskommentiert_bereit():
     import yaml
     gesetzt = [e["before"] for e in yaml.safe_load(text)["chapters"] if "before" in e]
     assert "img_010" not in gesetzt
+
+
+def test_der_auftakt_nimmt_das_erste_bild_als_grund():
+    """Ein 'naechstes Bild' gibt es auch am Filmanfang — es ist das erste.
+
+    Die Blende danach loest den unscharfen Grund in genau dieses Bild scharf
+    auf. Die Farbflaeche bleibt als Handgriff im Kommentar stehen, und welches
+    Bild ``auto`` hier meint, muss man sehen koennen, um es austauschen zu
+    koennen.
+    """
+    import yaml
+    text = dump_chapters_yaml(suggest(_reise()), auftakt_bild=first_image_id(_reise()))
+    auftakt = yaml.safe_load(text)["chapters"][0]
+    assert auftakt["at"] == 0
+    assert auftakt["bg"] == "auto"
+    assert "img_000" in text
+    assert "#1b2a3a" in text
+    assert "motion: none" in text
+
+
+def test_der_grund_des_auftakts_ist_ein_bild_kein_clip():
+    """Ein Clip taugt nicht als Standhintergrund — ``resolve_bg`` sucht deshalb
+    auch beim Aufloesen das naechste *Standbild*."""
+    mf = _reise()
+    mf.media.insert(0, MediaItem(id="clip_000", path="src/clip_000.mov", kind="clip",
+                                 time_source="container", capture_time=T0 - 3600))
+    assert first_image_id(mf) == "img_000"
 
 
 def test_ohne_auftakt_faellt_der_erste_eintrag_weg():

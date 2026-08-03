@@ -147,6 +147,20 @@ def _datum(ts: float, erster_tag: _dt.date | None) -> str:
     return f"Tag {tag} · {datum}" if tag >= 1 else datum
 
 
+def first_image_id(manifest: Manifest) -> str:
+    """Kennung des ersten Bildes der Abfolge — der Grund, auf den ``bg: auto``
+    beim Auftakt hinauslaeuft.
+
+    Steht im Kommentar der erzeugten Datei: ``auto`` ist bequem, aber man soll
+    sehen, *welches* Bild man da bekommt — sonst laesst es sich nicht
+    austauschen, ohne es erst zu suchen.
+    """
+    for m in chronological(manifest):
+        if m.kind == "image":
+            return m.id
+    return ""
+
+
 def coverage_note(manifest: Manifest) -> str:
     """Wie gut das GPS-Signal ueberhaupt traegt.
 
@@ -172,7 +186,7 @@ def coverage_note(manifest: Manifest) -> str:
 # --------------------------------------------------------------------------
 
 def dump_chapters_yaml(vorschlaege: list[Vorschlag], *, hinweis: str = "",
-                       auftakt: bool = True) -> str:
+                       auftakt: bool = True, auftakt_bild: str = "") -> str:
     """Schreibt die Datei — von Hand, nicht ueber ``yaml.dump``.
 
     Der Grund sind die Kommentare: die Datei ist ein Formular, kein Erzeugnis.
@@ -192,16 +206,27 @@ def dump_chapters_yaml(vorschlaege: list[Vorschlag], *, hinweis: str = "",
     zeilen += ["", "chapters:"]
 
     if auftakt:
+        # `bg: auto` auch hier, obwohl der Auftakt nichts *ankuendigt*: das
+        # naechste Bild gibt es sehr wohl, es ist das erste des Films. Der Titel
+        # steht dann darueber, unscharf und abgedunkelt, und die Blende danach
+        # loest ihn in genau dieses Bild scharf auf — der uebliche Filmanfang.
+        # Eine Farbflaeche bleibt die ruhigere Alternative und steht als
+        # Handgriff daneben.
+        #
         # Ohne `beats:`. Ein Film faengt haeufig mit einer free-Region an — die
         # ersten Sekunden eines Stuecks lassen sich selten rastern —, und dort
         # bliebe die Angabe wirkungslos. Die Standzeit kommt aus
         # `defaults.title`, und wer sie anders will, nimmt `dur:` in Sekunden.
+        welches = f" — hier ist das {auftakt_bild}" if auftakt_bild else ""
         zeilen += [
-            "  # Auftakt vor allem Material. `bg` als Farbflaeche, weil es hier",
-            "  # noch kein 'naechstes Bild' gibt, das etwas ankuendigen koennte.",
+            "  # Auftakt vor allem Material. `bg: auto` nimmt das erste Bild als",
+            f"  # unscharfen Grund; die Blende danach loest es scharf auf{welches}.",
+            "  # Passt es nicht, ein anderes ueber seine Medien-ID setzen",
+            '  # (`bg: img_...`) oder ruhig anfangen: `bg: "#1b2a3a"`.',
+            "  # Ohne Kamerafahrt, dafuer besser lesbar: `motion: none`.",
             "  # Laenger stehen lassen: `dur: 6` (Sekunden, gilt ueberall) oder",
             "  # `beats: 16` (nur in einer Beat-Region wirksam).",
-            '  - {at: 0, title: "", subtitle: "", bg: "#1b2a3a"}',
+            '  - {at: 0, title: "", subtitle: "", bg: auto}',
         ]
 
     stark = [v for v in vorschlaege if v.staerke == "stark"]
