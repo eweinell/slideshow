@@ -192,7 +192,13 @@ def _segment_command(project: Project, plan: Plan, edit: EditList, seg: RenderSe
                                           manifest=manifest)
         parts_in += args
         metas.append(meta)
-        filters.append(f"[{n}:v]{vf},{fmt},setpts=PTS-STARTPTS[s{n}]")
+        # ``settb`` ist nicht optional: ``xfade`` verlangt auf beiden Eingaengen
+        # dieselbe Zeitbasis und bricht sonst ab ("First input link main
+        # timebase … do not match"). Ein Clip-Intermediate bringt die des
+        # Containers mit (1/12800), ein geschleiftes Standbild die der
+        # Bildrate (1/50) — eine Blende zwischen Clip und Bild scheiterte
+        # deshalb, waehrend Bild-zu-Bild lief. AVTB setzt beide auf 1/90000.
+        filters.append(f"[{n}:v]{vf},{fmt},settb=AVTB,setpts=PTS-STARTPTS[s{n}]")
 
     xf = xfade_expr(seg.mode, seg.frames, plan.fps)
     graph = ";".join([*filters, f"[s0][s1]{xf},{fmt}{fade}[v]"])
@@ -200,8 +206,15 @@ def _segment_command(project: Project, plan: Plan, edit: EditList, seg: RenderSe
            "-filter_complex", graph, "-map", "[v]", *frames_arg(seg.frames),
            "-an", *profile.video_args(), str(out)]
     sources = [seg.a.intent.src, seg.b.intent.src]     # type: ignore[union-attr]
+    # Der Graph gehoert in den Key (Invariante 3). Bei still/clip steckt er als
+    # ``vf`` drin, hier fehlte er: die Bewegungs-Fingerabdruecke der Nachbarn
+    # beschreiben nur, *was* geblendet wird, nicht *wie*. Ein geaenderter
+    # Filter — etwa das ``settb`` oben, das die Progress-Rechnung von ``xfade``
+    # messbar verschiebt — lieferte sonst beim naechsten Lauf das alte Segment
+    # aus. Pfade stehen nicht im Graphen, er bleibt also projektunabhaengig.
     params = {"kind": "xfade", "v": RENDER_VERSION, "frames": seg.frames,
-              "mode": seg.mode, "a": metas[0], "b": metas[1], **fade_param}
+              "mode": seg.mode, "a": metas[0], "b": metas[1], "graph": graph,
+              **fade_param}
     return (cmd, params, sources)
 
 

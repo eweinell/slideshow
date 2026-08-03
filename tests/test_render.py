@@ -102,6 +102,26 @@ def test_encoder_wechsel_invalidiert_alles(built, caps):
     assert not set(a) & set(b)
 
 
+def test_der_filtergraph_einer_blende_geht_in_den_key_ein(built, caps):
+    """Invariante 3, die bei ``xfade`` fehlte.
+
+    Bei still/clip steckt der Graph als ``vf`` im Parametersatz; hier standen
+    nur die Bewegungs-Fingerabdruecke der Nachbarn — die beschreiben, *was*
+    geblendet wird, nicht *wie*. Ein geaenderter Filter lieferte damit beim
+    naechsten Lauf das alte Segment aus.
+    """
+    from slideshow.render import _segment_command
+
+    project, edit, plan = built["project"], built["edit"], built["plan"]
+    seg = next(s for s in resolve(plan) if s.kind == "xfade")
+    _cmd, params, _src = _segment_command(project, plan, edit, seg,
+                                          profile=_profile(edit),
+                                          out=project.segments / "x.mp4",
+                                          manifest=built["manifest"])
+    assert "settb" in params["graph"], "die Zeitbasis gehoert zum Graphen"
+    assert params["graph"].count("settb") == 2, "beide Eingaenge, nicht nur einer"
+
+
 def test_ffmpeg_version_geht_in_den_key_ein(built, caps):
     """Sonst ueberleben stale Segmente ein ffmpeg-Update unbemerkt."""
     project, edit, plan = built["project"], built["edit"], built["plan"]
@@ -135,6 +155,52 @@ def test_voller_lauf_und_zweiter_lauf_aus_dem_cache(built, caps):
                    codec="libx264", jobs_limit=2)
     assert zweit.rendered == 0, "der zweite Lauf haette nichts neu rendern duerfen"
     assert zweit.from_cache == zweit.total
+
+
+@pytest.mark.slow
+def test_blende_zwischen_bild_und_clip_rendert(project, images, clips,
+                                               click_two_songs, caps):
+    """Beide Eingaenge einer Blende brauchen dieselbe Zeitbasis.
+
+    Ein Clip-Intermediate bringt die des Containers mit, ein geschleiftes
+    Standbild die der Bildrate; ``xfade`` lehnt das ab ("First input link main
+    timebase … do not match"). Gerendert wird deshalb wirklich und nicht nur
+    geplant — die Kommandozeile sieht in beiden Faellen gleich plausibel aus.
+
+    Der Aufbau von Hand hat einen Grund: ein Clip, der ganz verwendet wird, hat
+    keine Handles, und ``clamp_transitions_for_handles`` kuerzt seine Blenden
+    dann auf null. Ein Testprojekt aus Fixtures trifft diesen Fall also nie —
+    genau deshalb ist der Fehler bis ins echte Material durchgerutscht. Erst
+    ein Clip mit Vor- und Nachlauf bekommt ueberhaupt eine Blende.
+    """
+    from slideshow.build import plan_from_edit
+    from slideshow.models import ClipSegment, StillSegment, XfadeSegment
+
+    from .conftest import build_project
+
+    manifest, edit, plan, _cov = build_project(project, images=images[:6],
+                                               audio=click_two_songs, caps=caps,
+                                               clips=clips)
+    i = max(n for n, s in enumerate(edit.segments) if isinstance(s, StillSegment))
+    clip = edit.segments[i + 1]
+    assert isinstance(clip, ClipSegment), "hinter dem letzten Bild steht ein Clip"
+
+    clip.in_ += 0.4                      # Handles schaffen, sonst gibt es
+    clip.out -= 0.4                      # an dieser Grenze keine Blende
+    edit.segments.append(XfadeSegment(**{"from": i, "to": i + 1, "dur": 0.2}))
+
+    segments = resolve(plan_from_edit(edit, manifest))
+    gemischt = next(s for s in segments if s.kind == "xfade"
+                    and s.a.intent.kind != s.b.intent.kind)
+
+    index = HashIndex(project.cache / "hashindex.json")
+    jobs = plan_jobs(project, plan_from_edit(edit, manifest), edit, segments,
+                     profile=_profile(edit), caps=caps, manifest=manifest, index=index)
+    job = next(j for j in jobs if j.index == gemischt.index)
+
+    stats = render_segments([job], workers=1)
+    assert not stats.failures
+    assert job.out.exists() and job.out.stat().st_size > 0
 
 
 @pytest.mark.slow
