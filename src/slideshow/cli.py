@@ -112,6 +112,9 @@ def build_parser() -> argparse.ArgumentParser:
     bu.add_argument("--chapters", default=None, metavar="chapters.yaml",
                     help="Titel- und Zwischenfolien einsetzen "
                          "(Default: chapters.yaml im Projekt, falls vorhanden)")
+    bu.add_argument("--order", default=None, metavar="order.yaml",
+                    help="Reihenfolge von Hand statt chronologisch "
+                         "(Default: order.yaml im Projekt, falls vorhanden)")
     bu.add_argument("--xfade-beats", type=float, default=None)
     bu.add_argument("--no-xfade", action="store_true",
                     help="keine automatischen Uebergaenge erzeugen")
@@ -498,10 +501,12 @@ def cmd_build(args, project: Project) -> int:
     defaults.xfade.auto = not args.no_xfade
 
     chapters = _load_chapters(project, args.chapters, defaults)
+    order, order_notes = _load_order(project, args.order, manifest)
 
     size = _parse_size(args.size) if args.size else (3840, 2160)
     edit, plan, cov = build_edit_list(project, manifest, beatmap, defaults=defaults,
-                                      fps=args.fps, size=size, chapters=chapters)
+                                      fps=args.fps, size=size, chapters=chapters,
+                                      order=order, order_notes=order_notes)
     _print_coverage(cov, defaults, plan)
 
     tips = coverage_advice(cov, defaults)
@@ -541,9 +546,19 @@ def cmd_chapters(args, project: Project) -> int:
                                          else GAP_PLACE_HOURS),
                           min_jump_km=(args.min_jump if args.min_jump is not None
                                        else JUMP_KM))
+    # Ohne die Reihenfolge nennte der Auftakt-Kommentar das chronologisch erste
+    # Bild — bei manueller Sortierung schlicht das falsche. Ein Fehler in der
+    # Datei darf hier aber nicht abbrechen: gebraucht wird sie fuer einen
+    # *Kommentar*, und wer gerade sortiert, hat regelmaessig einen Zwischenstand
+    # liegen, den `build` zu Recht ablehnen wuerde.
+    try:
+        reihenfolge, _ = _load_order(project, None, manifest)
+    except SlideshowError as exc:
+        reihenfolge = None
+        console().print(f"[yellow]order.yaml bleibt aussen vor:[/] {exc}")
     text = dump_chapters_yaml(vorschlaege, hinweis=coverage_note(manifest),
                               auftakt=not args.no_auftakt,
-                              auftakt_bild=first_image_id(manifest))
+                              auftakt_bild=first_image_id(manifest, reihenfolge))
 
     out = Path(args.output) if args.output else (project.root / "chapters.yaml")
     con = console()
@@ -597,6 +612,33 @@ def _load_chapters(project: Project, angabe: str | None, defaults) -> list:
         console().print(f"Kapitel: {pfad}  ({len(kapitel)} Titelfolien, "
                         f"Schrift {schrift})")
     return kapitel
+
+
+def _load_order(project: Project, angabe: str | None,
+                manifest) -> tuple[list[str] | None, list[str]]:
+    """Reihenfolge laden und aufloesen — dieselbe Regel wie bei den Kapiteln.
+
+    Ein *ausdruecklich* genannter Pfad, den es nicht gibt, ist ein Fehler; die
+    stillschweigend gefundene ``order.yaml`` ist eine Bequemlichkeit und darf
+    fehlen. Ohne Datei bleibt es bei der chronologischen Abfolge.
+    """
+    from .order import load_order, resolve_order
+
+    if angabe:
+        pfad = Path(angabe)
+        if not pfad.exists():
+            raise SlideshowError(f"Reihenfolgedatei fehlt: {pfad}")
+    else:
+        pfad = project.root / "order.yaml"
+        if not pfad.exists():
+            return (None, [])
+
+    olist, zeilen = load_order(pfad)
+    ids, meldungen = resolve_order(manifest, olist, quelle=str(pfad), zeilen=zeilen)
+    gruppen = len([g for g in olist.blocks if g.items])
+    console().print(f"Reihenfolge: {pfad}  ({len(ids)} von {len(manifest.media)} "
+                    f"Medien" + (f", {gruppen} Gruppen" if olist.groups else "") + ")")
+    return (ids, meldungen)
 
 
 def _print_coverage(cov, defaults, plan) -> None:

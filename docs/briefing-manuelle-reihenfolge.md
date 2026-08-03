@@ -1,8 +1,25 @@
 # Briefing: Manuelle Reihenfolge
 
-**Status:** Entwurf, nicht umgesetzt · **Betrifft:** neues Modul
+**Status:** **Stufe 1 umgesetzt**, Stufe 2 offen · **Betrifft:** neues Modul
 `src/slideshow/order.py`, `models.py`, `build.py`, `chapters.py`, `cli.py`,
 `docs/edit-yaml.md` · **Vorbedingung:** keine
+
+> **Was heute läuft.** `order.yaml` von Hand schreiben — an Medien-IDs, in
+> Gruppen oder flach —, dann:
+>
+> ```
+> slideshow build             # findet order.yaml von selbst
+> slideshow render
+> ```
+>
+> Auflösung, alle drei Fehlerfälle mit Datei und Zeile, `rest:`, die
+> Chronologie-Warnung und der Auftakt-Kommentar in `chapters.yaml` sind
+> umgesetzt und getestet (`tests/test_order.py`).
+>
+> Offen ist **Stufe 2**: der Generator `slideshow order` samt `--update`, der
+> `group:`-Anker in `chapters.yaml` und der Vorbehalt in `slideshow chapters`.
+> Bis dahin schreibt man die Datei von Hand; die IDs stehen in jedem `src:`
+> der Edit-List.
 
 Die Abfolge des Films kommt heute aus `chronological(manifest)` — Fotos in der
 Reihenfolge ihrer Aufnahmezeit. Für eine Reisedokumentation ist das richtig.
@@ -341,7 +358,7 @@ Kommentare bei und hängt das neue Material als eigene Gruppe mit dem Kommentar
 
 ## 4. Vorgeschlagene Umsetzung
 
-**Stufe 1 — die Datei wirkt**
+**Stufe 1 — die Datei wirkt** *(umgesetzt)*
 
 1. **`models.py`:** `OrderGroup` und `OrderList` nach dem Vorbild von
    `Chapter`/`ChapterList` (`models.py:601`), inklusive `load()` über den
@@ -366,7 +383,7 @@ Kommentare bei und hängt das neue Material als eigene Gruppe mit dem Kommentar
 6. **`chapters.py:150` `first_image_id`** nimmt die aufgelöste Folge entgegen
    statt selbst `chronological` zu rufen.
 
-**Stufe 2 — die Datei entsteht**
+**Stufe 2 — die Datei entsteht** *(offen)*
 
 7. **`slideshow order`** in `cli.py` und `dump_order_yaml` in `order.py`:
    Formular mit Kontextkommentaren, Gruppierung nach `--by`, `--force`,

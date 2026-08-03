@@ -621,6 +621,90 @@ gesuchten Überschriften.
 
 ---
 
+## `order.yaml` — die Reihenfolge von Hand
+
+`build` leitet die Abfolge aus dem Aufnahmezeitpunkt ab. Für einen Film, der
+**thematisch** erzählt — erst die Küste, dann die Abende —, ist das falsch, und
+Handarbeit in `edit.yaml` stirbt beim nächsten `build`. Deshalb ist die
+Reihenfolge, wie die Kapitel, eine eigene Eingabedatei:
+
+```yaml
+# order.yaml — Reihenfolge der Medien. Wird von `slideshow build` eingelesen.
+version: 1
+rest: error                  # error (Vorgabe) | append | drop
+
+groups:
+  - name: am-wasser
+    items:
+      - img_DSC06401
+      - img_DSC06288
+      - clip_MVI_1234
+
+  - name: abende
+    items: [img_DSC06273, img_DSC06280]
+```
+
+| Schlüssel | Typ | Vorgabe | Bedeutung |
+|---|---|---|---|
+| `version` | int | `1` | Andere Versionen werden abgelehnt, nicht geraten. |
+| `rest` | enum | `error` | Was mit Material geschieht, das die Datei nicht nennt — siehe unten. |
+| `groups` | Liste | – | Blöcke. Genau eines von `groups:` und `order:`. |
+| `groups[].name` | string | – | Bezeichner des Blocks. **Erscheint nicht im Film.** |
+| `groups[].items` | Liste | – | [Medien-IDs](#medien-ids) in der gewünschten Reihenfolge. |
+| `order` | Liste | – | Flache Kurzform, gleichbedeutend mit einer namenlosen Gruppe. |
+
+Aufgerufen mit `slideshow build --order order.yaml`; liegt die Datei unter
+diesem Namen im Projektverzeichnis, findet `build` sie von selbst. Ohne Datei
+bleibt es chronologisch.
+
+**Eine Gruppe ist keine Titelfolie.** Der Name steht nirgends im Bild — sonst
+gäbe es zwei Wege, eine Überschrift zu erklären, und sie liefen auseinander.
+Wer an einer Blockgrenze eine Zäsur will, schreibt sie in `chapters.yaml`:
+`{before: img_DSC06401, title: "Am Wasser"}`.
+
+### Was mit nicht genanntem Material geschieht
+
+| `rest:` | Verhalten |
+|---|---|
+| `error` (Vorgabe) | Abbruch mit Nennung der fehlenden IDs |
+| `append` | fehlendes Material chronologisch **hinten** anhängen, mit Meldung im Bericht |
+| `drop` | fehlendes Material weglassen, mit Meldung im Bericht |
+
+Die Vorgabe ist `error`, weil der teuerste Fehler dieser Datei das *stille*
+Verschwinden von Bildern ist: Man rendert eine Stunde und zählt hinterher nach.
+Die Meldung nennt die fehlenden IDs in einer Form, die sich direkt in die Datei
+kopieren lässt.
+
+`rest: drop` ist dabei mehr als ein Notausgang. Eine Slideshow gegen ein Stück
+von 6:32 fasst bei 8 Beats je Bild rund 50 Fotos; wer 90 hat, muss auswählen.
+Auskommentierte Zeilen sind dann die Auswahl, und der Kommentar davor sagt,
+warum ein Bild draußen bleibt. Beide Meldungen blendet `--force` **nicht** aus.
+
+### Was die Datei nicht darf
+
+Eine **unbekannte** ID bricht mit Zeile ab — kein stilles Überspringen. Eine
+**doppelte** ID ebenso: die Datei beschreibt eine Permutation des Materials, und
+`before:` in `chapters.yaml` träfe sonst stillschweigend das erste Vorkommen.
+Eine bewusste Wiederholung — dasselbe Bild als Klammer am Anfang und am Ende —
+bleibt als Handgriff in `edit.yaml` möglich.
+
+### Was dabei nicht mehr stimmt
+
+`subtitle: auto` bildet „Tag 11 · 24. Juli" aus dem Aufnahmezeitpunkt des
+folgenden Bildes. Solange die Abfolge chronologisch läuft, ist das der Beginn
+des Abschnitts. Steht über einem thematischen Block aus fünf Reisetagen das
+Datum eines einzelnen davon, ist es technisch korrekt und inhaltlich
+irreführend. `build` misst deshalb die Monotonie der Aufnahmezeiten und meldet
+den Fall je Kapitel — wer nur zwei Bilder tauscht, bekommt keine Warnung über
+etwas, das er nicht getan hat.
+
+Aus demselben Grund taugt `slideshow chapters` bei manueller Sortierung nur
+noch bedingt: es sucht Zeitlücken zwischen *Nachbarn*, und die sind dann
+thematisch benachbart, nicht zeitlich. Die Reihenfolge zuerst festlegen, die
+Kapitel danach.
+
+---
+
 ## Präzedenz der Dauer
 
 Für ein Standbild gilt, von oben nach unten, die erste zutreffende Regel:
@@ -689,16 +773,13 @@ umsortiert und die Standardblenden behalten will, hat zwei Wege:
   leitet die Reihenfolge aber wieder chronologisch aus dem Manifest ab. Für
   eine *systematische* Verschiebung — eine Kamera geht eine Stunde falsch —
   ist das der richtige Weg: `--clock-offset` setzen und neu bauen.
-- **Von Hand nachziehen.** Für eine freie Reihenfolge, die sich nicht aus
-  Zeitstempeln ergibt, führt derzeit kein Weg daran vorbei. Bei vielen
-  Segmenten ist das mühsam; ein Kommando, das eine bestehende Reihenfolge über
-  einen Neubau rettet, gibt es noch nicht.
-
-  > Genau dafür ist `order.yaml` entworfen — eine Eingabedatei für die
-  > Reihenfolge, die den Neubau überlebt, nach demselben Muster wie
-  > `chapters.yaml`. Beschrieben in
-  > [`briefing-manuelle-reihenfolge.md`](briefing-manuelle-reihenfolge.md),
-  > **noch nicht umgesetzt.**
+- **[`order.yaml`](#orderyaml--die-reihenfolge-von-hand) schreiben** und neu
+  bauen. Für eine freie Reihenfolge, die sich nicht aus Zeitstempeln ergibt,
+  ist das der Weg: die Datei ist eine *Eingabe* und überlebt den Neubau, die
+  Übergänge und ihre `from`/`to` erzeugt `build` von selbst.
+- **Von Hand nachziehen.** Bleibt für den Einzelfall — zwei Segmente tauschen,
+  ohne eine Datei anzulegen. Bei vielen Segmenten ist es Sisyphusarbeit, weil
+  alle `from`/`to` mitmüssen.
 
 Seit die Ken-Burns-Richtung an der Bildkennung hängt statt an der Position
 (siehe [Woran die Richtung hängt](#woran-die-richtung-hängt)), kostet das
@@ -714,5 +795,6 @@ die angrenzenden Blenden werden neu berechnet.
 | `manifest.json` | Was für Material vorliegt (`probe`, `preprocess`) — und unter `media[].id` die [Medien-IDs](#medien-ids), an denen `chapters.yaml` hängt. |
 | `beats.yaml` | Regionenkarte der Tonspur (`beats`) — vor dem Bauen ansehen. |
 | `chapters.yaml` | Kapitel der Reise, Eingabe für `build --chapters`. Überlebt das Neubauen der Edit-List. |
+| `order.yaml` | [Reihenfolge der Medien](#orderyaml--die-reihenfolge-von-hand), Eingabe für `build --order`. Überlebt das Neubauen der Edit-List. |
 | `edit.yaml` | **Diese Datei** (`build`). |
 | `out/timeline.json` | Die *aufgelöste* Timeline mit absoluten Framenummern. Erzeugnis, kein Eingabeformat — zum Nachrechnen, nicht zum Editieren. |

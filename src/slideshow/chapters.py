@@ -147,14 +147,21 @@ def _datum(ts: float, erster_tag: _dt.date | None) -> str:
     return f"Tag {tag} · {datum}" if tag >= 1 else datum
 
 
-def first_image_id(manifest: Manifest) -> str:
+def first_image_id(manifest: Manifest, reihenfolge: list[str] | None = None) -> str:
     """Kennung des ersten Bildes der Abfolge — der Grund, auf den ``bg: auto``
     beim Auftakt hinauslaeuft.
 
     Steht im Kommentar der erzeugten Datei: ``auto`` ist bequem, aber man soll
     sehen, *welches* Bild man da bekommt — sonst laesst es sich nicht
     austauschen, ohne es erst zu suchen.
+
+    ``reihenfolge`` ist die aufgeloeste ID-Folge aus ``order.yaml``, sofern es
+    eine gibt. Ohne sie naehme der Kommentar das chronologisch erste Bild und
+    nennte damit bei manueller Sortierung schlicht das falsche.
     """
+    if reihenfolge:
+        bild = {m.id for m in manifest.media if m.kind == "image"}
+        return next((mid for mid in reihenfolge if mid in bild), "")
     for m in chronological(manifest):
         if m.kind == "image":
             return m.id

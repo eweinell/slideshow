@@ -106,6 +106,8 @@ Analyseumgebung und in der Testsuite.
 ```
 manifest.json   was für Material vorliegt (probe)
 beats.yaml      Regionenkarte der Tonspur (beats) — vor dem Bauen ansehen
+chapters.yaml   Kapitel der Reise, Eingabe für build — optional
+order.yaml      Reihenfolge der Medien, Eingabe für build — optional
 edit.yaml       die Edit-List (build)
 cache/          normalisierte Bilder, Clip-Intermediates, Segment-Cache
 out/            master.mp4, timeline.json, project.kdenlive

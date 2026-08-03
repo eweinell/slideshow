@@ -50,9 +50,17 @@ def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
                     defaults: Defaults | None = None, fps: float | None = None,
                     size: tuple[int, int] = (3840, 2160),
                     order: list[str] | None = None,
+                    order_notes: list[str] | None = None,
                     chapters: list[Chapter] | None = None
                     ) -> tuple[EditList, Plan, Coverage]:
-    """Erzeugt ``edit.yaml`` aus Manifest und Regionenkarte."""
+    """Erzeugt ``edit.yaml`` aus Manifest und Regionenkarte.
+
+    ``order`` ist die bereits **aufgeloeste** ID-Folge aus ``order.yaml``
+    (:func:`slideshow.order.resolve_order`), ``order_notes`` sind deren
+    Meldungen. Beides kommt fertig von aussen, weil nur dort Dateipfad und
+    Zeilennummern bekannt sind — hier gaebe es fuer ein `rest: append` keine
+    Stelle, auf die die Meldung zeigen koennte.
+    """
     defaults = defaults or Defaults()
     fps = float(fps or manifest.fps_suggestion)
     regions = beatmap.regions
@@ -62,7 +70,19 @@ def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
     media = chronological(manifest)
     if order:
         by_id = {m.id: m for m in manifest.media}
-        media = [by_id[i] for i in order if i in by_id]
+        # Frueher stand hier ``[by_id[i] for i in order if i in by_id]``. Das
+        # uebersprang eine unbekannte ID wortlos — genau der stille
+        # Ignorierfall, den Prinzip 4 ausschliesst. Die Pruefung steht auch in
+        # ``resolve_order``; hier bleibt sie, weil ``build_edit_list`` direkt
+        # aufrufbar ist und dann an keiner Datei haengt.
+        unbekannt = [i for i in order if i not in by_id]
+        if unbekannt:
+            raise SchemaError(
+                f"Die Reihenfolge nennt {len(unbekannt)} Medien-IDs, die es im "
+                f"Manifest nicht gibt: {', '.join(unbekannt[:8])}"
+                + (f" (+{len(unbekannt) - 8} weitere)" if len(unbekannt) > 8 else ""),
+                path="order")
+        media = [by_id[i] for i in order]
 
     intents: list[Intent] = []
     for m in media:
@@ -110,6 +130,10 @@ def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
                          + chapter_placement_hints(plan))
     if hinweis:
         plan.warnings.insert(0, hinweis)
+    for meldung in reversed(order_notes or []):
+        # Ganz nach oben: dass Material hinten angehaengt wurde oder fehlt,
+        # erklaert die Zahlen der Deckungsrechnung darunter.
+        plan.warnings.insert(0, meldung)
     cov = coverage(plan, defaults)
     cov.audio_seconds = audio_seconds
 
@@ -247,6 +271,7 @@ def insert_titles(intents: list[Intent], chapters: list[Chapter],
     # Stabil nach Position: sonst haengt bei zwei Kapiteln an derselben Stelle
     # die Reihenfolge davon ab, wie die Datei geschrieben wurde.
     aufgeloest.sort(key=lambda x: x[0])
+    warnungen += _chronologie_hinweise(aufgeloest, verwendet, erster_tag)
 
     for versatz, (pos, kap) in enumerate(aufgeloest):
         folgebild = next((m for m in verwendet[pos:] if m.kind == "image"), None)
@@ -311,6 +336,54 @@ def _erster_aufnahmetag(media: list[MediaItem]) -> _dt.date | None:
     """Tag 1 der Reise — Bezugspunkt des Tageszaehlers in ``subtitle: auto``."""
     zeiten = [m.capture_time for m in media if m.capture_time]
     return _dt.datetime.fromtimestamp(min(zeiten)).date() if zeiten else None
+
+
+def _tag_nummer(ts: float, erster_tag: _dt.date) -> int:
+    return (_dt.datetime.fromtimestamp(ts).date() - erster_tag).days + 1
+
+
+def _chronologie_hinweise(aufgeloest: list[tuple[int, Chapter]],
+                          verwendet: list[MediaItem],
+                          erster_tag: _dt.date | None) -> list[str]:
+    """Meldet ``subtitle: auto`` ueber einem Abschnitt aus mehreren Tagen.
+
+    ``subtitle: auto`` bildet "Tag 11 · 24. Juli" aus dem Aufnahmezeitpunkt des
+    *folgenden* Bildes. Solange die Abfolge chronologisch laeuft, ist das der
+    Beginn des Abschnitts und damit richtig. Bei manueller Sortierung
+    (``order.yaml``) steht ueber einem Block aus fuenf Reisetagen dann das Datum
+    eines einzelnen davon — technisch korrekt, inhaltlich irrefuehrend.
+
+    Gemeldet, nicht korrigiert: welches Datum ein thematischer Block tragen
+    soll, weiss das Werkzeug nicht. Und gemessen wird die **Monotonie**, nicht
+    das blosse Vorhandensein von ``order.yaml`` — wer die Datei nur benutzt, um
+    drei Bilder zu tauschen, bekommt keine Warnung ueber etwas, das er nicht
+    getan hat.
+    """
+    if erster_tag is None:
+        return []
+    zeiten = [m.capture_time for m in verwendet if m.capture_time]
+    if len(zeiten) < 2 or all(a <= b for a, b in zip(zeiten, zeiten[1:])):
+        return []
+
+    hinweise: list[str] = []
+    grenzen = [p for p, _ in aufgeloest] + [len(verwendet)]
+    for k, (pos, kap) in enumerate(aufgeloest):
+        if kap.subtitle != "auto":
+            continue
+        folgebild = next((m for m in verwendet[pos:] if m.kind == "image"), None)
+        if folgebild is None or not folgebild.capture_time:
+            continue
+        tage = sorted({_tag_nummer(m.capture_time, erster_tag)
+                       for m in verwendet[pos:grenzen[k + 1]] if m.capture_time})
+        if len(tage) < 2:
+            continue
+        hinweise.append(
+            f"Titel {kap.title!r}: die Reihenfolge ist nicht chronologisch, "
+            f"`subtitle: auto` nimmt aber das Datum des folgenden Bildes "
+            f"(Tag {_tag_nummer(folgebild.capture_time, erster_tag)}). Der Abschnitt "
+            f"enthaelt Bilder von Tag {tage[0]} bis Tag {tage[-1]} — zweite Zeile von "
+            f"Hand setzen oder mit `subtitle: null` weglassen.")
+    return hinweise
 
 
 def _auto_subtitle(item: MediaItem | None, erster_tag: _dt.date | None) -> str | None:
