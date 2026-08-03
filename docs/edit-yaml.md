@@ -694,6 +694,12 @@ umsortiert und die Standardblenden behalten will, hat zwei Wege:
   Segmenten ist das mühsam; ein Kommando, das eine bestehende Reihenfolge über
   einen Neubau rettet, gibt es noch nicht.
 
+  > Genau dafür ist `order.yaml` entworfen — eine Eingabedatei für die
+  > Reihenfolge, die den Neubau überlebt, nach demselben Muster wie
+  > `chapters.yaml`. Beschrieben in
+  > [`briefing-manuelle-reihenfolge.md`](briefing-manuelle-reihenfolge.md),
+  > **noch nicht umgesetzt.**
+
 Seit die Ken-Burns-Richtung an der Bildkennung hängt statt an der Position
 (siehe [Woran die Richtung hängt](#woran-die-richtung-hängt)), kostet das
 Umsortieren beim Rendern fast nichts: die Bilder behalten ihre Bewegung, nur
