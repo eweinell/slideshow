@@ -311,6 +311,19 @@ class KBDefaults(BaseModel):
     #: Bildkante. Bei ``pan_rate`` 0,03 gilt die Rate damit zwischen 1,7 s und
     #: 6,0 s unveraendert — dasselbe Fenster wie beim Zoom.
     pan_total: tuple[float, float] = (0.05, 0.18)
+    #: Wo der Schwenk die Bildmitte beruehrt.
+    #:
+    #: ``center`` — am ruhenden Ende: beim Hineinzoomen faengt er in der Mitte
+    #: an, beim Herauszoomen hoert er dort auf. ``through`` legt ihn symmetrisch
+    #: um die Mitte, er laeuft also mittendurch.
+    #:
+    #: ``through`` war bis dahin die einzige Auslegung und erzeugt einen
+    #: **sichtbaren Richtungswechsel**: bei Zoom 1,0 ist der Ausschnitt das
+    #: ganze Bild, der Filter klemmt die Mitte dort auf 0,5, und die sichtbare
+    #: Mitte wandert erst mit der aufgehenden Klemmung nach aussen, bevor der
+    #: geplante Schwenk sie zurueckholt. Der Schluessel bleibt, damit bestehende
+    #: Projekte bitgleich weiterrendern.
+    pan_anchor: Literal["center", "through"] = "center"
 
     @model_validator(mode="before")
     @classmethod
@@ -322,12 +335,17 @@ class KBDefaults(BaseModel):
         ergibt eine Klemmung, deren Grenzen zusammenfallen: dann liefert sie
         immer denselben Weg, egal was ``pan_rate`` sagt. Bestehende Projekte
         rendern damit bitgleich weiter.
+
+        Dazu gehoert die alte Schwenkauslegung: eine Datei, die noch
+        ``pan_amount`` nennt, ist aelter als ``pan_anchor`` und meint
+        ``through``. Wer beides schreibt, bekommt was er schreibt.
         """
         if not isinstance(data, dict) or "pan_amount" not in data:
             return data
         data = dict(data)
         alt = float(data.pop("pan_amount"))
         data.setdefault("pan_total", (2.0 * alt, 2.0 * alt))
+        data.setdefault("pan_anchor", "through")
         return data
 
     @field_validator("zoom_total", "pan_total")

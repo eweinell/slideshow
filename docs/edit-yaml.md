@@ -112,8 +112,9 @@ Gelten für jedes Segment, das nichts Eigenes sagt.
 |---|---|---|---|
 | `zoom_rate` | float | `0.05` | Zoom **pro Sekunde**. Der Gesamtzoom ergibt sich aus der Dauer, nicht umgekehrt — so bewegen sich lange und kurze Bilder gleich schnell. |
 | `zoom_total` | [float, float] | `[0.08, 0.30]` | Klemmung des Gesamtzooms. Verhindert, dass ein sehr langes Bild bis zur Unkenntlichkeit hineinfährt. `min` muss ≤ `max` sein. |
-| `pan_rate` | float | `0.03` | Schwenkweg **pro Sekunde**, normalisiert auf die Bildkante. Dieselbe Regel wie beim Zoom. |
+| `pan_rate` | float | `0.03` | Schwenkweg **pro Sekunde**, normalisiert auf die Bildkante. Dieselbe Regel wie beim Zoom — aber nur eine Obergrenze: wirksam wird höchstens, was der Zoom hergibt (siehe unten). |
 | `pan_total` | [float, float] | `[0.05, 0.18]` | Klemmung des Gesamt-Schwenkwegs. |
+| `pan_anchor` | enum | `center` | Wo der Schwenk die Bildmitte berührt: `center` am ruhenden Ende (Hineinzoom fängt dort an, Herauszoom hört dort auf), `through` symmetrisch um die Mitte, also mittendurch. `through` ist die frühere Auslegung und hat einen sichtbaren Richtungswechsel — siehe unten. |
 | `ease` | enum | `smoothstep` | `smoothstep` (weich an- und abbremsend) oder `linear`. |
 | `alternate` | bool | `true` | Zoomrichtung wechseln lassen. Hundertmal hineinzoomen ermüdet. Der Wechsel ist **statistisch, nicht streng abwechselnd** — siehe unten. `false` zoomt immer hinein. |
 | `engine` | enum | `zoompan` | `zoompan` ist schnell, rechnet aber **8-bittig** — ffmpeg schiebt eine Konvertierung davor. `scale16` rechnet durchgehend in 16 Bit, kostet mehr CPU. Bei sichtbarem Banding in Himmelsverläufen umstellen. |
@@ -131,14 +132,22 @@ Festwert. Außerhalb gewinnt die Klemmung, und die effektive Geschwindigkeit
 weicht ab. Mit den Vorgaben reicht das Fenster von **1,6 s** (Zoom) bzw.
 **1,7 s** (Schwenk) **bis 6,0 s**:
 
-| Dauer | Gesamtzoom | eff. Zoomrate | Schwenkweg | eff. Schwenkrate |
-|---|---|---|---|---|
-| 1,0 s | 8,0 % | 0,080 (1,6×) | 0,050 | 0,050 (1,7×) |
-| 2,0 s | 10,0 % | 0,050 (1,0×) | 0,060 | 0,030 (1,0×) |
-| 4,0 s | 20,0 % | 0,050 (1,0×) | 0,120 | 0,030 (1,0×) |
-| 6,0 s | 30,0 % | 0,050 (1,0×) | 0,180 | 0,030 (1,0×) |
-| 12,0 s | 30,0 % | 0,025 (0,5×) | 0,180 | 0,015 (0,5×) |
-| 28,0 s | 30,0 % | 0,011 (0,2×) | 0,180 | 0,006 (0,2×) |
+| Dauer | Gesamtzoom | eff. Zoomrate | Deckel `0,5 − 1/(2z)` | Schwenkweg | eff. Schwenkrate |
+|---|---|---|---|---|---|
+| 1,0 s | 8,0 % | 0,080 (1,6×) | 0,037 | 0,037 | 0,037 (1,2×) |
+| 2,0 s | 10,0 % | 0,050 (1,0×) | 0,045 | 0,045 | 0,023 (0,8×) |
+| 4,0 s | 20,0 % | 0,050 (1,0×) | 0,083 | 0,083 | 0,021 (0,7×) |
+| 6,0 s | 30,0 % | 0,050 (1,0×) | 0,115 | 0,115 | 0,019 (0,6×) |
+| 12,0 s | 30,0 % | 0,025 (0,5×) | 0,115 | 0,115 | 0,010 (0,3×) |
+| 28,0 s | 30,0 % | 0,011 (0,2×) | 0,115 | 0,115 | 0,004 (0,1×) |
+
+**Beim Schwenk gewinnt mit den Vorgaben durchgehend der Deckel**, nicht die
+Rate: mehr als `0,5 − 1/(2z)` gibt der Bildrand nicht her, und der Zoom endet
+bei 1,30. `pan_rate` und `pan_total` sind damit eine Obergrenze, die praktisch
+nie greift — wer **mehr** Schwenk will, hebt `zoom_total`, wer **weniger** will,
+senkt `pan_rate`. Dieselbe Rechnung ohne Deckel steht unter `pan_anchor:
+through`; dort wären es 0,060 / 0,120 / 0,180 — sichtbar davon war aber auch
+dort nur etwa die Hälfte.
 
 Wer mit langen Standzeiten arbeitet — etwa `--still-seconds 28` —, dreht
 deshalb an `zoom_total`/`pan_total`, **nicht** an den Raten: die haben dort
@@ -155,9 +164,45 @@ Zwei weitere Feinheiten:
 
 #### Schwenk: Richtung und Reichweite
 
-Der Schwenk läuft symmetrisch um die Bildmitte: von `0.5 − a` nach `0.5 + a`
-mit `a = Schwenkweg / 2`. Die Richtung wird deterministisch aus acht auf Länge 1
-normierten Vektoren gewählt — alle acht legen denselben Weg zurück.
+Der Schwenk hat **ein ruhendes Ende in der Bildmitte**: beim Hineinzoomen fängt
+er dort an, beim Herauszoomen hört er dort auf (`pan_anchor: center`). Die
+Richtung wird deterministisch aus acht auf Länge 1 normierten Vektoren
+gewählt — alle acht legen denselben Weg zurück.
+
+Der Grund steht im Bildrand. Der Ausschnitt hat bei Zoom `z` die Breite `1/z`,
+seine Mitte darf sich also nur innerhalb von `0.5 ± (0.5 − 1/(2z))` bewegen.
+**Bei `z = 1,0` ist das exakt null** — der Ausschnitt *ist* das ganze Bild, und
+der Filter zieht die Mitte dort auf 0,5. Wer den Schwenk dort anfangen lässt,
+wo der Zoom ihn ohnehin festnagelt, verliert nichts.
+
+Genau daran krankte die frühere Auslegung `through` (symmetrisch um die Mitte,
+von `0.5 − a` nach `0.5 + a`): die sichtbare Mitte wanderte zuerst *mit der
+aufgehenden Klemmung* nach außen, während der geplante Schwenk längst zur
+Gegenseite unterwegs war — und kippte, sobald die Klemmung ihn freigab. Gemessen
+an den Vorgaben über 5 s lief die sichtbare Mitte 0,500 → 0,526 → 0,447: **ein
+Zoom, aber zwei Schwenks.** Der Schlüssel bleibt erhalten, damit bestehende
+Projekte bitgleich weiterrendern.
+
+Damit die ganze Bahn innerhalb der Klemmung liegt, wird der Weg auf
+`0,5 − 1/(2z)` des größten Zooms gedeckelt. Dann ist der geplante Weg auch der
+sichtbare — nichts verpufft mehr am Bildrand, und ein Zoom, der bei 1,0 anfängt,
+gibt eben nur diese Strecke her. Mehr Schwenk heißt deshalb: mehr Grundzoom
+(`zoom_total`), nicht mehr `pan_rate`.
+
+Gedeckelt wird die **Strecke**, nicht die Auslenkung je Achse. Eine Diagonale
+dürfte je Achse so weit ausschlagen wie eine Gerade und legte damit das
+1,41-fache zurück — genau der Unterschied, den die normierten Richtungsvektoren
+beseitigen sollen.
+
+Einen reinen Schwenk **ohne** Zoom gibt es deshalb nur mit konstantem Zoom über
+1,0, und den setzt man am Segment:
+
+```yaml
+- {type: still, src: cache/img_1.jpg, kb: {z: [1.20, 1.20], c: [0.425, 0.5, 0.575, 0.5]}}
+```
+
+Ein `kb: {z: …}` am Segment wird beim Deckeln mitgerechnet: die Bewegung plant
+gegen den Zoom, den dieses Bild wirklich hat.
 
 #### Woran die Richtung hängt
 
@@ -182,21 +227,20 @@ Zwei Folgen, die man kennen sollte:
 Die Kennung wird mit `blake2b` gehasht, nicht mit Pythons `hash()` — der ist für
 Strings je Prozess gesalzen und lieferte bei jedem Lauf andere Bewegungen.
 
-Wie weit der Schwenk tatsächlich sichtbar wird, begrenzt der Bildrand: der
-Ausschnitt hat bei Zoom `z` die Breite `1/z`, seine Mitte darf sich also nur
-innerhalb von `0.5 ± (0.5 − 1/(2z))` bewegen. **Bei `z = 1,0` ist das exakt
-null** — der Ausschnitt *ist* das ganze Bild. Da jedes Hineinzoom-Segment bei
-`z = 1,0` beginnt, ist der Schwenk dort festgenagelt und öffnet sich erst mit
-wachsendem Zoom; von der geplanten Strecke wird rund die Hälfte sichtbar. Wer
-mehr Schwenk will, hebt deshalb `pan_total` **und** `zoom_total[0]` an — mehr
-Grundzoom schafft erst den Spielraum, in dem der Schwenk stattfinden kann.
-
 > **`pan_amount` (veraltet).** Der frühere Schlüssel war eine *feste*
 > Auslenkung ohne Dauerbezug. Er wird weiterhin gelesen und verlustfrei nach
 > `pan_total: [2 × pan_amount, 2 × pan_amount]` übersetzt — eine Klemmung mit
-> gleichen Grenzen liefert immer denselben Weg, bestehende Projekte rendern
-> also unverändert. Für dauerabhängige Schwenks den Schlüssel durch
+> gleichen Grenzen liefert immer denselben Weg. Dazu setzt er `pan_anchor:
+> through`: eine Datei, die diesen Schlüssel noch nennt, ist älter als die neue
+> Auslegung und meint die alte, und so rendert sie bitgleich weiter. Wer beides
+> schreibt, bekommt beides. Für dauerabhängige Schwenks den Schlüssel durch
 > `pan_rate`/`pan_total` ersetzen.
+
+> **Ältere `edit.yaml` ohne `pan_amount`** kennen `pan_anchor` noch nicht und
+> bekommen damit die neue Auslegung — die Bewegung geht über
+> `KBMotion.fingerprint()` in den Cache-Key jedes Segments ein, ein solcher
+> Lauf rendert also alles neu. Wer das nicht will, trägt `pan_anchor: through`
+> in `defaults.kb` nach.
 
 ### `defaults.xfade` — Übergänge
 

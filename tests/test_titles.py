@@ -414,9 +414,27 @@ def test_fokusblende_koppelt_die_kamerafahrt():
     assert folie.kb.z[1] == folge.kb.z[0]
     assert folie.kb.c[2:] == folge.kb.c[:2]
     # Die Folie zoomt hinein, damit das Folgebild oberhalb von z = 1,0 anfaengt
-    # und der Schwenk dort nicht in der Klemmung des Bildrands festhaengt.
+    # und dort schon den vollen Spielraum des Bildrands hat.
     assert folie.kb.z[0] == 1.0 and folie.kb.z[1] > 1.0
     assert folge.kb.z[1] > folge.kb.z[0]
+
+
+def test_die_gekoppelte_fahrt_bleibt_im_bild():
+    """Der Deckel aus ``plan_motion`` gilt ueber beide Segmente zusammen.
+
+    Die Fahrt faengt beim Folgebild bereits ausgelenkt an; was der groesste
+    Zoom hergibt, teilen sich Folie und Folgebild. Ohne die gemeinsame Rechnung
+    liefe der Schwenk gegen Ende in die Klemmung und stuende still, waehrend der
+    Zoom weiterlaeuft.
+    """
+    edit, plan, _cov = _bauen(_manifest(), [_beat_region()],
+                              [Chapter(before="img_005", title="Malmoe")])
+    (i, _slot), = _titelslots(plan)
+    folge = plan.slots[i + 1].intent
+
+    erlaubt = 0.5 - 1.0 / (2.0 * folge.kb.z[1])
+    for achse in (0, 1):
+        assert abs(folge.kb.c[2 + achse] - 0.5) <= erlaubt + 1e-6
 
 
 def test_blende_in_die_zaesur_ist_laenger_als_die_uebrigen():

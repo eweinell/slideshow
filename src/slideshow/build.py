@@ -652,8 +652,8 @@ def _couple_focus_motion(plan: Plan, defaults: Defaults) -> None:
     Die Folie zoomt dabei immer *hinein*. Ein Hinauszoom endete bei ``z = 1,0``,
     und das Folgebild muesste darunter weitermachen — dort ist der Ausschnitt
     aber bereits das ganze Bild. Nebengewinn: das Folgebild beginnt oberhalb von
-    ``z = 1,0`` und schwenkt damit von der ersten Sekunde an sichtbar, statt in
-    der Klemmung des Bildrands festzuhaengen.
+    ``z = 1,0`` und hat damit von der ersten Sekunde an den vollen Spielraum des
+    Bildrands, statt ihn sich erst zu erzoomen.
     """
     from .kenburns import zoom_from_duration
 
@@ -680,6 +680,13 @@ def _couple_focus_motion(plan: Plan, defaults: Defaults) -> None:
         richtung = ((m.c1[0] - m.c0[0]) / weg, (m.c1[1] - m.c0[1]) / weg) \
             if weg > 1e-9 else (0.0, 0.0)
         weg_folge = min(max(kb.pan_rate * d_folge, kb.pan_total[0]), kb.pan_total[1])
+        # Derselbe Deckel wie in ``plan_motion``, nur ueber beide Segmente
+        # gerechnet: die Fahrt faengt bereits ausgelenkt an, und was der
+        # groesste Zoom hergibt, teilen sich Folie und Folgebild. Ohne das
+        # stuende der Schwenk des Folgebilds gegen Ende in der Klemmung, waehrend
+        # der Zoom weiterlaeuft — sichtbar als Fahrt, die auf halber Strecke
+        # anhaelt.
+        weg_folge = min(weg_folge, max(0.0, 0.5 - 1.0 / (2.0 * z_folge) - weg))
         ziel = (_klemme(m.c1[0] + richtung[0] * weg_folge),
                 _klemme(m.c1[1] + richtung[1] * weg_folge))
 

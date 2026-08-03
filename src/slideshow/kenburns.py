@@ -129,26 +129,30 @@ def plan_motion(key: str | int, duration: float, defaults: KBDefaults,
     zoom_in = (n & 1 == 0) or not defaults.alternate
     z0, z1 = (1.0, z_end) if zoom_in else (z_end, 1.0)
 
+    # Der Zoom steht vor dem Schwenk, weil ``pan_anchor: center`` unten von ihm
+    # abhaengt — ein ``kb: {z: …}`` am Segment muss deshalb schon hier gelten
+    # und nicht erst am Ende.
+    if spec is not None and spec.z is not None:
+        z0, z1 = float(spec.z[0]), float(spec.z[1])
+        zoom_in = z1 >= z0
+
     # Der Schwenk folgt derselben Regel wie der Zoom: aus der Dauer abgeleitet,
     # nicht fest. Ein fester Weg war im kurzen Fall ein Ruck und im langen
     # Stillstand — dieselbe Begruendung wie oben, sie galt fuer den Schwenk
     # genauso, nur stand sie dort nicht.
     lo_p, hi_p = defaults.pan_total
     weg = min(max(defaults.pan_rate * duration, lo_p), hi_p)
-    a = weg / 2.0                       # Auslenkung je Richtung um die Mitte
 
     # Eigene Bits fuer die Schwenkrichtung, damit sie nicht an der Zoomrichtung
     # klebt: mit ``n % 8`` waeren alle geraden Richtungen Hineinzooms.
     dx, dy = _DIRECTIONS[(n >> 1) % len(_DIRECTIONS)]
-    c0 = (0.5 - dx * a, 0.5 - dy * a)
-    c1 = (0.5 + dx * a, 0.5 + dy * a)
+    c0, c1 = _pan(weg, dx, dy, defaults.pan_anchor, zoom_in=zoom_in,
+                  z_max=max(z0, z1))
 
     ease = defaults.ease
     engine = defaults.engine
 
     if spec is not None:
-        if spec.z is not None:
-            z0, z1 = float(spec.z[0]), float(spec.z[1])
         if spec.c is not None:
             c0 = (float(spec.c[0]), float(spec.c[1]))
             c1 = (float(spec.c[2]), float(spec.c[3]))
@@ -158,6 +162,52 @@ def plan_motion(key: str | int, duration: float, defaults: KBDefaults,
             engine = spec.engine
 
     return KBMotion(z0=z0, z1=z1, c0=c0, c1=c1, ease=ease, engine=engine)
+
+
+def _pan(weg: float, dx: float, dy: float, anchor: str, *, zoom_in: bool,
+         z_max: float) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Legt die Schwenkstrecke um die Bildmitte herum aus.
+
+    ``through`` ist die alte Auslegung: symmetrisch um die Mitte, der Schwenk
+    laeuft mittendurch. Sie hat einen **sichtbaren Richtungswechsel**, und der
+    steckt nicht im Plan, sondern in der Klemmung des Filters
+    (:func:`zoompan_filter`, ``max(0,min(iw-iw/zoom,…))``): bei Zoom 1,0 ist der
+    Ausschnitt das ganze Bild, die Mitte kann dort gar nicht anders liegen als
+    bei 0,5. Die sichtbare Mitte wandert deshalb zuerst *mit der aufgehenden
+    Klemmung* nach aussen, waehrend der geplante Schwenk laengst zur Gegenseite
+    unterwegs ist — und kippt, sobald die Klemmung ihn freigibt. Gemessen an der
+    Vorgabe ueber 5 s: 0,500 → 0,526 → 0,447.
+
+    ``center`` legt das ruhende Ende in die Mitte — beim Hineinzoomen den
+    Anfang, beim Herauszoomen das Ende. Dann laufen Schwenk und Klemmgrenze in
+    dieselbe Richtung.
+
+    Der Weg wird dabei auf das gekappt, was der groesste Zoom hergibt
+    (``0.5 - 1/(2z)``). Das ist keine Vorsicht, sondern die Bedingung fuer die
+    Zusage: nur so liegt die *ganze* Bahn innerhalb der Klemmung — die
+    Klemmgrenze waechst konkav mit dem Zoom, der Schwenk linear, und zwei Kurven
+    durch den Nullpunkt, von denen die konkave am Ende oben liegt, schneiden
+    sich dazwischen nicht. Ohne die Kappung stuende der Schwenk am aeusseren
+    Ende still, statt umzukehren — besser, aber immer noch nicht das, was
+    dasteht.
+
+    Gekappt wird die **Strecke**, nicht die Auslenkung je Achse. Eine Diagonale
+    duerfte je Achse ``erlaubt`` weit ausschlagen und damit insgesamt das
+    1,41-fache zuruecklegen — genau der Unterschied, den die normierten
+    Richtungsvektoren oben absichtlich beseitigen.
+
+    Ein Zoom, der bei 1,0 anfaengt, deckelt den Schwenk damit auf die Haelfte
+    dessen, was ``pan_rate`` verlangt. Das ist die Geometrie und kein Verlust:
+    sichtbar war vorher ebenfalls nur die Haelfte, nur eben mit Umkehr.
+    """
+    if anchor == "through":
+        a = weg / 2.0
+        return ((0.5 - dx * a, 0.5 - dy * a), (0.5 + dx * a, 0.5 + dy * a))
+
+    weg = min(weg, max(0.0, 0.5 - 1.0 / (2.0 * z_max)))
+    mitte = (0.5, 0.5)
+    aussen = (0.5 + dx * weg, 0.5 + dy * weg)
+    return (mitte, aussen) if zoom_in else (aussen, mitte)
 
 
 # --------------------------------------------------------------------------

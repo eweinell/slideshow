@@ -474,6 +474,13 @@ Titelfolie (im Beispiel 1,06 statt 1,0), fängt es *oberhalb* der Klemmung an
 und schwenkt von der ersten Sekunde an sichtbar. Für die Bilder direkt nach
 einem Kapitelanfang ist das Problem damit nebenbei behoben.
 
+> **Nachtrag.** Diese Baustelle ist inzwischen allgemein erledigt: der Schwenk
+> hat ein ruhendes Ende in der Bildmitte (`defaults.kb.pan_anchor: center`) und
+> wird auf das gedeckelt, was der Zoom hergibt — siehe
+> [`edit-yaml.md`](edit-yaml.md#schwenk-richtung-und-reichweite). Die Kopplung
+> hier bleibt davon unberührt; sie rechnet den Deckel jetzt über beide Segmente
+> zusammen.
+
 > **Empfehlung: (d) für `bg: auto`, sonst (b).** Beides erzeugt `build`
 > automatisch; beides steht danach als gewöhnliche `xfade`-Segmente in der
 > Datei und lässt sich löschen oder ändern.

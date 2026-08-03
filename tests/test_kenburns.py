@@ -56,7 +56,13 @@ def _weg(m) -> float:
 
 
 def test_schwenk_ergibt_sich_aus_der_dauer():
-    d = KBDefaults(pan_rate=0.03, pan_total=(0.05, 0.18))
+    """Die Rate in Reinform — deshalb ``through``.
+
+    Unter ``center`` deckelt der Zoom den Weg (siehe
+    ``test_der_zoom_deckelt_den_schwenk``), und dann misst dieser Test die
+    Klemmung statt der Rate.
+    """
+    d = KBDefaults(pan_rate=0.03, pan_total=(0.05, 0.18), pan_anchor="through")
 
     assert _weg(plan_motion(0, 2.0, d)) == pytest.approx(0.06)
     assert _weg(plan_motion(0, 4.0, d)) == pytest.approx(0.12)
@@ -66,7 +72,7 @@ def test_schwenk_ergibt_sich_aus_der_dauer():
 
 def test_schwenkgeschwindigkeit_ist_im_fenster_konstant():
     """Genau dafür ist die Rate da: 2 s und 6 s müssen gleich schnell wirken."""
-    d = KBDefaults()
+    d = KBDefaults(pan_anchor="through")
     lo, hi = d.pan_total
     for dauer in (lo / d.pan_rate, 3.0, 4.0, hi / d.pan_rate):
         assert _weg(plan_motion(0, dauer, d)) / dauer == pytest.approx(d.pan_rate)
@@ -108,14 +114,112 @@ def test_schwenk_bleibt_im_bild():
 
 def test_altes_pan_amount_rendert_unveraendert_weiter():
     """``pan_amount`` war ein fester Weg — als Klemmung mit gleichen Grenzen
-    ist genau das wieder herstellbar, unabhängig von der Dauer."""
+    ist genau das wieder herstellbar, unabhängig von der Dauer.
+
+    Dazu gehört die alte Auslegung: eine Datei, die diesen Schlüssel noch
+    nennt, ist älter als `pan_anchor` und meint `through`. Sonst wäre
+    „bitgleich" nur die halbe Wahrheit.
+    """
     alt = KBDefaults.model_validate({"pan_amount": 0.06})
 
     assert alt.pan_total == (0.12, 0.12)
+    assert alt.pan_anchor == "through"
     for dauer in (2.0, 4.0, 12.0):
         m = plan_motion(0, dauer, alt)
         assert m.c0 == pytest.approx((0.44, 0.5))
         assert m.c1 == pytest.approx((0.56, 0.5))
+
+
+def test_wer_beides_schreibt_bekommt_beides():
+    """Die Übersetzung ist eine Vorbelegung, kein Zwang."""
+    d = KBDefaults.model_validate({"pan_amount": 0.06, "pan_anchor": "center"})
+    assert d.pan_anchor == "center"
+
+
+# --------------------------------------------------------------------------
+# Wo der Schwenk die Mitte beruehrt (`pan_anchor`)
+#
+# Der Richtungswechsel steckt nicht im Plan, sondern in der Klemmung des
+# Filters. Geprueft wird deshalb die *sichtbare* Bahn: dieselbe Rechnung, die
+# `zoompan_filter` als Ausdruck hinschreibt.
+# --------------------------------------------------------------------------
+
+def _sichtbare_mitte(m, achse: int = 0, schritte: int = 41) -> list[float]:
+    """Die Bildmitte, die im Bild ankommt — nach ``max(0, min(1-1/z, …))``."""
+    bahn = []
+    for i in range(schritte):
+        p = i / (schritte - 1)
+        e = p * p * (3 - 2 * p) if m.ease == "smoothstep" else p
+        zoom = m.z0 + (m.z1 - m.z0) * e
+        c = m.c0[achse] + (m.c1[achse] - m.c0[achse]) * e
+        breite = 1.0 / zoom
+        bahn.append(max(0.0, min(1.0 - breite, c - breite / 2)) + breite / 2)
+    return bahn
+
+
+def _richtungswechsel(bahn: list[float]) -> int:
+    return sum(1 for a, b, c in zip(bahn, bahn[1:], bahn[2:])
+               if (b - a) * (c - b) < -1e-12)
+
+
+def test_die_sichtbare_mitte_wechselt_die_richtung_nicht():
+    """Die eigentliche Zusage — und sie gilt in beide Zoomrichtungen.
+
+    ``2 * i`` spricht Schwenkrichtung ``i`` mit Hineinzoom an, ``2 * i + 1``
+    dieselbe Richtung mit Herauszoom (das unterste Bit steuert den Zoom).
+    """
+    d = KBDefaults()
+    for dauer in (2.0, 4.0, 6.0, 12.0):
+        for key in range(16):
+            m = plan_motion(key, dauer, d)
+            for achse in (0, 1):
+                assert _richtungswechsel(_sichtbare_mitte(m, achse)) == 0, \
+                    f"Kennung {key}, {dauer} s, Achse {achse}"
+
+
+def test_die_alte_auslegung_hatte_genau_diesen_wechsel():
+    """Die Gegenprobe — sonst prüft der Test oben nur sich selbst."""
+    m = plan_motion(0, 5.0, KBDefaults(pan_anchor="through"))
+    assert _richtungswechsel(_sichtbare_mitte(m)) == 1
+
+
+def test_der_schwenk_kommt_ganz_im_bild_an():
+    """Nichts wird geklemmt: der geplante Weg ist auch der sichtbare."""
+    d = KBDefaults()
+    for dauer in (2.0, 4.0, 6.0, 12.0):
+        m = plan_motion(0, dauer, d)
+        bahn = _sichtbare_mitte(m)
+        assert abs(bahn[-1] - bahn[0]) == pytest.approx(_weg(m), abs=1e-6)
+
+
+def test_der_zoom_deckelt_den_schwenk():
+    """Ein Zoom, der bei 1,0 anfängt, gibt nur ``0.5 - 1/(2z)`` her — dort ist
+    der Ausschnitt das ganze Bild, und die Mitte kann sich nicht bewegen."""
+    d = KBDefaults()
+    for dauer in (2.0, 4.0, 6.0):
+        m = plan_motion(0, dauer, d)
+        erlaubt = 0.5 - 1.0 / (2.0 * max(m.z0, m.z1))
+        assert _weg(m) == pytest.approx(min(d.pan_rate * dauer, erlaubt))
+
+
+def test_der_schwenk_sieht_den_zoom_am_segment():
+    """Ein `kb: {z: …}` muss die Deckelung mitbekommen — sonst plant der
+    Schwenk gegen einen Zoom, den es gar nicht gibt."""
+    d = KBDefaults()
+    eng = plan_motion(0, 4.0, d, KBSpec(z=(1.0, 1.05)))
+    weit = plan_motion(0, 4.0, d, KBSpec(z=(1.0, 1.30)))
+    assert _weg(eng) < _weg(weit)
+    assert _richtungswechsel(_sichtbare_mitte(eng)) == 0
+
+
+def test_ein_ruhiges_ende_liegt_in_der_mitte():
+    """Hineinzoom fängt in der Mitte an, Herauszoom hört dort auf."""
+    d = KBDefaults()
+    hinein = plan_motion(0, 4.0, d)          # unterstes Bit 0 -> hinein
+    heraus = plan_motion(1, 4.0, d)
+    assert hinein.z0 < hinein.z1 and heraus.z0 > heraus.z1
+    assert hinein.c0 == pytest.approx((0.5, 0.5))
+    assert heraus.c1 == pytest.approx((0.5, 0.5))
 
 
 def test_verdrehte_grenzen_werden_abgewiesen():
