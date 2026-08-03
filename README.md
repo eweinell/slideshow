@@ -9,6 +9,7 @@ slideshow probe /material/urlaub              # → manifest.json
 slideshow audio track1.mp3 track2.mp3 --gap 6 # → cache/mix.flac
 slideshow preprocess                          # → cache/
 slideshow beats                               # → beats.yaml  ← ansehen!
+slideshow order                               # → order.yaml  ← optional, zum Sortieren
 slideshow build                               # → edit.yaml
 slideshow render edit.yaml -o out/master.mp4
 ```
@@ -29,6 +30,12 @@ trotzdem den richtigen. `-q` schaltet ihn ab.
 Der `audio`-Schritt ist optional — ohne Tonspur entsteht eine stumme
 Slideshow mit fester Bilddauer, siehe [Ohne Musik, mit zu wenig oder zu
 viel](#ohne-musik-mit-zu-wenig-oder-zu-viel).
+
+> **Fertige Abläufe für die Fälle, die wirklich vorkommen** — Rohschnitt,
+> Kapitel, thematisch sortieren, auswählen, Nachschub einpflegen — stehen in
+> [`docs/rezepte.md`](docs/rezepte.md). Wer nicht wissen will, *warum* das
+> Werkzeug so gebaut ist, sondern nur, *welche* fünf Befehle sein Fall braucht,
+> fängt dort an.
 
 ## Grundprinzipien
 
@@ -106,6 +113,8 @@ Analyseumgebung und in der Testsuite.
 ```
 manifest.json   was für Material vorliegt (probe)
 beats.yaml      Regionenkarte der Tonspur (beats) — vor dem Bauen ansehen
+chapters.yaml   Kapitel der Reise, Eingabe für build — optional
+order.yaml      Reihenfolge der Medien, Eingabe für build — optional
 edit.yaml       die Edit-List (build)
 cache/          normalisierte Bilder, Clip-Intermediates, Segment-Cache
 out/            master.mp4, timeline.json, project.kdenlive
@@ -114,7 +123,9 @@ logs/           ein Logfile je Subkommando, mit den exakten ffmpeg-Aufrufen
 
 Sämtliche Schlüssel der Edit-List — Takt, Ken Burns, Übergänge, Präzedenz der
 Dauerangaben und die üblichen Eingriffe von Hand — stehen in
-[`docs/edit-yaml.md`](docs/edit-yaml.md).
+[`docs/edit-yaml.md`](docs/edit-yaml.md); dort auch die beiden optionalen
+Eingabedateien `chapters.yaml` (Titelfolien) und `order.yaml` (Reihenfolge und
+Auswahl). Fertige Abläufe dazu: [`docs/rezepte.md`](docs/rezepte.md).
 
 ## Installation
 

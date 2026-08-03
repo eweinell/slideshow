@@ -170,9 +170,13 @@ class _Args:
         self.dry_run = False
 
 
-def _vorschlag(project, project_arg="/anderswo"):
+def _vorschlag_zeilen(project, project_arg="/anderswo"):
     from slideshow.cli import _naechster_schritt
-    return " ".join(_naechster_schritt(project, _Args(project_arg)))
+    return _naechster_schritt(project, _Args(project_arg))
+
+
+def _vorschlag(project, project_arg="/anderswo"):
+    return " ".join(_vorschlag_zeilen(project, project_arg))
 
 
 @pytest.fixture
@@ -243,9 +247,11 @@ def test_unsinnige_standzeit_wird_nicht_vorgeschlagen(leer):
     _schreibe_manifest(leer, cache_path="ja", medien=3, audio_file="cache/mix.flac")
     _schreibe_beatmap(leer, 392.68)
 
-    vorschlag = _vorschlag(leer)
-    assert vorschlag.endswith("build"), "dann lieber nackt — build erklärt die Optionen"
-    assert "still-seconds" not in vorschlag
+    # Auf der ersten Zeile, nicht auf der ganzen Ausgabe: darunter kann der
+    # Hinweis auf `chapters` stehen, und der ist eine andere Zusage.
+    zeilen = _vorschlag_zeilen(leer)
+    assert zeilen[0].endswith("build"), "dann lieber nackt — build erklärt die Optionen"
+    assert "still-seconds" not in " ".join(zeilen)
 
 
 def test_projekt_schalter_entfaellt_im_eigenen_verzeichnis(leer, monkeypatch):

@@ -612,6 +612,12 @@ class Chapter(BaseModel):
     before: str | None = None
     #: Position in der Medienfolge; ``0`` ist der Auftakt vor allem Material.
     at: int | None = None
+    #: Name einer Gruppe aus ``order.yaml``; die Folie steht vor deren erstem
+    #: Medium. Genauer als ``before:``, sobald von Hand sortiert wird: eine
+    #: Medien-ID zeigt kommentarlos mitten in den Block hinein, sobald man sie
+    #: dort nach hinten schiebt. Aufgeloest wird das vor dem Bauen
+    #: (:func:`slideshow.order.anchor_chapters`).
+    group: str | None = None
     title: str
     subtitle: str | None = "auto"
     #: ``auto`` | **Medien-ID** | ``cache/…``-Pfad | ``#rrggbb`` | ``none``.
@@ -638,9 +644,11 @@ class Chapter(BaseModel):
 
     @model_validator(mode="after")
     def _genau_ein_anker(self) -> "Chapter":
-        if (self.before is None) == (self.at is None):
-            raise ValueError("genau eines von `before:` (Medien-ID) und `at:` "
-                             "(Position) angeben")
+        anker = [self.before, self.at, self.group]
+        if sum(a is not None for a in anker) != 1:
+            raise ValueError("genau eines von `before:` (Medien-ID), `at:` "
+                             "(Position) und `group:` (Gruppe aus order.yaml) "
+                             "angeben")
         return self
 
 
@@ -652,23 +660,103 @@ class ChapterList(BaseModel):
 
     @classmethod
     def load(cls, path: Path) -> "ChapterList":
-        p = Path(path)
-        if not p.exists():
-            raise SchemaError(f"Kapiteldatei fehlt: {p}")
-        try:
-            data = yaml.load(p.read_text(encoding="utf-8"), Loader=_LineLoader)
-        except yaml.YAMLError as exc:
-            line = getattr(getattr(exc, "problem_mark", None), "line", None)
-            raise SchemaError(f"{p.name} ist kein gueltiges YAML: {exc}", file=str(p),
-                              line=(line + 1) if line is not None else None) from exc
-        if not isinstance(data, dict):
-            raise SchemaError(f"{p.name} muss ein Mapping auf oberster Ebene sein "
-                              f"(`chapters:` als Schluessel)", file=str(p))
-        lines = _line_index(data)
-        try:
-            return cls.model_validate(_strip_lines(data))
-        except ValidationError as exc:
-            raise _to_schema_error(exc, file=str(p), lines=lines) from exc
+        return _load_yaml_model(cls, path, was="Kapiteldatei", schluessel="chapters")
+
+
+# --------------------------------------------------------------------------
+# order.yaml — die Reihenfolge von Hand
+# (docs/briefing-manuelle-reihenfolge.md)
+# --------------------------------------------------------------------------
+
+class OrderGroup(BaseModel):
+    """Ein Block der manuellen Reihenfolge — die Arbeitseinheit beim Sortieren.
+
+    Der ``name`` erscheint **nicht im Film** (Entscheidung 2). Es liegt nahe,
+    aus ``name: am-wasser`` von selbst eine Folie "Am Wasser" zu machen; genau
+    das darf nicht passieren, denn dann gaebe es zwei Wege, eine Ueberschrift zu
+    erklaeren — ``order.yaml`` und ``chapters.yaml`` —, die auseinanderlaufen
+    koennen. Der Text einer Folie wohnt in ``chapters.yaml``, dort und nur dort.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = ""
+    items: list[str] = Field(default_factory=list)
+
+
+class OrderList(BaseModel):
+    """``order.yaml`` — die Reihenfolge der Medien.
+
+    Eingabe wie ``chapters.yaml``, nicht Erzeugnis: ``build`` liest die Datei
+    und schreibt sie nie. Verankert wird an **Medien-IDs**, weil die nur am
+    Dateinamen haengen und damit als einzige gegen ein erneutes ``probe``
+    stabil sind.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = 1
+    #: Was mit Material geschieht, das die Datei nicht nennt (Entscheidung 3).
+    #: Vorgabe ``error``: der teuerste Fehler dieser Datei ist das *stille*
+    #: Verschwinden von Bildern — man rendert eine Stunde und zaehlt hinterher.
+    rest: Literal["error", "append", "drop"] = "error"
+    #: Bloecke mit Namen. Genau eines von ``groups`` und ``order``.
+    groups: list[OrderGroup] | None = None
+    #: Flache Kurzform; bedeutet dasselbe wie eine einzige namenlose Gruppe.
+    #: Zwei Formen kosten zehn Zeilen und ersparen dem, der nur drei Bilder
+    #: tauschen will, eine Verschachtelung, die er nicht braucht.
+    order: list[str] | None = None
+
+    @field_validator("version")
+    @classmethod
+    def _check_version(cls, v: int) -> int:
+        if v != 1:
+            raise ValueError(f"order.yaml hat Version {v}, unterstuetzt wird 1")
+        return v
+
+    @model_validator(mode="after")
+    def _genau_eine_form(self) -> "OrderList":
+        if (self.groups is None) == (self.order is None):
+            raise ValueError("genau eines von `groups:` (Bloecke mit Namen) und "
+                             "`order:` (flache Liste) angeben")
+        return self
+
+    @property
+    def blocks(self) -> list[OrderGroup]:
+        """Beide Formen als dasselbe: eine Liste von Bloecken."""
+        if self.groups is not None:
+            return self.groups
+        return [OrderGroup(items=list(self.order or []))]
+
+    @classmethod
+    def load(cls, path: Path) -> "OrderList":
+        return _load_yaml_model(cls, path, was="Reihenfolgedatei", schluessel="groups")
+
+
+def _load_yaml_model(cls, path: Path, *, was: str, schluessel: str):
+    """YAML laden, Zeilennummern behalten, gegen das Modell pruefen.
+
+    Gemeinsam fuer alle *Eingabe*-Dateien neben der Edit-List. Der Zweck ist
+    nicht Kuerze, sondern dass ein Tippfehler in jeder dieser Dateien dieselbe
+    Meldung mit Datei und Zeile ergibt statt einer je Dateityp.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise SchemaError(f"{was} fehlt: {p}")
+    try:
+        data = yaml.load(p.read_text(encoding="utf-8"), Loader=_LineLoader)
+    except yaml.YAMLError as exc:
+        line = getattr(getattr(exc, "problem_mark", None), "line", None)
+        raise SchemaError(f"{p.name} ist kein gueltiges YAML: {exc}", file=str(p),
+                          line=(line + 1) if line is not None else None) from exc
+    if not isinstance(data, dict):
+        raise SchemaError(f"{p.name} muss ein Mapping auf oberster Ebene sein "
+                          f"(`{schluessel}:` als Schluessel)", file=str(p))
+    lines = _line_index(data)
+    try:
+        return cls.model_validate(_strip_lines(data))
+    except ValidationError as exc:
+        raise _to_schema_error(exc, file=str(p), lines=lines) from exc
 
 
 # --------------------------------------------------------------------------

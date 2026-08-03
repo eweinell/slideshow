@@ -32,6 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
                "  slideshow audio track1.mp3 track2.mp3 --gap 6\n"
                "  slideshow preprocess\n"
                "  slideshow beats cache/mix.flac        # Regionenkarte pruefen!\n"
+               "  slideshow order                       # optional: Reihenfolge sortieren\n"
                "  slideshow chapters                    # optional: Titelfolien\n"
                "  slideshow build\n"
                "  slideshow render edit.yaml -o out/master.mp4\n")
@@ -104,14 +105,46 @@ def build_parser() -> argparse.ArgumentParser:
     ch.add_argument("--min-jump", type=float, default=None, metavar="KM",
                     help="Ortssprung in km, ab dem ein Kapitel vorgeschlagen wird "
                          "(Default 30)")
+    ch.add_argument("--from-groups", action="store_true",
+                    help="ein Kapitel je Block aus order.yaml statt aus "
+                         "Zeitluecken — der Weg, wenn die Abschnitte beim "
+                         "Sortieren von Hand gezogen wurden")
     ch.add_argument("--no-auftakt", action="store_true",
                     help="keinen Titel vor dem Material vorschlagen")
     ch.add_argument("--force", action="store_true",
                     help="vorhandene Datei ueberschreiben")
 
+    od = sub.add_parser(
+        "order", help="Reihenfolge zum Sortieren erzeugen -> order.yaml",
+        description="Erzeugt order.yaml: die Medien chronologisch vorbelegt, "
+                    "gruppiert und je Zeile mit Tag, Uhrzeit und Format "
+                    "kommentiert. Sortiert wird danach von Hand, indem man "
+                    "Zeilen verschiebt. `slideshow build` liest die Datei von "
+                    "selbst, wenn sie im Projekt liegt.")
+    od.add_argument("-o", "--output", default=None, metavar="order.yaml",
+                    help="Zieldatei (Default: order.yaml im Projektverzeichnis)")
+    od.add_argument("--manifest", default=None,
+                    help="abweichendes Manifest (Default: manifest.json im Projekt)")
+    od.add_argument("--by", choices=("day", "place", "none"), default="day",
+                    help="Vorgruppierung: 'day' ein Block je Kalendertag (Default), "
+                         "'place' ein Block je Ortscluster aus GPS, 'none' ein "
+                         "einziger Block")
+    od.add_argument("--update", action="store_true",
+                    help="neu hinzugekommenes Material einpflegen und dabei "
+                         "Sortierung, Gruppennamen und Kommentare behalten — der "
+                         "Weg nach einem erneuten `probe`")
+    od.add_argument("--force", action="store_true",
+                    help="vorhandene Datei ueberschreiben und damit die Sortierung "
+                         "verwerfen (globales --dry-run zeigt sie nur an)")
+
     bu.add_argument("--chapters", default=None, metavar="chapters.yaml",
                     help="Titel- und Zwischenfolien einsetzen "
                          "(Default: chapters.yaml im Projekt, falls vorhanden)")
+    bu.add_argument("--order", default=None, metavar="order.yaml",
+                    help="Medien in der dort festgelegten Reihenfolge statt "
+                         "chronologisch; die Datei bestimmt ueber `rest:` auch, "
+                         "was mit nicht genanntem Material geschieht "
+                         "(Default: order.yaml im Projekt, falls vorhanden)")
     bu.add_argument("--xfade-beats", type=float, default=None)
     bu.add_argument("--no-xfade", action="store_true",
                     help="keine automatischen Uebergaenge erzeugen")
@@ -124,7 +157,9 @@ def build_parser() -> argparse.ArgumentParser:
     rd.add_argument("--jobs", type=int, default=None)
     rd.add_argument("--preview", action="store_true",
                     help="1280x720, libx264 — schnell und ohne NVENC-Sessions")
-    rd.add_argument("--range", dest="range_spec", default=None, metavar="A:B")
+    rd.add_argument("--range", dest="range_spec", default=None, metavar="A:B",
+                    help="nur die Segmente [A, B) rendern — Segmentnummern, "
+                         "keine Sekunden")
     rd.add_argument("--codec", default="auto",
                     choices=("auto", "hevc_nvenc", "av1_nvenc", "libx265", "libx264"))
     rd.add_argument("--manifest", default=None)
@@ -468,6 +503,7 @@ def cmd_build(args, project: Project) -> int:
     from .build import build_edit_list, validate_edit, write_timeline
     from .doctor import preflight
     from .models import BeatMap, Defaults, Manifest, Region
+    from .order import anchor_chapters
     from .planner import coverage_advice, resolve
     preflight(project, "build")
 
@@ -498,10 +534,16 @@ def cmd_build(args, project: Project) -> int:
     defaults.xfade.auto = not args.no_xfade
 
     chapters = _load_chapters(project, args.chapters, defaults)
+    order, order_notes, olist = _load_order(project, args.order, manifest)
+    # `group:` zeigt auf einen Block in order.yaml; ``build`` kennt nur noch
+    # eine Liste. Aufgeloest wird das hier, an der einzigen Stelle, die beide
+    # Dateien vor sich hat.
+    chapters = anchor_chapters(chapters, olist, order)
 
     size = _parse_size(args.size) if args.size else (3840, 2160)
     edit, plan, cov = build_edit_list(project, manifest, beatmap, defaults=defaults,
-                                      fps=args.fps, size=size, chapters=chapters)
+                                      fps=args.fps, size=size, chapters=chapters,
+                                      order=order, order_notes=order_notes)
     _print_coverage(cov, defaults, plan)
 
     tips = coverage_advice(cov, defaults)
@@ -531,19 +573,12 @@ def cmd_build(args, project: Project) -> int:
 
 
 def cmd_chapters(args, project: Project) -> int:
-    from .chapters import (GAP_PLACE_HOURS, JUMP_KM, coverage_note,
-                           dump_chapters_yaml, first_image_id, suggest)
     from .models import Manifest
 
     manifest = Manifest.load(Path(args.manifest) if args.manifest else project.manifest)
-    vorschlaege = suggest(manifest,
-                          min_gap_hours=(args.min_gap if args.min_gap is not None
-                                         else GAP_PLACE_HOURS),
-                          min_jump_km=(args.min_jump if args.min_jump is not None
-                                       else JUMP_KM))
-    text = dump_chapters_yaml(vorschlaege, hinweis=coverage_note(manifest),
-                              auftakt=not args.no_auftakt,
-                              auftakt_bild=first_image_id(manifest))
+    text, bericht, signal = (_chapters_aus_gruppen(args, project, manifest)
+                             if args.from_groups
+                             else _chapters_aus_luecken(args, project, manifest))
 
     out = Path(args.output) if args.output else (project.root / "chapters.yaml")
     con = console()
@@ -559,13 +594,141 @@ def cmd_chapters(args, project: Project) -> int:
             f"Vorschlag nur an.")
     out.write_text(text, encoding="utf-8")
 
-    stark = sum(1 for v in vorschlaege if v.staerke == "stark")
-    schwach = len(vorschlaege) - stark
-    con.print(f"Kapitelvorschlaege: {out}  ({stark} Grenzen"
-              + (f", {schwach} schwaechere als Kommentar" if schwach else "") + ")")
-    con.print(f"[dim]{coverage_note(manifest)}[/dim]")
+    con.print(f"Kapitelvorschlaege: {out}  ({bericht})")
+    con.print(f"[dim]{signal}[/dim]")
     con.print("[yellow]Die Ueberschriften sind leer und muessen ausgefuellt "
               "werden.[/yellow] Danach: `slideshow build`")
+    return 0
+
+
+def _chapters_aus_luecken(args, project: Project, manifest) -> tuple[str, str, str]:
+    """Grenzen aus Zeitluecken und Ortsspruengen — der Normalfall."""
+    from .chapters import (GAP_PLACE_HOURS, JUMP_KM, ORDER_VORBEHALT,
+                           coverage_note, dump_chapters_yaml, first_image_id,
+                           suggest)
+    from .order import is_chronological
+
+    vorschlaege = suggest(manifest,
+                          min_gap_hours=(args.min_gap if args.min_gap is not None
+                                         else GAP_PLACE_HOURS),
+                          min_jump_km=(args.min_jump if args.min_jump is not None
+                                       else JUMP_KM))
+    # Ohne die Reihenfolge nennte der Auftakt-Kommentar das chronologisch erste
+    # Bild — bei manueller Sortierung schlicht das falsche. Ein Fehler in der
+    # Datei darf hier aber nicht abbrechen: gebraucht wird sie fuer einen
+    # *Kommentar*, und wer gerade sortiert, hat regelmaessig einen Zwischenstand
+    # liegen, den `build` zu Recht ablehnen wuerde.
+    try:
+        reihenfolge, _notes, _olist = _load_order(project, None, manifest)
+    except SlideshowError as exc:
+        reihenfolge = None
+        console().print(f"[yellow]order.yaml bleibt aussen vor:[/] {exc}")
+    # Bei manueller Sortierung sind die Nachbarn im Film thematisch benachbart,
+    # nicht zeitlich — die Zeitluecken-Heuristik unten rechnet dann an der
+    # fertigen Abfolge vorbei. Das muss in der Datei stehen, nicht nur hier.
+    vorbehalt = (ORDER_VORBEHALT if reihenfolge
+                 and not is_chronological(manifest, reihenfolge) else "")
+    text = dump_chapters_yaml(vorschlaege, hinweis=coverage_note(manifest),
+                              auftakt=not args.no_auftakt,
+                              auftakt_bild=first_image_id(manifest, reihenfolge),
+                              vorbehalt=vorbehalt)
+
+    stark = sum(1 for v in vorschlaege if v.staerke == "stark")
+    schwach = len(vorschlaege) - stark
+    bericht = (f"{stark} Grenzen"
+               + (f", {schwach} schwaechere als Kommentar" if schwach else ""))
+    return (text, bericht, coverage_note(manifest))
+
+
+def _chapters_aus_gruppen(args, project: Project, manifest) -> tuple[str, str, str]:
+    """Ein Kapitel je Block aus ``order.yaml``.
+
+    Fuer den Film, dessen Abschnitte beim Sortieren gezogen wurden — ein Kapitel
+    je Reiseabschnitt ueber mehrere Tage. Die Zeitluecken-Heuristik hat dort
+    nichts beizutragen: sie misst zwischen *zeitlichen* Nachbarn, im Film stehen
+    aber thematische, und ihre Vorschlaege wirft man hinterher weg.
+
+    Anders als beim Auftakt-Kommentar in :func:`_chapters_aus_luecken` ist ein
+    Fehler in ``order.yaml`` hier kein Schoenheitsfehler, sondern nimmt der Datei
+    den Inhalt — er wird deshalb durchgereicht statt gemeldet.
+    """
+    from .chapters import dump_group_chapters_yaml, first_image_id
+    from .order import group_anchors
+
+    if args.min_gap is not None or args.min_jump is not None:
+        raise SlideshowError(
+            "--from-groups nimmt die Grenzen aus order.yaml; --min-gap und "
+            "--min-jump stellen die Zeitluecken-Erkennung ein und blieben dabei "
+            "wirkungslos. Entweder das eine oder das andere.")
+
+    ids, _notes, olist = _load_order(project, None, manifest)
+    if olist is None:
+        raise SlideshowError(
+            f"--from-groups braucht order.yaml — daraus werden die Kapitel, und in "
+            f"{project.root} liegt keine. Erzeugen: `slideshow order --by place` "
+            f"(ein Block je Ort, meist mehrere Tage) oder `--by day`.")
+    anker = group_anchors(olist, manifest, ids)
+    if not anker:
+        raise SlideshowError(
+            "order.yaml nennt keine benannten Bloecke. Die flache Form "
+            "`order: [...]` kennt keine Gruppen, und ohne Gruppen gibt es nichts "
+            "zu verankern — `slideshow order --by day` erzeugt die gruppierte "
+            "Form. Ohne Gruppen bleibt `slideshow chapters` ohne den Schalter.")
+
+    text = dump_group_chapters_yaml(anker, auftakt=not args.no_auftakt,
+                                    auftakt_bild=first_image_id(manifest, ids))
+    mehrtaegig = sum(1 for a in anker if a.mehrtaegig)
+    bericht = (f"{len(anker)} Bloecke aus order.yaml"
+               + (f", davon {mehrtaegig} ueber mehrere Tage" if mehrtaegig else ""))
+    signal = ("Anker `group:` — sie ueberleben jedes weitere Umsortieren "
+              "innerhalb der Bloecke"
+              + (f"; {mehrtaegig} Kapitel bekommen `subtitle: null`, weil `auto` "
+                 f"dort nur den ersten Tag naehme" if mehrtaegig else ""))
+    return (text, bericht, signal)
+
+
+def cmd_order(args, project: Project) -> int:
+    from .models import Manifest
+    from .order import (dump_order_yaml, group_media, load_order,
+                        update_order_text)
+
+    manifest = Manifest.load(Path(args.manifest) if args.manifest else project.manifest)
+    out = Path(args.output) if args.output else (project.root / "order.yaml")
+    con = console()
+
+    if args.update:
+        if not out.exists():
+            raise SlideshowError(f"{out} gibt es noch nicht — `--update` pflegt eine "
+                                 f"bestehende Datei nach. Ohne den Schalter wird sie "
+                                 f"neu erzeugt.")
+        olist, _zeilen = load_order(out)
+        text, meldungen = update_order_text(out.read_text(encoding="utf-8"),
+                                            olist, manifest)
+    else:
+        bloecke = group_media(manifest, by=args.by)
+        text = dump_order_yaml(bloecke, manifest, by=args.by)
+        meldungen = [f"{len(bloecke)} Gruppen, "
+                     f"{sum(len(b.items) for b in bloecke)} Medien"]
+
+    if args.dry_run:
+        con.print(text)
+        return 0
+    # Wie bei den Kapiteln: die Datei ist Handarbeit, sobald einmal sortiert
+    # wurde. Sie kommentarlos zu ueberschreiben hiesse, die Sortierung zu
+    # loeschen — dafuer gibt es `--update`, und erst danach `--force`.
+    if out.exists() and not (args.force or args.update):
+        raise SlideshowError(
+            f"{out} gibt es bereits und enthaelt die Sortierung. `--update` pflegt "
+            f"neues Material ein und behaelt sie, `--force` wirft sie weg, "
+            f"`--dry-run` zeigt den Vorschlag nur an.")
+    out.write_text(text, encoding="utf-8")
+
+    con.print(f"Reihenfolge: {out}")
+    for m in meldungen:
+        con.print(f"  [dim]{m}[/dim]")
+    if not args.update:
+        con.print("[yellow]Die Reihenfolge ist noch chronologisch.[/yellow] Zum "
+                  "Sortieren die Zeilen verschieben. Danach: `slideshow build`")
     return 0
 
 
@@ -597,6 +760,33 @@ def _load_chapters(project: Project, angabe: str | None, defaults) -> list:
         console().print(f"Kapitel: {pfad}  ({len(kapitel)} Titelfolien, "
                         f"Schrift {schrift})")
     return kapitel
+
+
+def _load_order(project: Project, angabe: str | None,
+                manifest) -> tuple[list[str] | None, list[str], object | None]:
+    """Reihenfolge laden und aufloesen — dieselbe Regel wie bei den Kapiteln.
+
+    Ein *ausdruecklich* genannter Pfad, den es nicht gibt, ist ein Fehler; die
+    stillschweigend gefundene ``order.yaml`` ist eine Bequemlichkeit und darf
+    fehlen. Ohne Datei bleibt es bei der chronologischen Abfolge.
+    """
+    from .order import load_order, resolve_order
+
+    if angabe:
+        pfad = Path(angabe)
+        if not pfad.exists():
+            raise SlideshowError(f"Reihenfolgedatei fehlt: {pfad}")
+    else:
+        pfad = project.root / "order.yaml"
+        if not pfad.exists():
+            return (None, [], None)
+
+    olist, zeilen = load_order(pfad)
+    ids, meldungen = resolve_order(manifest, olist, quelle=str(pfad), zeilen=zeilen)
+    gruppen = len([g for g in olist.blocks if g.items])
+    console().print(f"Reihenfolge: {pfad}  ({len(ids)} von {len(manifest.media)} "
+                    f"Medien" + (f", {gruppen} Gruppen" if olist.groups else "") + ")")
+    return (ids, meldungen, olist)
 
 
 def _print_coverage(cov, defaults, plan) -> None:
@@ -740,7 +930,7 @@ def cmd_selftest(args, project: Project) -> int:
 _COMMANDS = {
     "doctor": cmd_doctor, "probe": cmd_probe, "audio": cmd_audio,
     "preprocess": cmd_preprocess, "beats": cmd_beats, "chapters": cmd_chapters,
-    "build": cmd_build,
+    "order": cmd_order, "build": cmd_build,
     "render": cmd_render, "export-mlt": cmd_export_mlt, "selftest": cmd_selftest,
 }
 
