@@ -36,7 +36,8 @@ import datetime as _dt
 import re
 from pathlib import Path
 
-from .chapters import JUMP_KM, day_label, distance_km, first_day
+from .chapters import (JUMP_KM, GruppenAnker, day_label, distance_km,
+                       first_day)
 from .errors import SchemaError
 from .models import Chapter, Manifest, MediaItem, OrderList
 from .probe import chronological, effective_capture_time
@@ -473,6 +474,58 @@ def is_chronological(manifest: Manifest, ids: list[str]) -> bool:
     zeiten = [t for t in (effective_capture_time(by_id[i], offsets)
                           for i in ids if i in by_id) if t is not None]
     return all(a <= b for a, b in zip(zeiten, zeiten[1:]))
+
+
+def group_anchors(olist: OrderList, manifest: Manifest,
+                  ids: list[str] | None = None) -> list[GruppenAnker]:
+    """Beschreibt jeden Block als Kapitelkandidaten — die Vorlage fuer
+    ``slideshow chapters --from-groups``.
+
+    Die Gegenrichtung zu :func:`anchor_chapters`: dort wird ein ``group:``
+    aufgeloest, hier wird eines *vorgeschlagen*. Beides steht in diesem Modul,
+    weil beides von der Kopplung der zwei Dateien weiss.
+
+    Gerechnet wird auf den Bloecken, nicht auf der aufgeloesten Folge: die
+    Blockgrenze ist die Kapitelgrenze, und sie steht auch dann fest, wenn
+    innerhalb des Blocks noch umsortiert wird. Der zeitliche Umfang dagegen
+    kommt aus den Aufnahmezeiten und ist deshalb gegen ein Vorziehen
+    unempfindlich — ``min``/``max`` statt erstem und letztem Eintrag.
+
+    ``ids`` ist die aufgeloeste Folge; fehlt ein Block darin vollstaendig
+    (``rest: drop`` hat ihn geleert), gaebe es fuer seine Folie keinen Platz und
+    :func:`anchor_chapters` braeche spaeter ab — er wird hier weggelassen.
+    """
+    by_id = {m.id: m for m in manifest.media}
+    offsets = manifest.clock_offsets
+    tag_eins = first_day(chronological(manifest), offsets)
+    ueberlebt = set(ids) if ids is not None else None
+
+    anker: list[GruppenAnker] = []
+    for gruppe in olist.blocks:
+        # Die flache Form ``order:`` ergibt einen namenlosen Block. Ein
+        # ``group: ""`` waere kein Anker, sondern ein Tippfehler mit Wirkung.
+        if not gruppe.name:
+            continue
+        items = [i for i in gruppe.items
+                 if ueberlebt is None or i in ueberlebt]
+        if not items:
+            continue
+        zeiten = sorted(t for t in (effective_capture_time(by_id[i], offsets)
+                                    for i in items if i in by_id) if t is not None)
+        tage = {_dt.datetime.fromtimestamp(t).date() for t in zeiten}
+        if not zeiten:
+            # Kein Zeitstempel im ganzen Block: ``subtitle: auto`` haette nichts
+            # zu nehmen und liefe in die Warnung aus ``insert_titles``.
+            spanne, mehrtaegig = ("ohne Aufnahmezeitpunkt", True)
+        elif len(tage) == 1:
+            spanne, mehrtaegig = (day_label(zeiten[0], tag_eins), False)
+        else:
+            spanne = (f"{day_label(zeiten[0], tag_eins)} bis "
+                      f"{day_label(zeiten[-1], tag_eins)}")
+            mehrtaegig = True
+        anker.append(GruppenAnker(name=gruppe.name, anzahl=len(items),
+                                  spanne=spanne, mehrtaegig=mehrtaegig))
+    return anker
 
 
 def anchor_chapters(chapters: list[Chapter], olist: OrderList | None,

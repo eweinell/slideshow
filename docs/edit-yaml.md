@@ -535,6 +535,8 @@ und überlebt jedes Umsortieren *innerhalb* des Blocks. Hat `rest: drop` das
 erste Bild der Gruppe weggenommen, rückt die Folie vor das erste noch
 vorhandene. Ein `group:` ohne `order.yaml`, eine unbekannte und eine leer
 geräumte Gruppe sind jeweils ein Fehler mit Nennung des Kapitels.
+`slideshow chapters --from-groups` schreibt diese Einträge fertig hin — einen je
+Block, Überschrift leer.
 
 #### Medien-IDs
 
@@ -601,6 +603,7 @@ folgende ist, entfällt die Fokusblende: es gibt dann nichts scharf aufzulösen.
 slideshow chapters                 # -> chapters.yaml mit leeren Überschriften
 slideshow chapters --min-jump 20   # Ortssprung-Schwelle in km (Default 30)
 slideshow chapters --min-gap 12    # Zeitlücke in Stunden (Default 20)
+slideshow chapters --from-groups   # ein Eintrag je Block aus order.yaml
 ```
 
 Zwei Signale, beide aus dem Manifest:
@@ -622,6 +625,15 @@ drin, schwächere Kandidaten darunter auskommentiert samt Begründung (`# 24 h
 Pause, aber nur 0 km, gleicher Ort`). Ein Handgriff macht daraus einen Eintrag.
 Eine vorhandene `chapters.yaml` wird **nicht** überschrieben — sie enthält
 Handarbeit; dafür gibt es `--force`, und `--dry-run` zeigt den Vorschlag nur an.
+
+**`--from-groups` sucht nicht, sondern übernimmt.** Wer die Abschnitte beim
+Sortieren schon gezogen hat, bekommt einen Eintrag je Block aus `order.yaml` mit
+`group:` als Anker — die beiden Schwellen oben sind dann gegenstandslos und
+werden zurückgewiesen statt ignoriert. Vorentschieden wird dabei nur, was im
+Material steht: ein Block aus einem einzigen Tag bekommt `subtitle: auto`, einer
+über mehrere `subtitle: null`. Der erste Block steht auskommentiert, weil er
+sonst mit dem Auftakt (`at: 0`) an derselben Stelle säße. Die Überschriften
+bleiben auch hier leer.
 
 `build` prüft im Nachgang noch, **wo** ein Kapitel auf der Timeline landet: fällt
 die Zäsur knapp neben eine Pause zwischen zwei Tracks, schlägt der Bericht vor,
@@ -767,12 +779,12 @@ irreführend. `build` misst deshalb die Monotonie der Aufnahmezeiten und meldet
 den Fall je Kapitel — wer nur zwei Bilder tauscht, bekommt keine Warnung über
 etwas, das er nicht getan hat.
 
-Aus demselben Grund taugt `slideshow chapters` bei manueller Sortierung nur
-noch bedingt: es sucht Zeitlücken zwischen *Nachbarn*, und die sind dann
-thematisch benachbart, nicht zeitlich. Die Reihenfolge zuerst festlegen, die
-Kapitel danach — und dort `group:` statt `before:` als Anker nehmen. Ist die
-Folge nicht chronologisch, schreibt `slideshow chapters` diesen Vorbehalt in
-den Kopf der erzeugten Datei.
+Aus demselben Grund taugt die Zeitlücken-Suche bei manueller Sortierung nur
+noch bedingt: sie misst zwischen *Nachbarn*, und die sind dann thematisch
+benachbart, nicht zeitlich. Die Reihenfolge zuerst festlegen, die Kapitel
+danach — und dann `slideshow chapters --from-groups` nehmen, das die Blockgrenzen
+übernimmt, statt neue zu raten. Wer die Datei doch ohne den Schalter erzeugt und
+nicht chronologisch sortiert hat, findet diesen Vorbehalt in ihrem Kopf.
 
 ---
 

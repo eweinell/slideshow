@@ -227,28 +227,7 @@ def dump_chapters_yaml(vorschlaege: list[Vorschlag], *, hinweis: str = "",
     zeilen += ["", "chapters:"]
 
     if auftakt:
-        # `bg: auto` auch hier, obwohl der Auftakt nichts *ankuendigt*: das
-        # naechste Bild gibt es sehr wohl, es ist das erste des Films. Der Titel
-        # steht dann darueber, unscharf und abgedunkelt, und die Blende danach
-        # loest ihn in genau dieses Bild scharf auf — der uebliche Filmanfang.
-        # Eine Farbflaeche bleibt die ruhigere Alternative und steht als
-        # Handgriff daneben.
-        #
-        # Ohne `beats:`. Ein Film faengt haeufig mit einer free-Region an — die
-        # ersten Sekunden eines Stuecks lassen sich selten rastern —, und dort
-        # bliebe die Angabe wirkungslos. Die Standzeit kommt aus
-        # `defaults.title`, und wer sie anders will, nimmt `dur:` in Sekunden.
-        welches = f" — hier ist das {auftakt_bild}" if auftakt_bild else ""
-        zeilen += [
-            "  # Auftakt vor allem Material. `bg: auto` nimmt das erste Bild als",
-            f"  # unscharfen Grund; die Blende danach loest es scharf auf{welches}.",
-            "  # Passt es nicht, ein anderes ueber seine Medien-ID setzen",
-            '  # (`bg: img_...`) oder ruhig anfangen: `bg: "#1b2a3a"`.',
-            "  # Ohne Kamerafahrt, dafuer besser lesbar: `motion: none`.",
-            "  # Laenger stehen lassen: `dur: 6` (Sekunden, gilt ueberall) oder",
-            "  # `beats: 16` (nur in einer Beat-Region wirksam).",
-            '  - {at: 0, title: "", subtitle: "", bg: auto}',
-        ]
+        zeilen += _auftakt_zeilen(auftakt_bild)
 
     stark = [v for v in vorschlaege if v.staerke == "stark"]
     schwach = [v for v in vorschlaege if v.staerke == "schwach"]
@@ -276,4 +255,111 @@ def dump_chapters_yaml(vorschlaege: list[Vorschlag], *, hinweis: str = "",
                 f"  # {v.grund} · {v.subtitle}",
                 f'  # - {{before: {v.before}, title: "", subtitle: auto}}',
             ]
+    return "\n".join(zeilen) + "\n"
+
+
+def _auftakt_zeilen(auftakt_bild: str = "") -> list[str]:
+    """Der Titel vor allem Material — in beiden erzeugten Dateien derselbe.
+
+    ``bg: auto`` auch hier, obwohl der Auftakt nichts *ankuendigt*: das naechste
+    Bild gibt es sehr wohl, es ist das erste des Films. Der Titel steht dann
+    darueber, unscharf und abgedunkelt, und die Blende danach loest ihn in genau
+    dieses Bild scharf auf — der uebliche Filmanfang. Eine Farbflaeche bleibt die
+    ruhigere Alternative und steht als Handgriff daneben.
+
+    Ohne ``beats:``. Ein Film faengt haeufig mit einer free-Region an — die ersten
+    Sekunden eines Stuecks lassen sich selten rastern —, und dort bliebe die
+    Angabe wirkungslos. Die Standzeit kommt aus ``defaults.title``, und wer sie
+    anders will, nimmt ``dur:`` in Sekunden.
+    """
+    welches = f" — hier ist das {auftakt_bild}" if auftakt_bild else ""
+    return [
+        "  # Auftakt vor allem Material. `bg: auto` nimmt das erste Bild als",
+        f"  # unscharfen Grund; die Blende danach loest es scharf auf{welches}.",
+        "  # Passt es nicht, ein anderes ueber seine Medien-ID setzen",
+        '  # (`bg: img_...`) oder ruhig anfangen: `bg: "#1b2a3a"`.',
+        "  # Ohne Kamerafahrt, dafuer besser lesbar: `motion: none`.",
+        "  # Laenger stehen lassen: `dur: 6` (Sekunden, gilt ueberall) oder",
+        "  # `beats: 16` (nur in einer Beat-Region wirksam).",
+        '  - {at: 0, title: "", subtitle: "", bg: auto}',
+    ]
+
+
+# --------------------------------------------------------------------------
+# Ein Kapitel je Block aus order.yaml (`slideshow chapters --from-groups`)
+#
+# Der Weg fuer den Film, dessen Kapitel *nicht* aus dem Material fallen,
+# sondern beim Sortieren von Hand gezogen wurden: ein Kapitel je Reiseabschnitt
+# ueber mehrere Tage, innen chronologisch. Dort taugt ``suggest`` nicht — es
+# rechnet Zeitluecken zwischen *zeitlichen* Nachbarn, im Film stehen aber
+# thematische. Die Grenzen sind hier keine Vermutung mehr: sie stehen schon in
+# ``order.yaml``, und was fehlt, ist nur die Ueberschrift.
+# --------------------------------------------------------------------------
+
+@dataclass
+class GruppenAnker:
+    """Ein Block aus ``order.yaml``, beschrieben als Kapitelkandidat."""
+
+    #: Name des Blocks — er wird zum ``group:``-Anker, nicht zur Ueberschrift.
+    name: str
+    #: Wie viele Medien noch drinstehen (nach ``rest: drop``).
+    anzahl: int
+    #: Zeitlicher Umfang als Text, fuer den Kommentar ueber der Zeile.
+    spanne: str
+    #: Umfasst der Block mehr als einen Kalendertag? Dann ist ``subtitle: auto``
+    #: falsch — es naehme den Tag des ersten Bildes fuer fuenf Reisetage.
+    mehrtaegig: bool
+
+
+def dump_group_chapters_yaml(anker: list[GruppenAnker], *, auftakt: bool = True,
+                             auftakt_bild: str = "") -> str:
+    """Schreibt ``chapters.yaml`` mit einem Eintrag je Block.
+
+    ``subtitle:`` wird hier **vorentschieden** statt gemeldet: ueber einem Block
+    aus einem einzigen Tag stimmt ``auto``, ueber fuenf Reisetagen nie. Der
+    Unterschied steht im Material und nicht im Ermessen — anders als die
+    Ueberschrift, die leer bleibt.
+    """
+    zeilen = [
+        "# chapters.yaml — Kapitel der Reise. Wird von `slideshow build` eingelesen.",
+        "#",
+        "# Erzeugt von `slideshow chapters --from-groups`: ein Eintrag je Block aus",
+        "# order.yaml. Die Grenzen sind damit die, die beim Sortieren gezogen wurden —",
+        "# nicht geraten. Die Ueberschriften nicht: einen Ortsnamen kann das Werkzeug",
+        "# nicht erfinden. Jede leere `title:` bitte ausfuellen — `build` bricht sonst",
+        "# mit Zeilennummer ab. Ein Block, der keine Folie bekommen soll, wird hier",
+        "# ersatzlos geloescht; in order.yaml bleibt er stehen.",
+        "#",
+        "# `group:` zeigt auf das erste Medium des Blocks und ueberlebt jedes weitere",
+        "# Umsortieren *innerhalb* des Blocks — ein `before: img_042` zeigte nach dem",
+        "# naechsten Handgriff mitten hinein.",
+        "",
+        "chapters:",
+    ]
+    if auftakt:
+        zeilen += _auftakt_zeilen(auftakt_bild)
+    if not anker:
+        return "\n".join(zeilen + ["  # Keine benannten Bloecke in order.yaml."]) + "\n"
+
+    for nr, a in enumerate(anker):
+        zeilen.append("")
+        zeilen.append(f"  # {a.anzahl} Medien · {a.spanne}")
+        if a.mehrtaegig:
+            zeilen.append("  # mehr als ein Tag — `subtitle: auto` naehme davon nur "
+                          "den ersten")
+        untertitel = "auto" if not a.mehrtaegig else "null"
+        eintrag = f'  - {{group: {a.name}, title: "", subtitle: {untertitel}}}'
+        if nr == 0 and auftakt:
+            # Beide saessen vor demselben Bild, und zwei Titelfolien
+            # hintereinander sieht man erst im fertigen Film. Auskommentiert
+            # statt weggelassen: welche der beiden gilt, ist eine Entscheidung
+            # und keine Rechnung.
+            zeilen += [
+                "  # Faellt mit dem Auftakt oben zusammen — beide zugleich ergaeben",
+                "  # zwei Folien hintereinander. Wer den Abschnitt lieber benennt als",
+                "  # den Film, loescht den Auftakt und entfernt hier das `# `.",
+                "  # " + eintrag.strip(),
+            ]
+        else:
+            zeilen.append(eintrag)
     return "\n".join(zeilen) + "\n"

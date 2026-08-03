@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import pytest
 
-from slideshow.chapters import (GAP_DAY_HOURS, coverage_note, distance_km,
-                                dump_chapters_yaml, first_image_id, suggest)
+from slideshow.chapters import (GAP_DAY_HOURS, GruppenAnker, coverage_note,
+                                distance_km, dump_chapters_yaml,
+                                dump_group_chapters_yaml, first_image_id,
+                                suggest)
 from slideshow.models import ChapterList, Manifest, MediaItem
 
 #: Echte Koordinaten — die Abstaende sollen stimmen.
@@ -205,3 +207,70 @@ def test_ohne_auftakt_faellt_der_erste_eintrag_weg():
     import yaml
     text = dump_chapters_yaml(suggest(_reise()), auftakt=False)
     assert all("at" not in e for e in yaml.safe_load(text)["chapters"])
+
+
+# --------------------------------------------------------------------------
+# Ein Kapitel je Block — `slideshow chapters --from-groups`
+#
+# Hier steht nur die *Ausgabe* auf dem Pruefstand; woher die Bloecke kommen,
+# steht in tests/test_order.py.
+# --------------------------------------------------------------------------
+
+def _anker() -> list[GruppenAnker]:
+    return [
+        GruppenAnker(name="ankunft", anzahl=6, spanne="Tag 1 · 20. Juli",
+                     mehrtaegig=False),
+        GruppenAnker(name="am-wasser", anzahl=12,
+                     spanne="Tag 2 · 21. Juli bis Tag 5 · 24. Juli", mehrtaegig=True),
+    ]
+
+
+def test_je_block_ein_eintrag_mit_leerer_ueberschrift():
+    import yaml
+    daten = yaml.safe_load(dump_group_chapters_yaml(_anker(), auftakt=False))
+    assert [e["group"] for e in daten["chapters"]] == ["ankunft", "am-wasser"]
+    assert all(e["title"] == "" for e in daten["chapters"])
+
+
+def test_ein_mehrtaegiger_block_bekommt_keinen_auto_untertitel():
+    """`subtitle: auto` naehme den Tag des ersten Bildes fuer vier Reisetage.
+
+    Anders als die Ueberschrift ist das keine Ermessensfrage — der Umfang steht
+    im Material —, deshalb wird hier entschieden statt gemeldet.
+    """
+    import yaml
+    eintraege = yaml.safe_load(dump_group_chapters_yaml(_anker(),
+                                                        auftakt=False))["chapters"]
+    assert eintraege[0]["subtitle"] == "auto"
+    assert eintraege[1]["subtitle"] is None
+
+
+def test_der_erste_block_kollidiert_mit_dem_auftakt_und_steht_auskommentiert():
+    """Beide saessen vor demselben Bild; zwei Titelfolien hintereinander sieht
+    man sonst erst im fertigen Film."""
+    import yaml
+    text = dump_group_chapters_yaml(_anker(), auftakt_bild="img_000")
+    assert "# - {group: ankunft" in text
+    eintraege = yaml.safe_load(text)["chapters"]
+    assert eintraege[0]["at"] == 0
+    assert [e["group"] for e in eintraege if "group" in e] == ["am-wasser"]
+
+
+def test_ohne_auftakt_steht_auch_der_erste_block_gesetzt_da():
+    import yaml
+    eintraege = yaml.safe_load(dump_group_chapters_yaml(
+        _anker(), auftakt=False))["chapters"]
+    assert [e["group"] for e in eintraege] == ["ankunft", "am-wasser"]
+
+
+def test_der_kopf_erklaert_den_gruppenanker():
+    text = dump_group_chapters_yaml(_anker())
+    assert "--from-groups" in text
+    assert "Umsortieren" in text and "`group:`" in text
+
+
+def test_ohne_bloecke_bleibt_die_datei_ladbar():
+    import yaml
+    text = dump_group_chapters_yaml([], auftakt=False)
+    assert "Keine benannten Bloecke" in text
+    assert yaml.safe_load(text)["chapters"] is None

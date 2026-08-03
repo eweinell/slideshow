@@ -105,6 +105,10 @@ def build_parser() -> argparse.ArgumentParser:
     ch.add_argument("--min-jump", type=float, default=None, metavar="KM",
                     help="Ortssprung in km, ab dem ein Kapitel vorgeschlagen wird "
                          "(Default 30)")
+    ch.add_argument("--from-groups", action="store_true",
+                    help="ein Kapitel je Block aus order.yaml statt aus "
+                         "Zeitluecken — der Weg, wenn die Abschnitte beim "
+                         "Sortieren von Hand gezogen wurden")
     ch.add_argument("--no-auftakt", action="store_true",
                     help="keinen Titel vor dem Material vorschlagen")
     ch.add_argument("--force", action="store_true",
@@ -569,13 +573,41 @@ def cmd_build(args, project: Project) -> int:
 
 
 def cmd_chapters(args, project: Project) -> int:
+    from .models import Manifest
+
+    manifest = Manifest.load(Path(args.manifest) if args.manifest else project.manifest)
+    text, bericht, signal = (_chapters_aus_gruppen(args, project, manifest)
+                             if args.from_groups
+                             else _chapters_aus_luecken(args, project, manifest))
+
+    out = Path(args.output) if args.output else (project.root / "chapters.yaml")
+    con = console()
+    if args.dry_run:
+        con.print(text)
+        return 0
+    # Die Datei ist Handarbeit, sobald sie einmal ausgefuellt wurde. Sie
+    # kommentarlos zu ueberschreiben hiesse, zwoelf Ortsnamen zu loeschen.
+    if out.exists() and not args.force:
+        raise SlideshowError(
+            f"{out} gibt es bereits. Die Datei enthaelt von Hand eingetragene "
+            f"Ueberschriften — `--force` ueberschreibt sie, `--dry-run` zeigt den "
+            f"Vorschlag nur an.")
+    out.write_text(text, encoding="utf-8")
+
+    con.print(f"Kapitelvorschlaege: {out}  ({bericht})")
+    con.print(f"[dim]{signal}[/dim]")
+    con.print("[yellow]Die Ueberschriften sind leer und muessen ausgefuellt "
+              "werden.[/yellow] Danach: `slideshow build`")
+    return 0
+
+
+def _chapters_aus_luecken(args, project: Project, manifest) -> tuple[str, str, str]:
+    """Grenzen aus Zeitluecken und Ortsspruengen — der Normalfall."""
     from .chapters import (GAP_PLACE_HOURS, JUMP_KM, ORDER_VORBEHALT,
                            coverage_note, dump_chapters_yaml, first_image_id,
                            suggest)
-    from .models import Manifest
     from .order import is_chronological
 
-    manifest = Manifest.load(Path(args.manifest) if args.manifest else project.manifest)
     vorschlaege = suggest(manifest,
                           min_gap_hours=(args.min_gap if args.min_gap is not None
                                          else GAP_PLACE_HOURS),
@@ -601,28 +633,58 @@ def cmd_chapters(args, project: Project) -> int:
                               auftakt_bild=first_image_id(manifest, reihenfolge),
                               vorbehalt=vorbehalt)
 
-    out = Path(args.output) if args.output else (project.root / "chapters.yaml")
-    con = console()
-    if args.dry_run:
-        con.print(text)
-        return 0
-    # Die Datei ist Handarbeit, sobald sie einmal ausgefuellt wurde. Sie
-    # kommentarlos zu ueberschreiben hiesse, zwoelf Ortsnamen zu loeschen.
-    if out.exists() and not args.force:
-        raise SlideshowError(
-            f"{out} gibt es bereits. Die Datei enthaelt von Hand eingetragene "
-            f"Ueberschriften — `--force` ueberschreibt sie, `--dry-run` zeigt den "
-            f"Vorschlag nur an.")
-    out.write_text(text, encoding="utf-8")
-
     stark = sum(1 for v in vorschlaege if v.staerke == "stark")
     schwach = len(vorschlaege) - stark
-    con.print(f"Kapitelvorschlaege: {out}  ({stark} Grenzen"
-              + (f", {schwach} schwaechere als Kommentar" if schwach else "") + ")")
-    con.print(f"[dim]{coverage_note(manifest)}[/dim]")
-    con.print("[yellow]Die Ueberschriften sind leer und muessen ausgefuellt "
-              "werden.[/yellow] Danach: `slideshow build`")
-    return 0
+    bericht = (f"{stark} Grenzen"
+               + (f", {schwach} schwaechere als Kommentar" if schwach else ""))
+    return (text, bericht, coverage_note(manifest))
+
+
+def _chapters_aus_gruppen(args, project: Project, manifest) -> tuple[str, str, str]:
+    """Ein Kapitel je Block aus ``order.yaml``.
+
+    Fuer den Film, dessen Abschnitte beim Sortieren gezogen wurden — ein Kapitel
+    je Reiseabschnitt ueber mehrere Tage. Die Zeitluecken-Heuristik hat dort
+    nichts beizutragen: sie misst zwischen *zeitlichen* Nachbarn, im Film stehen
+    aber thematische, und ihre Vorschlaege wirft man hinterher weg.
+
+    Anders als beim Auftakt-Kommentar in :func:`_chapters_aus_luecken` ist ein
+    Fehler in ``order.yaml`` hier kein Schoenheitsfehler, sondern nimmt der Datei
+    den Inhalt — er wird deshalb durchgereicht statt gemeldet.
+    """
+    from .chapters import dump_group_chapters_yaml, first_image_id
+    from .order import group_anchors
+
+    if args.min_gap is not None or args.min_jump is not None:
+        raise SlideshowError(
+            "--from-groups nimmt die Grenzen aus order.yaml; --min-gap und "
+            "--min-jump stellen die Zeitluecken-Erkennung ein und blieben dabei "
+            "wirkungslos. Entweder das eine oder das andere.")
+
+    ids, _notes, olist = _load_order(project, None, manifest)
+    if olist is None:
+        raise SlideshowError(
+            f"--from-groups braucht order.yaml — daraus werden die Kapitel, und in "
+            f"{project.root} liegt keine. Erzeugen: `slideshow order --by place` "
+            f"(ein Block je Ort, meist mehrere Tage) oder `--by day`.")
+    anker = group_anchors(olist, manifest, ids)
+    if not anker:
+        raise SlideshowError(
+            "order.yaml nennt keine benannten Bloecke. Die flache Form "
+            "`order: [...]` kennt keine Gruppen, und ohne Gruppen gibt es nichts "
+            "zu verankern — `slideshow order --by day` erzeugt die gruppierte "
+            "Form. Ohne Gruppen bleibt `slideshow chapters` ohne den Schalter.")
+
+    text = dump_group_chapters_yaml(anker, auftakt=not args.no_auftakt,
+                                    auftakt_bild=first_image_id(manifest, ids))
+    mehrtaegig = sum(1 for a in anker if a.mehrtaegig)
+    bericht = (f"{len(anker)} Bloecke aus order.yaml"
+               + (f", davon {mehrtaegig} ueber mehrere Tage" if mehrtaegig else ""))
+    signal = ("Anker `group:` — sie ueberleben jedes weitere Umsortieren "
+              "innerhalb der Bloecke"
+              + (f"; {mehrtaegig} Kapitel bekommen `subtitle: null`, weil `auto` "
+                 f"dort nur den ersten Tag naehme" if mehrtaegig else ""))
+    return (text, bericht, signal)
 
 
 def cmd_order(args, project: Project) -> int:

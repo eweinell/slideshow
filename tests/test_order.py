@@ -18,9 +18,9 @@ from slideshow.errors import SchemaError
 from slideshow.models import (BeatMap, Chapter, Defaults, ImageInfo, Manifest,
                               MediaItem, OrderList, Region, StillSegment,
                               dump_edit_yaml)
-from slideshow.order import (anchor_chapters, dump_order_yaml, group_media,
-                             is_chronological, item_lines, load_order,
-                             resolve_order, update_order_text)
+from slideshow.order import (anchor_chapters, dump_order_yaml, group_anchors,
+                             group_media, is_chronological, item_lines,
+                             load_order, resolve_order, update_order_text)
 
 FPS = 60.0
 T0 = 1_753_000_000                   # 20. Juli 2025, lokale Zeit
@@ -582,6 +582,130 @@ def test_monotonie_wird_gemessen_nicht_vermutet():
     # Warnung darueber haengt deshalb zusaetzlich am Tagesumfang des Blocks.
     assert not is_chronological(manifest, ["img_001", "img_000", "img_002",
                                            "img_003", "img_004"])
+
+
+def test_die_gruppen_werden_zu_kapitelkandidaten():
+    """`--from-groups`: die Grenzen sind hier keine Vermutung mehr, sie stehen
+    schon in order.yaml. Was fehlt, ist die Ueberschrift."""
+    olist = _olist("groups:\n  - {name: ankunft, items: [img_000, img_001]}\n"
+                   "  - {name: am-wasser, items: [img_002, img_003]}\n")
+    anker = group_anchors(olist, _manifest(n=4), None)
+    assert [a.name for a in anker] == ["ankunft", "am-wasser"]
+    assert [a.anzahl for a in anker] == [2, 2]
+
+
+def test_der_umfang_zaehlt_kalendertage():
+    """Ueber einem Block aus mehreren Tagen taugt `subtitle: auto` nicht — das
+    entscheidet der Tagesumfang, nicht die Zahl der Bilder."""
+    manifest = _manifest(n=6, stunden=12.0)     # jedes zweite Bild ein neuer Tag
+    olist = _olist("groups:\n  - {name: eintaegig, items: [img_000, img_001]}\n"
+                   "  - {name: mehrtaegig, items: [img_002, img_003, img_004]}\n")
+    eintaegig, mehrtaegig = group_anchors(olist, manifest, None)
+    assert not eintaegig.mehrtaegig and "bis" not in eintaegig.spanne
+    assert mehrtaegig.mehrtaegig and " bis " in mehrtaegig.spanne
+
+
+def test_ein_vorgezogenes_bild_aendert_den_umfang_nicht():
+    """Der eigentliche Fall: innerhalb des Blocks bleibt es chronologisch, ein
+    Bild wird nach vorn gezogen. Der Umfang kommt aus den Aufnahmezeiten und
+    nicht aus dem ersten und letzten Eintrag — sonst stuende ueber dem Block
+    eine ruecklaufende Spanne."""
+    manifest = _manifest(n=6, stunden=12.0)
+    geordnet = _olist("groups:\n  - {name: block, items: [img_000, img_001, img_004]}\n")
+    gezogen = _olist("groups:\n  - {name: block, items: [img_004, img_000, img_001]}\n")
+    assert (group_anchors(geordnet, manifest, None)[0].spanne
+            == group_anchors(gezogen, manifest, None)[0].spanne)
+
+
+def test_ein_leergeraeumter_block_wird_nicht_vorgeschlagen():
+    """`rest: drop` kann einen Block geleert haben — ein Kapitel darauf braeche
+    spaeter in `anchor_chapters` ab."""
+    olist = _olist("groups:\n  - {name: bleibt, items: [img_000]}\n"
+                   "  - {name: weg, items: [img_001]}\n")
+    anker = group_anchors(olist, _manifest(n=4), ["img_000"])
+    assert [a.name for a in anker] == ["bleibt"]
+
+
+def test_die_flache_form_liefert_keine_anker():
+    """Ein `group: ""` waere kein Anker, sondern ein Tippfehler mit Wirkung."""
+    assert group_anchors(_olist("order: [img_000, img_001]\n"), _manifest(n=2),
+                         None) == []
+
+
+def test_material_ohne_zeitstempel_bekommt_keinen_auto_untertitel():
+    manifest = _manifest(n=2)
+    for m in manifest.media:
+        m.capture_time, m.time_source = (None, "none")
+    anker = group_anchors(_olist("groups:\n  - {name: rest, items: [img_000]}\n"),
+                          manifest, None)
+    assert anker[0].mehrtaegig and "ohne Aufnahmezeitpunkt" in anker[0].spanne
+
+
+def test_from_groups_geht_von_der_gruppe_bis_zur_folie(tmp_path):
+    """Der ganze Weg: sortieren, Kapitel je Block erzeugen, ausfuellen, bauen.
+
+    Am Ende muss die Folie vor dem *ersten* Medium ihres Blocks stehen — auch
+    wenn das ein nachtraeglich nach vorn gezogenes ist.
+    """
+    from slideshow.chapters import dump_group_chapters_yaml
+    from slideshow.models import ChapterList
+
+    manifest = _manifest(n=6)
+    olist = _olist("groups:\n"
+                   "  - {name: ankunft, items: [img_000, img_001, img_002]}\n"
+                   "  - {name: abende, items: [img_004, img_003, img_005]}\n")
+    ids = [i for g in olist.blocks for i in g.items]
+
+    p = tmp_path / "chapters.yaml"
+    text = dump_group_chapters_yaml(group_anchors(olist, manifest, ids), auftakt=False)
+    p.write_text(text.replace('title: ""', 'title: Abende'), encoding="utf-8")
+
+    kapitel = anchor_chapters(ChapterList.load(p).chapters, olist, ids)
+    assert [k.before for k in kapitel] == ["img_000", "img_004"]
+
+    edit, _plan, _cov = _bauen(manifest, order=ids, chapters=kapitel)
+    titel = [i for i, s in enumerate(edit.segments) if s.type == "title"]
+    davor = [i for i, s in enumerate(edit.segments)
+             if isinstance(s, StillSegment) and s.src.endswith("img_004.jpg")]
+    assert len(titel) == 2
+    assert titel[1] < davor[0]
+
+
+def test_from_groups_ohne_order_yaml_sagt_was_fehlt(tmp_path, capsys):
+    from slideshow.cli import main
+
+    _manifest(n=3).save(tmp_path / "manifest.json")
+    assert main(["--project", str(tmp_path), "chapters", "--from-groups"]) != 0
+    assert "order.yaml" in capsys.readouterr().out
+
+
+def test_from_groups_schreibt_ein_kapitel_je_block(tmp_path):
+    from slideshow.cli import main
+
+    _manifest(n=4).save(tmp_path / "manifest.json")
+    (tmp_path / "order.yaml").write_text(
+        "groups:\n  - {name: ankunft, items: [img_000, img_001]}\n"
+        "  - {name: abende, items: [img_002, img_003]}\n", encoding="utf-8")
+    assert main(["--project", str(tmp_path), "chapters", "--from-groups"]) == 0
+
+    daten = yaml.safe_load((tmp_path / "chapters.yaml").read_text(encoding="utf-8"))
+    gesetzt = [e["group"] for e in daten["chapters"] if "group" in e]
+    # Der erste Block faellt mit dem Auftakt zusammen und steht auskommentiert.
+    assert gesetzt == ["abende"]
+
+
+def test_from_groups_und_die_schwellen_schliessen_sich_aus(tmp_path, capsys):
+    """`--min-gap` stellt die Zeitluecken-Erkennung ein, die hier gar nicht
+    laeuft — stillschweigend wirkungslos waere schlimmer als ein Abbruch."""
+    from slideshow.cli import main
+
+    _manifest(n=3).save(tmp_path / "manifest.json")
+    (tmp_path / "order.yaml").write_text(
+        "groups:\n  - {name: alle, items: [img_000, img_001, img_002]}\n",
+        encoding="utf-8")
+    assert main(["--project", str(tmp_path), "chapters", "--from-groups",
+                 "--min-gap", "12"]) != 0
+    assert "wirkungslos" in capsys.readouterr().out
 
 
 def test_der_vorbehalt_steht_im_kopf_der_erzeugten_datei():

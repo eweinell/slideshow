@@ -12,11 +12,12 @@ dabei herauskommt** — die Bedeutung der einzelnen Schlüssel steht in
 | Einmal sehen, ob das Material trägt — schnell, ohne Feinschliff | [1. Rohschnitt](#1-rohschnitt) |
 | Die Reise von vorn nach hinten, mit Kapiteln wie „Malmö" | [2. Die Reise chronologisch](#2-die-reise-chronologisch) |
 | Erst alle Küstenbilder, dann die Abende — thematisch statt nach Uhrzeit | [3. Thematisch erzählen](#3-thematisch-erzählen) |
-| 90 Fotos, aber die Musik trägt nur 50 — auswählen statt alles zeigen | [4. Auswählen statt kürzen](#4-auswählen-statt-kürzen) |
-| Nachträglich sind Fotos dazugekommen | [5. Nachschub einpflegen](#5-nachschub-einpflegen) |
-| Kein Ton, nur Bilder | [6. Stummer Film](#6-stummer-film) |
-| Ein einzelnes Bild soll länger stehen oder stillstehen | [7. Feinschliff ohne Neubau](#7-feinschliff-ohne-neubau) |
-| Den Schnitt in Kdenlive fertig machen | [8. Weiter in Kdenlive](#8-weiter-in-kdenlive) |
+| Kapitel über je einige Tage, innen chronologisch mit ein paar Ausreißern | [4. Kapitelweise erzählen](#4-kapitelweise-erzählen) |
+| 90 Fotos, aber die Musik trägt nur 50 — auswählen statt alles zeigen | [5. Auswählen statt kürzen](#5-auswählen-statt-kürzen) |
+| Nachträglich sind Fotos dazugekommen | [6. Nachschub einpflegen](#6-nachschub-einpflegen) |
+| Kein Ton, nur Bilder | [7. Stummer Film](#7-stummer-film) |
+| Ein einzelnes Bild soll länger stehen oder stillstehen | [8. Feinschliff ohne Neubau](#8-feinschliff-ohne-neubau) |
+| Den Schnitt in Kdenlive fertig machen | [9. Weiter in Kdenlive](#9-weiter-in-kdenlive) |
 
 **Erst Reihenfolge, dann Kapitel** — wenn du beides brauchst. Der Grund steht
 bei [Rezept 3](#3-thematisch-erzählen).
@@ -40,7 +41,7 @@ slideshow beats                                 # wo ist der Takt?
 |---|---|---|
 | `doctor` | Prüft die Umgebung und gibt zu jedem Fehlschlag einen kopierbaren Installationsbefehl aus. | einmal, und wenn etwas kaputtgeht |
 | `probe` | Liest Aufnahmezeit, Kamera, GPS, Auflösung und vergibt jedem Foto seine **Medien-ID** — den Namen, unter dem es überall sonst auftaucht. | wenn Material dazukommt |
-| `audio` | Mischt die Tracks zu einer Tonspur. `--gap 6` legt 6 s Stille dazwischen, `--xfade 3` blendet stattdessen über. Optional — ohne Musik siehe [Rezept 6](#6-stummer-film). | wenn sich die Musik ändert |
+| `audio` | Mischt die Tracks zu einer Tonspur. `--gap 6` legt 6 s Stille dazwischen, `--xfade 3` blendet stattdessen über. Optional — ohne Musik siehe [Rezept 7](#7-stummer-film). | wenn sich die Musik ändert |
 | `preprocess` | Normalisiert jedes Foto und schneidet Clips zu. Der langsame Schritt. | wenn Material dazukommt |
 | `beats` | Findet den Takt und schreibt die Regionenkarte. **Diese Datei vorher ansehen** — sie entscheidet, wo geschnitten wird. | wenn sich die Musik ändert |
 
@@ -120,8 +121,9 @@ sie enthält Handarbeit. `slideshow --dry-run chapters` zeigt den Vorschlag nur
 an.
 
 **`subtitle: auto`** setzt die zweite Zeile aus dem Aufnahmedatum („Tag 11 ·
-24. Juli"). Hier stimmt das immer; bei [Rezept 3](#3-thematisch-erzählen) nicht
-mehr.
+24. Juli"). Hier stimmt das immer; sobald von Hand sortiert wird, nicht mehr —
+siehe [Rezept 3](#3-thematisch-erzählen) und
+[Rezept 4](#4-kapitelweise-erzählen).
 
 ---
 
@@ -131,10 +133,10 @@ mehr.
 erst alle Küstenbilder, dann die Abende, dann die Menschen.
 
 ```bash
-slideshow order              # → order.yaml, chronologisch vorbelegt
+slideshow order                    # → order.yaml, chronologisch vorbelegt
 # Zeilen verschieben, Gruppen umbenennen (tag-3 → am-wasser)
-slideshow chapters           # → chapters.yaml
-# Überschriften eintragen, Anker auf `group:` umstellen
+slideshow chapters --from-groups   # → chapters.yaml, ein Eintrag je Gruppe
+# Überschriften eintragen
 slideshow build
 slideshow render
 ```
@@ -145,12 +147,13 @@ Bildern erzeugt `build` von selbst — du verschiebst Zeilen, nicht Indizes.
 **Erst `order`, dann `chapters`.** Die Abhängigkeit läuft nur in eine Richtung,
 und andersherum arbeitest du doppelt:
 
-- `group:` als Kapitelanker setzt voraus, dass es die Gruppen schon gibt.
-- Die Kapitelvorschläge sind aus Zeitlücken zwischen *chronologischen* Nachbarn
-  gerechnet. In einer thematisch sortierten Folge sitzen sie an Stellen, die es
-  dort nicht mehr gibt — du wirfst sie hinterher weg. Ist die Reihenfolge
-  bereits von Hand gesetzt, schreibt `chapters` diesen Vorbehalt in den Kopf der
-  erzeugten Datei.
+- `--from-groups` schreibt einen Eintrag je Gruppe und setzt den Anker `group:`.
+  Beides setzt voraus, dass es die Gruppen schon gibt.
+- Ohne den Schalter kommen die Vorschläge aus Zeitlücken zwischen
+  *chronologischen* Nachbarn. In einer thematisch sortierten Folge sitzen sie an
+  Stellen, die es dort nicht mehr gibt — du wirfst sie hinterher weg. Ist die
+  Reihenfolge bereits von Hand gesetzt, schreibt `chapters` diesen Vorbehalt in
+  den Kopf der erzeugten Datei.
 - Ein `before:`-Anker auf ein Bild, das du beim Sortieren abwählst, bricht den
   Bau ab.
 
@@ -169,8 +172,9 @@ groups:
 alles in einen Block.
 
 **Gruppennamen erscheinen nicht im Film.** Sie sind die Arbeitseinheit beim
-Sortieren, keine Überschrift. Wer an einer Blockgrenze eine Zäsur will, schreibt
-sie in `chapters.yaml`:
+Sortieren, keine Überschrift — den Text einer Folie schreibt `chapters.yaml`.
+Genau das erzeugt `chapters --from-groups`: eine Zeile je Block, Anker gesetzt,
+Überschrift leer.
 
 ```yaml
 chapters:
@@ -181,9 +185,9 @@ Dieser Anker ist der robustere: er überlebt jedes weitere Umsortieren
 *innerhalb* des Blocks, ein `before: img_042` nicht.
 
 **Worauf achten.** `subtitle: auto` nimmt das Datum des folgenden Bildes. Über
-einem Block aus fünf Reisetagen führt das in die Irre — `build` meldet genau
-diesen Fall je Kapitel. Setz die zweite Zeile von Hand oder lass sie mit
-`subtitle: null` weg.
+einem Block aus fünf Reisetagen führt das in die Irre — `--from-groups` setzt
+dort deshalb `subtitle: null`, und `build` meldet den Fall auch dann, wenn die
+Datei von Hand entstanden ist.
 
 Es muss **jedes** Medium in der Datei stehen, sonst bricht der Bau ab und nennt
 die fehlenden. Das ist Absicht: der teuerste Fehler wäre ein Film, dem
@@ -191,7 +195,73 @@ stillschweigend drei Bilder fehlen.
 
 ---
 
-## 4. Auswählen statt kürzen
+## 4. Kapitelweise erzählen
+
+**Wofür.** Der Mischfall, und wahrscheinlich der häufigste: Die Erzählung
+zerfällt in Abschnitte über je einige Tage — von Hand gesetzt, thematisch, nicht
+gefunden. *Innerhalb* eines Abschnitts bleibt es chronologisch, nur ein paar
+Bilder wandern nach vorn, damit man gleich erkennt, wo man ist.
+
+```bash
+slideshow order --by place         # → order.yaml, ein Block je Ort
+# Blöcke zusammenfassen und benennen, einzelne Zeilen nach vorn ziehen
+slideshow chapters --from-groups   # → chapters.yaml, ein Eintrag je Block
+# Überschriften eintragen
+slideshow build
+slideshow render --preview
+```
+
+**Was herauskommt.** Ein Film, dessen Kapitelgrenzen genau dort sitzen, wo du
+beim Sortieren die Blockgrenzen gezogen hast. Innerhalb der Kapitel läuft die
+Uhr weiter, mit deinen Ausreißern.
+
+**`--by place` statt `--by day`.** Ein mehrtägiger Aufenthalt wird damit *ein*
+Block statt drei — die Vorbelegung ist dann schon fast die Gliederung. Ohne GPS
+bleibt `--by day`, und Tagesblöcke fasst man zusammen, indem man die beiden
+Kopfzeilen der Folgetage löscht:
+
+```text
+  - name: schaeren       ← war tag-4, umbenannt
+    items:
+      - img_DSC06401   # Tag 4 · 27. Juli 09:12 · quer
+                       ← hier standen `- name: tag-5` und `items:`
+      - img_DSC06455   # Tag 5 · 28. Juli 08:40 · quer
+```
+
+**Ein Bild nach vorn ziehen** heißt: Zeile hochschieben. Zwei Dinge greifen dann
+ineinander — `group:` zeigt immer auf das *erste* Medium des Blocks, und `bg:
+auto` der Folie nimmt genau dieses Bild als unscharfen Grund. Das Bild, das du
+der Erkennbarkeit wegen vorziehst, wird damit zum Hintergrund seiner eigenen
+Kapitelfolie, und die Blende danach löst es scharf auf.
+
+**Worauf achten.** Was `--from-groups` schreibt, ist eine Vorlage mit drei
+bereits getroffenen Entscheidungen:
+
+| | |
+|---|---|
+| Der erste Block | steht **auskommentiert** — er säße an derselben Stelle wie der Auftakt, und zwei Titelfolien hintereinander fallen erst im fertigen Film auf. Entweder den Auftakt löschen oder diese Zeile. |
+| Blöcke über mehrere Tage | bekommen `subtitle: null`. `auto` nähme davon nur den ersten Tag. |
+| Blöcke aus einem Tag | bekommen `subtitle: auto` — dort stimmt es. |
+
+Der Schalter verträgt sich nicht mit `--min-gap`/`--min-jump`: die stellen die
+Zeitlücken-Erkennung ein, die hier gar nicht läuft. Der Aufruf bricht deshalb
+ab, statt sie stillschweigend zu ignorieren.
+
+`chapters.yaml` hat kein `--update`. Kommt später ein Block dazu, trägst du die
+eine Zeile von Hand nach — oder du löschst die Datei und lässt sie neu
+erzeugen, solange die Überschriften noch nicht drinstehen.
+
+Für `order.yaml` gilt unverändert, was bei [Rezept 3](#3-thematisch-erzählen)
+steht: es muss **jedes** Medium darin stehen, sonst bricht der Bau ab. Wer
+auswählen will, setzt `rest: drop` — [Rezept 5](#5-auswählen-statt-kürzen).
+
+**Umsortieren ist billig.** Die Kamerafahrt hängt an der Kennung des Bildes,
+nicht an seiner Position: ein vorgezogenes Bild behält seine Bewegung, neu
+gerechnet werden nur die angrenzenden Blenden.
+
+---
+
+## 5. Auswählen statt kürzen
 
 **Wofür.** Es ist mehr Material da, als die Musik trägt. Ein Stück von 6:32
 fasst bei acht Beats je Bild rund 50 Fotos — bei 90 muss ausgewählt werden.
@@ -235,7 +305,7 @@ nennt `build` selbst.
 
 ---
 
-## 5. Nachschub einpflegen
+## 6. Nachschub einpflegen
 
 **Wofür.** Die Karte der Zweitkamera ist aufgetaucht. Zwölf Fotos mehr — und
 die Sortierung von gestern soll bleiben.
@@ -268,7 +338,7 @@ Drei Dinge macht `--update` still richtig:
 
 ---
 
-## 6. Stummer Film
+## 7. Stummer Film
 
 **Wofür.** Kein passender Track, oder der Ton kommt später dazu.
 
@@ -295,7 +365,7 @@ unverändert.
 
 ---
 
-## 7. Feinschliff ohne Neubau
+## 8. Feinschliff ohne Neubau
 
 **Wofür.** Der Schnitt steht, aber ein Bild soll länger stehen bleiben, ein
 anderes stillstehen.
@@ -327,7 +397,7 @@ Schlüsselreferenz steht in [`edit-yaml.md`](edit-yaml.md).
 
 ---
 
-## 8. Weiter in Kdenlive
+## 9. Weiter in Kdenlive
 
 **Wofür.** Die Grobstruktur steht, der Rest soll im Schnittprogramm passieren —
 oder die Zeiten sollen dort korrigiert und wieder zurückgeholt werden.
