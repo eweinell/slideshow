@@ -110,22 +110,36 @@ def build_parser() -> argparse.ArgumentParser:
     ch.add_argument("--force", action="store_true",
                     help="vorhandene Datei ueberschreiben")
 
-    od = sub.add_parser("order", help="Reihenfolge zum Sortieren erzeugen -> order.yaml")
-    od.add_argument("-o", "--output", default=None, metavar="order.yaml")
-    od.add_argument("--manifest", default=None)
+    od = sub.add_parser(
+        "order", help="Reihenfolge zum Sortieren erzeugen -> order.yaml",
+        description="Erzeugt order.yaml: die Medien chronologisch vorbelegt, "
+                    "gruppiert und je Zeile mit Tag, Uhrzeit und Format "
+                    "kommentiert. Sortiert wird danach von Hand, indem man "
+                    "Zeilen verschiebt. `slideshow build` liest die Datei von "
+                    "selbst, wenn sie im Projekt liegt.")
+    od.add_argument("-o", "--output", default=None, metavar="order.yaml",
+                    help="Zieldatei (Default: order.yaml im Projektverzeichnis)")
+    od.add_argument("--manifest", default=None,
+                    help="abweichendes Manifest (Default: manifest.json im Projekt)")
     od.add_argument("--by", choices=("day", "place", "none"), default="day",
-                    help="Vorgruppierung: nach Kalendertag (Default), nach "
-                         "Ortscluster aus GPS, oder gar nicht")
+                    help="Vorgruppierung: 'day' ein Block je Kalendertag (Default), "
+                         "'place' ein Block je Ortscluster aus GPS, 'none' ein "
+                         "einziger Block")
     od.add_argument("--update", action="store_true",
-                    help="neues Material einpflegen und die Sortierung behalten")
+                    help="neu hinzugekommenes Material einpflegen und dabei "
+                         "Sortierung, Gruppennamen und Kommentare behalten — der "
+                         "Weg nach einem erneuten `probe`")
     od.add_argument("--force", action="store_true",
-                    help="vorhandene Datei ueberschreiben")
+                    help="vorhandene Datei ueberschreiben und damit die Sortierung "
+                         "verwerfen (globales --dry-run zeigt sie nur an)")
 
     bu.add_argument("--chapters", default=None, metavar="chapters.yaml",
                     help="Titel- und Zwischenfolien einsetzen "
                          "(Default: chapters.yaml im Projekt, falls vorhanden)")
     bu.add_argument("--order", default=None, metavar="order.yaml",
-                    help="Reihenfolge von Hand statt chronologisch "
+                    help="Medien in der dort festgelegten Reihenfolge statt "
+                         "chronologisch; die Datei bestimmt ueber `rest:` auch, "
+                         "was mit nicht genanntem Material geschieht "
                          "(Default: order.yaml im Projekt, falls vorhanden)")
     bu.add_argument("--xfade-beats", type=float, default=None)
     bu.add_argument("--no-xfade", action="store_true",
@@ -139,7 +153,9 @@ def build_parser() -> argparse.ArgumentParser:
     rd.add_argument("--jobs", type=int, default=None)
     rd.add_argument("--preview", action="store_true",
                     help="1280x720, libx264 — schnell und ohne NVENC-Sessions")
-    rd.add_argument("--range", dest="range_spec", default=None, metavar="A:B")
+    rd.add_argument("--range", dest="range_spec", default=None, metavar="A:B",
+                    help="nur die Segmente [A, B) rendern — Segmentnummern, "
+                         "keine Sekunden")
     rd.add_argument("--codec", default="auto",
                     choices=("auto", "hevc_nvenc", "av1_nvenc", "libx265", "libx264"))
     rd.add_argument("--manifest", default=None)

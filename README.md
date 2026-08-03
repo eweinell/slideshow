@@ -31,6 +31,12 @@ Der `audio`-Schritt ist optional — ohne Tonspur entsteht eine stumme
 Slideshow mit fester Bilddauer, siehe [Ohne Musik, mit zu wenig oder zu
 viel](#ohne-musik-mit-zu-wenig-oder-zu-viel).
 
+> **Fertige Abläufe für die Fälle, die wirklich vorkommen** — Rohschnitt,
+> Kapitel, thematisch sortieren, auswählen, Nachschub einpflegen — stehen in
+> [`docs/rezepte.md`](docs/rezepte.md). Wer nicht wissen will, *warum* das
+> Werkzeug so gebaut ist, sondern nur, *welche* fünf Befehle sein Fall braucht,
+> fängt dort an.
+
 ## Grundprinzipien
 
 1. **Die Edit-List ist die Single Source of Truth.** `edit.yaml` ist
@@ -117,7 +123,9 @@ logs/           ein Logfile je Subkommando, mit den exakten ffmpeg-Aufrufen
 
 Sämtliche Schlüssel der Edit-List — Takt, Ken Burns, Übergänge, Präzedenz der
 Dauerangaben und die üblichen Eingriffe von Hand — stehen in
-[`docs/edit-yaml.md`](docs/edit-yaml.md).
+[`docs/edit-yaml.md`](docs/edit-yaml.md); dort auch die beiden optionalen
+Eingabedateien `chapters.yaml` (Titelfolien) und `order.yaml` (Reihenfolge und
+Auswahl). Fertige Abläufe dazu: [`docs/rezepte.md`](docs/rezepte.md).
 
 ## Installation
 

@@ -1,5 +1,9 @@
 # `edit.yaml` — Referenz
 
+> Diese Seite erklärt die **Schlüssel**. Wer stattdessen einen fertigen Ablauf
+> für seinen Fall sucht — thematisch sortieren, auswählen, Nachschub
+> einpflegen —, findet ihn in [`rezepte.md`](rezepte.md).
+
 Die Edit-List ist die Single Source of Truth. Jeder Renderpfad leitet sich aus
 ihr ab, nie umgekehrt; `render` liest ausschließlich diese Datei plus das
 Manifest. Sie ist bewusst menschenlesbar und von Hand editierbar.
