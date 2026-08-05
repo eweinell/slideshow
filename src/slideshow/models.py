@@ -63,6 +63,20 @@ class ImageInfo(BaseModel):
     icc: str = ""
     portrait: bool = False
 
+    # -- Aufnahmedaten (docs/briefing-auswahl.md, 4.5) -------------------
+    # Alle vier sind 0, wenn das EXIF sie nicht hergibt oder das Manifest aus
+    # einer Zeit vor der Auswahl stammt. Wer sie auswertet, muss den Fall
+    # behandeln — nicht auf ein erneutes `probe` hoffen.
+    #: Belichtungszeit in Sekunden.
+    exposure_time: float = 0.0
+    #: Brennweite in mm, auf Kleinbild gerechnet. Erst damit wird die
+    #: Freihandregel (Zeit < 1/Brennweite) ueber Sensorgroessen hinweg
+    #: vergleichbar.
+    focal_35: float = 0.0
+    #: Tatsaechliche Brennweite in mm.
+    focal: float = 0.0
+    iso: int = 0
+
 
 class ClipInfo(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -121,6 +135,14 @@ class MediaItem(BaseModel):
     #: GPS-Fix traegt. Signal fuer die Kapitelerkennung (`slideshow chapters`):
     #: ein Sprung von 30 km zwischen zwei Aufnahmen *ist* der neue Ort.
     gps: tuple[float, float] | None = None
+    #: Sterne aus Lightroom, digiKam & Co. (0 = keine Bewertung). Steht hier und
+    #: nicht in ``ImageInfo``, weil es kein Aufnahmedatum ist, sondern ein
+    #: Urteil ueber das Medium — und weil es fuer Clips genauso gelten wird.
+    #: Fuer die Auswahl das mit Abstand beste Signal: es ist das einzige, das
+    #: den *Inhalt* kennt (docs/briefing-auswahl.md, 4.6).
+    rating: int = 0
+    #: Farbmarkierung derselben Programme, z. B. ``"Red"``.
+    label: str = ""
     image: ImageInfo | None = None
     clip: ClipInfo | None = None
     #: Pfad des normalisierten Zwischenprodukts, relativ zum Projektroot

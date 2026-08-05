@@ -683,6 +683,26 @@ def _region_capacity(r: Region, defaults: Defaults) -> int:
     return n
 
 
+def slot_capacity(regions: list[Region], defaults: Defaults, *, reserve: int = 0) -> int:
+    """Wie viele Standardbilder die ganze Karte fasst.
+
+    Die Zielzahl fuer ``slideshow select`` (docs/briefing-auswahl.md, 4.1) —
+    und damit die Antwort auf die Frage, wie viele Bilder man aus einem
+    Sammelbecken herausholen soll. Sie steht in der Regionenkarte und muss
+    nicht geraten werden.
+
+    ``reserve`` nimmt vorweg, was keine Standbilder belegen: Titelfolien und
+    der Mehrbedarf laengerer Clips. Ohne die Reserve waehlte man genau so viele
+    Bilder aus, wie Slots da sind, und jede Kapitelfolie schoebe eines wieder
+    heraus.
+
+    Gegenstueck zu :func:`material_seconds`, die dieselbe Rechnung in der
+    anderen Richtung fuehrt.
+    """
+    gesamt = sum(_region_capacity(r, defaults) for r in regions)
+    return max(0, gesamt - max(0, reserve))
+
+
 def coverage_advice(cov: Coverage, defaults: Defaults) -> list[str]:
     """Bei Unter- oder Ueberdeckung Optionen vorschlagen, statt stumm
     abzuschneiden.

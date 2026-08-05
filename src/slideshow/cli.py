@@ -13,6 +13,10 @@ from .errors import SlideshowError, UsageError
 from .logging_setup import console, setup_logging
 from .paths import Project, is_wsl
 from .proc import DryRun
+# Nur Konstanten — die Vorgaben stehen dort, wo sie wirken, und nicht ein
+# zweites Mal in den `--help`-Texten.
+from .select import (BURST_GAP, BY_CHOICES, DAY_ALPHA, MAX_PORTRAIT, MAX_SHARE,
+                     MIN_LONG_EDGE, MIN_PER_DAY)
 
 log = logging.getLogger("slideshow.cli")
 
@@ -75,6 +79,15 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--jobs", type=int, default=None)
     pp.add_argument("--ranges-from", default=None, metavar="edit.yaml",
                     help="nur die tatsaechlich verwendeten Clipbereiche extrahieren")
+    pp.add_argument("--order", default=None, metavar="order.yaml",
+                    help="nur die dort genannten Medien normalisieren "
+                         "(Default: order.yaml im Projekt, falls vorhanden). "
+                         "Nach `slideshow select` spart das den Grossteil der "
+                         "Arbeit — es wird nur aufbereitet, was in den Film kommt")
+    pp.add_argument("--all", action="store_true",
+                    help="alles aus dem Manifest normalisieren, auch was die "
+                         "Auswahl auslaesst — fuer den Fall, dass die Auswahl "
+                         "noch mehrfach umgeworfen wird")
 
     be = sub.add_parser("beats", help="Regionenkarte erzeugen -> beats.yaml")
     be.add_argument("audio", nargs="?", default=None, metavar="AUDIO")
@@ -136,6 +149,58 @@ def build_parser() -> argparse.ArgumentParser:
     od.add_argument("--force", action="store_true",
                     help="vorhandene Datei ueberschreiben und damit die Sortierung "
                          "verwerfen (globales --dry-run zeigt sie nur an)")
+
+    se = sub.add_parser(
+        "select", help="Teilmenge aus grossem Material waehlen -> order.yaml",
+        description="Waehlt aus einem Sammelbecken die Bilder aus, die in den "
+                    "Film passen: keine zwei Aufnahmen desselben Motivs, von "
+                    "jedem Tag etwa gleich viele, ueber den Tag verteilt. "
+                    "Geschrieben wird eine order.yaml mit `rest: drop` — alles "
+                    "Uebrige bleibt als Kommentar darin stehen und laesst sich "
+                    "durch Zeilentausch hereinholen. Ohne inhaltliche Analyse: "
+                    "gerechnet wird auf Zeitstempeln und EXIF.")
+    se.add_argument("-o", "--output", default=None, metavar="order.yaml",
+                    help="Zieldatei (Default: order.yaml im Projektverzeichnis)")
+    se.add_argument("--manifest", default=None,
+                    help="abweichendes Manifest (Default: manifest.json im Projekt)")
+    se.add_argument("--count", default="auto", metavar="N|auto",
+                    help="wie viele Medien (Default: auto — so viele, wie die "
+                         "Regionenkarte aus beats.yaml hergibt)")
+    se.add_argument("--seed", type=int, default=None,
+                    help="Zufallszahl der Auswahl. Ohne Angabe wird eine gezogen "
+                         "und in die Datei geschrieben — derselbe Seed liefert "
+                         "denselben Vorschlag noch einmal")
+    se.add_argument("--by", choices=BY_CHOICES, default="day",
+                    help="worauf sich die Quote bezieht: 'day' je Kalendertag "
+                         "(Default), 'place' je Ortscluster aus GPS, 'none' gar "
+                         "nicht — dann wirkt nur die Spreizung")
+    se.add_argument("--burst-gap", type=float, default=BURST_GAP, metavar="SEK",
+                    help=f"Abstand, unter dem zwei Aufnahmen als dasselbe Motiv "
+                         f"gelten (Default: {BURST_GAP:g}). Aus jeder solchen "
+                         f"Traube kommt hoechstens ein Bild in den Film")
+    se.add_argument("--day-weight", type=float, default=DAY_ALPHA, metavar="ALPHA",
+                    help=f"Daempfung der Quote (Default: {DAY_ALPHA:g}). 0 = gleich "
+                         f"viele je Tag, 1 = proportional zum Material")
+    se.add_argument("--min-per-day", type=int, default=MIN_PER_DAY,
+                    help=f"Mindestzahl je Tag mit Material (Default: {MIN_PER_DAY})")
+    se.add_argument("--max-share", type=float, default=MAX_SHARE,
+                    help=f"Hoechstanteil eines Tages am Film (Default: {MAX_SHARE:g})")
+    se.add_argument("--min-long-edge", type=int, default=MIN_LONG_EDGE, metavar="PX",
+                    help=f"Bilder mit kuerzerer Langkante kommen nicht in Frage "
+                         f"(Default: {MIN_LONG_EDGE}) — der Master ist 4K, und Ken "
+                         f"Burns zoomt hinein")
+    se.add_argument("--rating-min", type=int, default=0, metavar="STERNE",
+                    help="nur Bilder ab dieser Bewertung (Default: aus). Wo "
+                         "Sterne vergeben wurden, ist das das beste Signal, das "
+                         "diesem Verfahren zur Verfuegung steht")
+    se.add_argument("--max-portrait", type=float, default=MAX_PORTRAIT,
+                    help=f"Hoechstanteil Hochformat (Default: {MAX_PORTRAIT:g}); "
+                         f"darueber wird innerhalb der Traube getauscht")
+    se.add_argument("--no-keep-clips", action="store_true",
+                    help="Clips wie Bilder behandeln statt sie alle zu nehmen")
+    se.add_argument("--force", action="store_true",
+                    help="vorhandene order.yaml ueberschreiben und damit Auswahl "
+                         "und Sortierung verwerfen")
 
     bu.add_argument("--chapters", default=None, metavar="chapters.yaml",
                     help="Titel- und Zwischenfolien einsetzen "
@@ -252,6 +317,20 @@ def _print_probe_report(result, out: Path) -> None:
                   ", ".join(p.name for p in result.ignored[:4]))
     con.print(t)
 
+    # Fehlende Aufnahmezeitpunkte einzeln zu melden reicht nicht: bei 1000
+    # Bildern sind das 1000 gleichlautende Zeilen, von denen der Bericht 20
+    # zeigt. Dass die *Zeitstruktur des Materials* fehlt — und damit die
+    # Grundlage von Reihenfolge, Kapiteln und Auswahl —, sieht man erst an der
+    # Summe.
+    ohne_zeit = [x for x in m.media if x.time_source in ("mtime", "none")]
+    if len(ohne_zeit) > 20 or (m.media and len(ohne_zeit) > len(m.media) // 5):
+        anteil = 100.0 * len(ohne_zeit) / len(m.media)
+        con.print(f"\n[yellow]{len(ohne_zeit)} von {len(m.media)} Medien "
+                  f"({anteil:.0f} %) haben keinen verwertbaren Aufnahmezeitpunkt.[/yellow] "
+                  f"Die Reihenfolge kommt fuer sie aus der Dateizeit und ist "
+                  f"vermutlich falsch. Ist exiftool installiert und liest es "
+                  f"dieses Format? `slideshow doctor` sagt es.")
+
     if result.device_spans:
         # Kamera- und Handy-Uhren gehen typischerweise Minuten bis Stunden
         # auseinander (Zeitzone!). Ohne Korrektur verschraenkt die
@@ -326,6 +405,26 @@ def cmd_audio(args, project: Project) -> int:
     return 0
 
 
+def _auswahl(project: Project, angabe: str | None, manifest) -> set[str] | None:
+    """Die Medien-IDs aus ``order.yaml`` — oder ``None`` fuer "alles".
+
+    Dieselbe Fundregel wie bei ``build`` (:func:`_load_order`): ein
+    ausdruecklich genannter Pfad, den es nicht gibt, ist ein Fehler; eine
+    gefundene ``order.yaml`` ist Bequemlichkeit.
+
+    **``rest:`` gilt hier genauso wie beim Bauen.** Ein ``rest: error`` bricht
+    also auch ``preprocess`` ab — sonst normalisiert man eine Stunde lang
+    Material, das ``build`` fuenf Minuten spaeter verweigert.
+    """
+    ids, meldungen, _olist = _load_order(project, angabe, manifest,
+                                         titel="Auswahl")
+    if ids is None:
+        return None
+    for m in meldungen:
+        console().print(f"  [dim]{m}[/dim]")
+    return set(ids)
+
+
 def cmd_preprocess(args, project: Project) -> int:
     from .doctor import estimate_space, check_space, preflight
     from .models import Manifest
@@ -336,8 +435,15 @@ def cmd_preprocess(args, project: Project) -> int:
     manifest = Manifest.load(path)
     _merge_audio_info(project, manifest)
 
-    clip_seconds = sum((m.clip.duration if m.clip else 0.0) for m in manifest.clips)
-    est = estimate_space(images=len(manifest.images), clip_seconds=clip_seconds,
+    only = None if args.all else _auswahl(project, args.order, manifest)
+    bilder = [m for m in manifest.images if only is None or m.id in only]
+    filme = [m for m in manifest.clips if only is None or m.id in only]
+
+    # Geschaetzt wird ueber das, was wirklich verarbeitet wird. Sonst verlangt
+    # die Platzpruefung bei tausend erfassten und zweihundert gewaehlten
+    # Bildern das Fuenffache und schlaegt Alarm, wo nichts ist.
+    clip_seconds = sum((m.clip.duration if m.clip else 0.0) for m in filme)
+    est = estimate_space(images=len(bilder), clip_seconds=clip_seconds,
                          timeline_seconds=manifest.audio.duration or 300.0)
     check = check_space(project, est)
     console().print(f"[{'green' if check.status == 'OK' else 'red'}]{check.status}[/] "
@@ -353,7 +459,7 @@ def cmd_preprocess(args, project: Project) -> int:
     stats = preprocess(project, manifest, caps=caps, portrait_mode=args.portrait,
                        image_format=args.image_format, size=tuple(_size_of(manifest)),
                        intermediate_codec=args.intermediate, jobs=args.jobs,
-                       dry=dry, spans=spans)
+                       dry=dry, spans=spans, only=only)
     if args.dry_run:
         console().print(dry.as_text())
         return 0
@@ -361,6 +467,10 @@ def cmd_preprocess(args, project: Project) -> int:
     manifest.save(path)
     console().print(f"Bilder: {stats.images_done} neu, {stats.images_cached} aus Cache | "
                     f"Clips: {stats.clips_done} neu, {stats.clips_cached} aus Cache")
+    if stats.skipped:
+        console().print(f"  [dim]{stats.skipped} Medien ausgelassen — sie stehen "
+                        f"nicht in der Auswahl. `--all` verarbeitet trotzdem "
+                        f"alles.[/dim]")
     if stats.failures:
         for f in stats.failures:
             console().print(f"  [red]FAIL[/] {f}")
@@ -732,6 +842,155 @@ def cmd_order(args, project: Project) -> int:
     return 0
 
 
+def cmd_select(args, project: Project) -> int:
+    from .models import Manifest
+    from .select import dump_selection_yaml, select_media
+
+    manifest = Manifest.load(Path(args.manifest) if args.manifest else project.manifest)
+    out = Path(args.output) if args.output else (project.root / "order.yaml")
+    con = console()
+
+    ziel, herkunft = _zielzahl(args, project, manifest)
+    sel = select_media(
+        manifest, count=ziel, seed=args.seed, by=args.by, gap=args.burst_gap,
+        alpha=args.day_weight, min_per_day=args.min_per_day,
+        max_share=args.max_share, min_long_edge=args.min_long_edge,
+        rating_min=args.rating_min, keep_clips=not args.no_keep_clips,
+        max_portrait=args.max_portrait)
+    text = dump_selection_yaml(sel, manifest)
+
+    if args.dry_run:
+        # Anders als bei `order --dry-run` steht hier nicht nur der Dateiinhalt.
+        # Ein Vorschlag wird angesehen, um ihn zu beurteilen, und die Zahlen und
+        # Hinweise sind genau das Urteil — sie erst beim Schreiben zu zeigen
+        # hiesse, sie ausgerechnet dann zu verschweigen, wenn man sie braucht.
+        _print_quote(sel, manifest)
+        for m in sel.meldungen:
+            con.print(f"  [yellow]{m}[/yellow]")
+        con.print("")
+        con.print(text)
+        return 0
+    # Dieselbe Vorsicht wie bei `order`: sobald einmal ausgewaehlt oder
+    # sortiert wurde, ist die Datei Handarbeit. Ein zweites `select` wuerfelt
+    # neu und wirft beides weg — das darf nicht beilaeufig passieren.
+    if out.exists() and not args.force:
+        raise SlideshowError(
+            f"{out} gibt es bereits und enthaelt Auswahl und Sortierung. "
+            f"`--force` wuerfelt neu und wirft sie weg, `--dry-run` zeigt den "
+            f"Vorschlag nur an. Um beim selben Vorschlag zu bleiben und nur "
+            f"neues Material einzupflegen: `slideshow order --update`.")
+    out.write_text(text, encoding="utf-8")
+
+    con.print(f"Auswahl: {out}")
+    con.print(f"  [dim]{len(sel.ids)} von {sel.gesamt} Medien · Zielzahl {ziel} "
+              f"({herkunft}) · Seed {sel.seed}[/dim]")
+    _print_quote(sel, manifest)
+    for m in sel.meldungen:
+        con.print(f"  [yellow]{m}[/yellow]")
+    con.print("[yellow]Die Auswahl ist ein Vorschlag.[/yellow] Sie kennt keine "
+              "Bildinhalte — ansehen mit `slideshow sheet`, tauschen durch "
+              "Zeilentausch in der Datei. Danach: `slideshow preprocess`")
+    return 0
+
+
+def _zielzahl(args, project: Project, manifest) -> tuple[int, str]:
+    """Wie viele Medien gewaehlt werden — und woher die Zahl kommt.
+
+    ``auto`` liest sie aus der Regionenkarte: die Summe der Slots *ist* die
+    Zahl der Bilder, die die Musik traegt. Sie einzutippen hiesse, eine
+    Rechnung im Kopf zu machen, die ``slot_capacity`` schon kann.
+
+    Abgezogen wird, was keine Standbilder belegen: jede Titelfolie nimmt einen
+    Slot weg, und ein Clip, der laenger laeuft als ein Standbild, mehrere.
+    Ohne diese Reserve waehlte man genau so viele Bilder, wie Slots da sind,
+    und jede Kapitelfolie schoebe eines wieder heraus.
+    """
+    import yaml
+    from .models import BeatMap, Defaults, Region
+    from .planner import slot_capacity
+
+    if str(args.count).lower() != "auto":
+        try:
+            n = int(args.count)
+        except ValueError:
+            raise SlideshowError(f"--count erwartet eine Zahl oder 'auto', "
+                                 f"nicht {args.count!r}") from None
+        return (n, "angegeben")
+
+    bpath = project.root / "beats.yaml"
+    if not bpath.exists():
+        raise SlideshowError(
+            f"Ohne {bpath} weiss `--count auto` nicht, wie viele Bilder die Musik "
+            f"traegt. Entweder `slideshow beats` zuerst laufen lassen oder die "
+            f"Zahl angeben: `slideshow select --count 200`.")
+    raw = yaml.safe_load(bpath.read_text(encoding="utf-8")) or {}
+    regions = [Region.model_validate(r) for r in raw.get("regions", [])]
+    beatmap = BeatMap(version=raw.get("version", 1), regions=regions)
+    defaults = Defaults()
+
+    reserve, teile = 0, []
+    kapitel = project.root / "chapters.yaml"
+    if kapitel.exists():
+        from .models import ChapterList
+        n = len(ChapterList.load(kapitel).chapters)
+        if n:
+            reserve += n
+            teile.append(f"{n} Titelfolien")
+    mehrbedarf = _clip_mehrbedarf(manifest, beatmap, defaults)
+    if mehrbedarf:
+        reserve += mehrbedarf
+        teile.append(f"{mehrbedarf} Slots fuer laengere Clips")
+
+    gesamt = slot_capacity(beatmap.regions, defaults)
+    ziel = slot_capacity(beatmap.regions, defaults, reserve=reserve)
+    herkunft = f"{gesamt} Slots aus beats.yaml"
+    if teile:
+        herkunft += " abzueglich " + " und ".join(teile)
+    if ziel <= 0:
+        raise SlideshowError(
+            f"Die Regionenkarte gibt {gesamt} Slots her, und {reserve} davon sind "
+            f"schon vergeben. Fuer Bilder bleibt nichts uebrig — laengere Musik, "
+            f"weniger Kapitel oder ein kleineres `beats_per_still`.")
+    return (ziel, herkunft)
+
+
+def _clip_mehrbedarf(manifest, beatmap, defaults) -> int:
+    """Wie viele *zusaetzliche* Slots die Clips ueber ihre Standlaenge hinaus
+    belegen. Ein 30-Sekunden-Clip frisst bei 4 s Standzeit sieben Bilder."""
+    from .planner import standard_slot
+
+    takt = standard_slot(beatmap.regions, defaults)
+    if takt <= 0:
+        return 0
+    mehr = 0.0
+    for m in manifest.media:
+        if m.kind != "clip" or m.clip is None:
+            continue
+        dauer = m.clip.cache_duration or m.clip.effective_duration or m.clip.duration
+        mehr += max(0.0, (dauer - takt) / takt)
+    return int(round(mehr))
+
+
+def _print_quote(sel, manifest) -> None:
+    """Die Verteilung als Tabelle — die eigentliche Aussage der Auswahl.
+
+    Ohne sie ist das Ergebnis eine Zahl, mit ihr sieht man, ob die Daempfung
+    passt: welcher Tag wie viel Material hatte und wie viel davon in den Film
+    kommt.
+    """
+    from rich.table import Table
+    if not sel.quote:
+        return
+    t = Table(title="Auswahl je Gruppe", title_justify="left")
+    t.add_column("Gruppe"); t.add_column("Aufnahmen", justify="right")
+    t.add_column("Trauben", justify="right"); t.add_column("gewaehlt", justify="right")
+    t.add_column("Quote", justify="right")
+    for schluessel, (n, trauben, aufnahmen) in sel.quote.items():
+        anteil = f"{100.0 * n / aufnahmen:.0f} %" if aufnahmen else "-"
+        t.add_row(str(schluessel), str(aufnahmen), str(trauben), str(n), anteil)
+    console().print(t)
+
+
 def _load_chapters(project: Project, angabe: str | None, defaults) -> list:
     """Kapitel laden — ausdruecklich angegeben oder als Projektdatei gefunden.
 
@@ -762,8 +1021,9 @@ def _load_chapters(project: Project, angabe: str | None, defaults) -> list:
     return kapitel
 
 
-def _load_order(project: Project, angabe: str | None,
-                manifest) -> tuple[list[str] | None, list[str], object | None]:
+def _load_order(project: Project, angabe: str | None, manifest, *,
+                titel: str = "Reihenfolge"
+                ) -> tuple[list[str] | None, list[str], object | None]:
     """Reihenfolge laden und aufloesen — dieselbe Regel wie bei den Kapiteln.
 
     Ein *ausdruecklich* genannter Pfad, den es nicht gibt, ist ein Fehler; die
@@ -784,7 +1044,7 @@ def _load_order(project: Project, angabe: str | None,
     olist, zeilen = load_order(pfad)
     ids, meldungen = resolve_order(manifest, olist, quelle=str(pfad), zeilen=zeilen)
     gruppen = len([g for g in olist.blocks if g.items])
-    console().print(f"Reihenfolge: {pfad}  ({len(ids)} von {len(manifest.media)} "
+    console().print(f"{titel}: {pfad}  ({len(ids)} von {len(manifest.media)} "
                     f"Medien" + (f", {gruppen} Gruppen" if olist.groups else "") + ")")
     return (ids, meldungen, olist)
 
@@ -930,7 +1190,7 @@ def cmd_selftest(args, project: Project) -> int:
 _COMMANDS = {
     "doctor": cmd_doctor, "probe": cmd_probe, "audio": cmd_audio,
     "preprocess": cmd_preprocess, "beats": cmd_beats, "chapters": cmd_chapters,
-    "order": cmd_order, "build": cmd_build,
+    "order": cmd_order, "select": cmd_select, "build": cmd_build,
     "render": cmd_render, "export-mlt": cmd_export_mlt, "selftest": cmd_selftest,
 }
 
@@ -979,6 +1239,24 @@ def _tonspur_kandidaten(project: Project, manifest) -> list[Path]:
     return []
 
 
+#: Ab wie vielen Medien der Wegweiser zur Auswahl raet, statt gleich alles zu
+#: normalisieren. Grob gegriffen: die genaue Grenze kennt erst `select --count
+#: auto` aus der Regionenkarte, und die gibt es hier noch nicht.
+SELECT_HINWEIS_AB = 300
+
+
+def _tonspur_schritt(project: Project, manifest, ruf: str) -> list[str]:
+    """Vorschlag, die Musik zu setzen — oder nichts, wenn sie schon da ist."""
+    if manifest.audio.file or (project.cache / "mix.flac").exists():
+        return []
+    kandidaten = _tonspur_kandidaten(project, manifest)
+    if not kandidaten:
+        return []
+    dateien = " ".join(_zitiere(k) for k in kandidaten[:3])
+    return [f"{ruf} audio {dateien}",
+            f"[dim]oder ohne Musik weiter mit: {ruf} beats[/dim]"]
+
+
 def _naechster_schritt(project: Project, args) -> list[str]:
     """Erste Phase, deren Voraussetzung noch fehlt — als fertige Kommandozeile."""
     from .models import Manifest
@@ -992,19 +1270,30 @@ def _naechster_schritt(project: Project, args) -> list[str]:
     except Exception:                              # noqa: BLE001 - der Wegweiser
         return []                                  # darf nie das Kommando kippen
 
-    if manifest.media and not any(m.cache_path for m in manifest.media):
+    beats = project.root / "beats.yaml"
+    unbearbeitet = manifest.media and not any(m.cache_path for m in manifest.media)
+
+    # Bei viel Material kehrt sich die uebliche Reihenfolge um: erst auswaehlen,
+    # dann normalisieren. `preprocess` verarbeitet sonst tausend Bilder auf 7680
+    # px Langkante, von denen zweihundert im Film landen — Stunden Rechenzeit
+    # fuer Material, das niemand sieht. Und `select --count auto` braucht die
+    # Regionenkarte, also muss `beats` davor.
+    zuviel = len(manifest.media) > SELECT_HINWEIS_AB
+    if zuviel and unbearbeitet and not (project.root / "order.yaml").exists():
+        if beats.exists():
+            return [f"{ruf} select",
+                    f"[dim]{len(manifest.media)} Medien sind mehr, als ein Film "
+                    f"traegt — auswaehlen, bevor `preprocess` alle normalisiert[/dim]"]
+        return _tonspur_schritt(project, manifest, ruf) or [
+            f"{ruf} beats",
+            f"[dim]danach `{ruf} select`: {len(manifest.media)} Medien sind mehr, "
+            f"als ein Film traegt[/dim]"]
+
+    if unbearbeitet:
         return [f"{ruf} preprocess"]
 
-    beats = project.root / "beats.yaml"
     if not beats.exists():
-        mix = project.cache / "mix.flac"
-        if not manifest.audio.file and not mix.exists():
-            kandidaten = _tonspur_kandidaten(project, manifest)
-            if kandidaten:
-                dateien = " ".join(_zitiere(k) for k in kandidaten[:3])
-                return [f"{ruf} audio {dateien}",
-                        f"[dim]oder ohne Musik weiter mit: {ruf} beats[/dim]"]
-        return [f"{ruf} beats"]
+        return _tonspur_schritt(project, manifest, ruf) or [f"{ruf} beats"]
 
     if not project.edit.exists():
         schritte = [f"{ruf} build{_build_parameter(project, manifest, beats)}"]

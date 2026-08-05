@@ -14,6 +14,7 @@ dabei herauskommt** — die Bedeutung der einzelnen Schlüssel steht in
 | Erst alle Küstenbilder, dann die Abende — thematisch statt nach Uhrzeit | [3. Thematisch erzählen](#3-thematisch-erzählen) |
 | Kapitel über je einige Tage, innen chronologisch mit ein paar Ausreißern | [4. Kapitelweise erzählen](#4-kapitelweise-erzählen) |
 | 90 Fotos, aber die Musik trägt nur 50 — auswählen statt alles zeigen | [5. Auswählen statt kürzen](#5-auswählen-statt-kürzen) |
+| Ein Sammelbecken aus über tausend Bildern, davon sollen 200 in den Film | [5b. Aus tausend Bildern auswählen lassen](#5b-aus-tausend-bildern-auswählen-lassen) |
 | Nachträglich sind Fotos dazugekommen | [6. Nachschub einpflegen](#6-nachschub-einpflegen) |
 | Kein Ton, nur Bilder | [7. Stummer Film](#7-stummer-film) |
 | Ein einzelnes Bild soll länger stehen oder stillstehen | [8. Feinschliff ohne Neubau](#8-feinschliff-ohne-neubau) |
@@ -266,6 +267,9 @@ gerechnet werden nur die angrenzenden Blenden.
 **Wofür.** Es ist mehr Material da, als die Musik trägt. Ein Stück von 6:32
 fasst bei acht Beats je Bild rund 50 Fotos — bei 90 muss ausgewählt werden.
 
+Bei **90 Fotos** geht das von Hand. Bei tausend nicht mehr — dafür gibt es
+[Rezept 5b](#5b-aus-tausend-bildern-auswählen-lassen).
+
 ```bash
 slideshow order
 # in order.yaml: `rest: error` → `rest: drop`
@@ -302,6 +306,81 @@ Filmende.
 Die Gegenrichtung — zu **wenig** Material — löst keine Auswahl, sondern eine
 längere Standzeit: `slideshow build --still-seconds 28`. Den passenden Wert
 nennt `build` selbst.
+
+---
+
+## 5b. Aus tausend Bildern auswählen lassen
+
+**Wofür.** Ein Sammelbecken statt eines vorsortierten Ordners: 1200 Aufnahmen
+aus zwei Wochen, davon sollen 200 in den Film. Von Hand auszukommentieren wäre
+ein Nachmittag, und `preprocess` würde vorher alle 1200 auf 4K normalisieren —
+Stunden Rechenzeit für Material, das nie zu sehen ist.
+
+**Die Reihenfolge kehrt sich um:** erst auswählen, dann normalisieren. Und weil
+die Zielzahl aus der Regionenkarte kommt, muss `beats` davor.
+
+```bash
+slideshow probe /material/island     # 1240 Bilder
+slideshow audio track.mp3
+slideshow beats                      # → beats.yaml, 187 Slots
+slideshow select                     # → order.yaml: 187 gewählt, Rest als Kommentar
+slideshow preprocess                 # nur die Auswahl, nicht alle 1240
+slideshow build && slideshow render
+```
+
+**Was herauskommt.** Eine `order.yaml` mit `rest: drop`, in der die gewählten
+Bilder stehen und alle übrigen als Kommentar an ihrem zeitlichen Platz — nach
+Tagen gegliedert, also sofort als Kapitelanker brauchbar
+(`slideshow chapters --from-groups`).
+
+**Wonach ausgewählt wird.** Nach Zeitstruktur, ohne einen Bildpunkt anzusehen:
+
+| | |
+|---|---|
+| **Trauben** | Aufnahmen unter 90 s Abstand zeigen fast immer dasselbe. Aus jeder solchen Traube kommt **höchstens ein** Bild in den Film. |
+| **Quote je Tag** | Gedämpft: vierfaches Material ergibt doppelt so viele Bilder, nicht viermal so viele. Gerechnet auf der Zahl der *Trauben* — wer 200 Serienbilder von zwei Motiven macht, hat zwei Motive. |
+| **Spreizung** | Innerhalb des Tages gleichmäßig über die Zeit verteilt, damit nicht alle acht Bilder vom Abendessen kommen. |
+| **Wahl in der Traube** | Sterne schlagen alles; sonst zählen Position in der Serie, Dateigröße als Schärfeindiz und die Freihandregel. |
+
+Ausgeschlossen wird nur, was technisch nicht geht: eine Langkante unter 2160 px
+(der Master ist 4K, und Ken Burns zoomt hinein). Der Grund steht in der Datei.
+
+**Ein anderes Bild nehmen** heißt Zeilentausch — die Geschwister derselben
+Traube stehen direkt darunter:
+
+```yaml
+      - img_DSC06273   # 10:14 · quer · Traube mit 4
+      #  statt: img_DSC06271 (10:13) · img_DSC06272 (10:14) · img_DSC06274 (10:15)
+```
+
+**Worauf achten.**
+
+- **Die Auswahl ist ein Vorschlag.** Sie kennt keine Bildinhalte. Ein technisch
+  tadelloses Ergebnis kann ausgerechnet die drei Bilder auslassen, um die es in
+  dem Film geht — durchsehen lohnt.
+- **Ein zweiter Vorschlag** kostet nichts: `slideshow select --force` würfelt
+  neu, `--seed 4711` holt einen bestimmten zurück. Der Seed steht im Dateikopf.
+- **`--dry-run` zeigt, ohne zu schreiben** — mitsamt der Tabelle, welcher Tag
+  wie viel stellt. Der schnellste Weg, `--day-weight` einzustellen.
+- **Nicht zweimal `select`.** Der zweite Lauf wirft Auswahl *und* Sortierung
+  weg und verlangt deshalb `--force`. Um nur nachgereichtes Material
+  einzupflegen: `slideshow order --update` — das behält beides.
+- **`preprocess` folgt der Auswahl von selbst**, sobald eine `order.yaml` im
+  Projekt liegt. Wer später eine Zeile tauscht, lässt es einfach noch einmal
+  laufen: das neue Bild wird nachgeholt, die fertigen bleiben liegen.
+  `preprocess --all` normalisiert trotzdem alles — sinnvoll, wenn die Auswahl
+  noch mehrfach umgeworfen werden soll und der Cache warm sein darf.
+
+```bash
+slideshow select --dry-run                 # ansehen, nichts schreiben
+slideshow select --count 150               # Zielzahl selbst setzen
+slideshow select --day-weight 0            # von jedem Tag gleich viele
+slideshow select --burst-gap 30            # engere Trauben, mehr Auswahl
+slideshow select --rating-min 1            # nur, was in Lightroom Sterne hat
+```
+
+Wo Sterne vergeben wurden, ist `--rating-min` das mit Abstand beste Signal in
+diesem ganzen Verfahren — es ist das einzige, das den Bildinhalt kennt.
 
 ---
 

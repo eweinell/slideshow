@@ -805,6 +805,18 @@ von 6:32 fasst bei 8 Beats je Bild rund 50 Fotos; wer 90 hat, muss auswählen.
 Auskommentierte Zeilen sind dann die Auswahl, und der Kommentar davor sagt,
 warum ein Bild draußen bleibt. Beide Meldungen blendet `--force` **nicht** aus.
 
+Bei tausend Bildern schreibt niemand diese Datei von Hand — dafür gibt es
+`slideshow select`. Es erzeugt genau diese Form: die gewählten Medien als
+Einträge, alle übrigen als Kommentar an ihrem zeitlichen Platz, nach Tagen
+gegliedert. Ausgewählt wird nach Zeitstruktur und EXIF, ohne inhaltliche
+Analyse — [Rezept 5b](rezepte.md#5b-aus-tausend-bildern-auswählen-lassen)
+beschreibt das Verfahren, [`briefing-auswahl.md`](briefing-auswahl.md)
+begründet es.
+
+Danach gilt für die Datei nichts Besonderes: sie ist eine gewöhnliche
+`order.yaml`, und `order --update` pflegt sie nach, ohne die Auswahl zu
+verlieren.
+
 ### Was die Datei nicht darf
 
 Eine **unbekannte** ID bricht mit Zeile ab — kein stilles Überspringen. Eine

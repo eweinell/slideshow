@@ -65,6 +65,8 @@ class PreprocessStats:
     images_cached: int = 0
     clips_done: int = 0
     clips_cached: int = 0
+    #: Medien, die die Auswahl ausgelassen hat (``only``).
+    skipped: int = 0
     failures: list[str] = None
 
     def __post_init__(self):
@@ -445,8 +447,20 @@ def preprocess(project: Project, manifest: Manifest, *, caps: Capabilities,
                intermediate_codec: str = "dnxhr_hqx", jobs: int | None = None,
                dry: DryRun | None = None,
                spans: dict[str, tuple[float, float]] | None = None,
-               long_edge: int = LONG_EDGE) -> PreprocessStats:
-    """Verarbeitet alle Medien des Manifests nach ``cache/``.
+               long_edge: int = LONG_EDGE,
+               only: set[str] | None = None) -> PreprocessStats:
+    """Verarbeitet die Medien des Manifests nach ``cache/``.
+
+    ``only`` beschraenkt den Lauf auf eine Menge von Medien-IDs — die Auswahl
+    aus ``order.yaml`` (``docs/briefing-auswahl.md``, Stufe 2). Ohne den
+    Parameter aendert sich nichts, und das ist der Normalfall: bei neunzig
+    vorsortierten Bildern gibt es nichts zu sparen.
+
+    Bei einem Sammelbecken schon: tausend Bilder auf 7680 px Langkante zu
+    normalisieren kostet Stunden und zweistellige Gigabyte, und zweihundert
+    davon landen im Film. Weggelassenes behaelt sein bisheriges ``cache_path``
+    — ein spaeter doch hereingenommenes Bild wird beim naechsten Lauf
+    nachgeholt, weil der Cache ohnehin inkrementell arbeitet.
 
     ``long_edge`` ist der Subpixel-Vorrat fuer Ken Burns und nur fuer die
     Testsuite gedacht — dort waeren 7680 px reine Wartezeit.
@@ -458,9 +472,14 @@ def preprocess(project: Project, manifest: Manifest, *, caps: Capabilities,
     img_size = (long_edge, int(round(long_edge * size[1] / size[0])))
     workers = caps.max_workers(jobs)
 
+    gewaehlt = (lambda m: True) if only is None else (lambda m: m.id in only)
+    bilder = [m for m in manifest.images if gewaehlt(m)]
+    filme = [m for m in manifest.clips if gewaehlt(m)]
+    stats.skipped = len(manifest.media) - len(bilder) - len(filme)
+
     # --- Bilder -------------------------------------------------------
     tasks = []
-    for item in manifest.images:
+    for item in bilder:
         src = project.abs(item.path)
         ext = "png" if image_format == "png16" else "jpg"
         dst = project.cache / f"{item.id}.{ext}"
@@ -494,7 +513,7 @@ def preprocess(project: Project, manifest: Manifest, *, caps: Capabilities,
                     item.image.portrait = info["portrait"]
 
     # --- Clips --------------------------------------------------------
-    for item in manifest.clips:
+    for item in filme:
         src = project.abs(item.path)
         _enc, container = intermediate_args(intermediate_codec)
         dst = project.cache / f"{item.id}.{container}"

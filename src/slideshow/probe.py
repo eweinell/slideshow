@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import statistics
+import tempfile
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -35,6 +36,11 @@ VIDEO_EXT = {".mp4", ".mov", ".mts", ".m2ts", ".avi", ".mkv", ".m4v", ".3gp", ".
 #: und den passenden naechsten Schritt vorzuschlagen.
 AUDIO_EXT = {".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".opus", ".wma",
              ".aif", ".aiff"}
+
+#: Ab wie vielen Bildern ein vollstaendig leeres exiftool-Ergebnis als Fehler
+#: gilt statt als Zufall. Bei drei Handyfotos ohne EXIF ist das plausibel, bei
+#: dreissig ist etwas kaputt.
+EXIF_AUSFALL_AB = 20
 
 #: Verdachtsschwelle fuer VFR aus dem Vergleich r_frame_rate / avg_frame_rate.
 _VFR_SUSPECT = Fraction(1, 100)
@@ -282,31 +288,69 @@ def parse_clock_offset(spec: str) -> tuple[str, float]:
 _EXIF_TAGS = ["-DateTimeOriginal", "-CreateDate", "-Model", "-Make", "-Orientation",
               "-ProfileDescription", "-ColorSpace", "-ImageWidth", "-ImageHeight",
               "-FileType", "-GPSLatitude", "-GPSLongitude", "-GPSLatitudeRef",
-              "-GPSLongitudeRef"]
+              "-GPSLongitudeRef",
+              # Fuer die Auswahl (docs/briefing-auswahl.md, 4.5/4.6). Sie kosten
+              # nichts: exiftool liest die Header ohnehin, und der Batchlauf
+              # laeuft ohnehin. Ohne sie muesste `select` ein zweites Mal ueber
+              # tausend Dateien gehen.
+              "-Rating", "-Label", "-ExposureTime", "-FocalLength",
+              "-FocalLengthIn35mmFormat", "-FocalLength35efl", "-ISO"]
 
 
 def read_exif_batch(paths: list[Path]) -> dict[str, dict]:
-    """Ein einziger exiftool-Lauf fuer alle Bilder."""
+    """Ein einziger exiftool-Lauf fuer alle Bilder.
+
+    Die Pfade gehen ueber eine **Argumentdatei** (``-@``), nicht auf die
+    Kommandozeile. Windows begrenzt ``CreateProcess`` auf 32767 Zeichen, und
+    das ist frueher erreicht, als es aussieht: gemessen bei **193 Dateien** mit
+    168 Zeichen langen Pfaden. Der Lauf scheiterte dann nicht etwa mit einer
+    Laengenmeldung, sondern mit "Programm nicht gefunden: exiftool" — Windows
+    meldet WinError 206 als ``FileNotFoundError``.
+
+    Ein Sammelbecken aus tausend Bildern haette diese Grenze immer gerissen.
+    """
     if not paths or not have("exiftool"):
         if paths:
             log.warning("exiftool fehlt — EXIF-Orientation und ICC-Profile werden "
                         "nicht ausgewertet. Bilder koennen quer liegen.")
         return {}
-    cmd = ["exiftool", "-j", "-n", "-q", *_EXIF_TAGS, *[str(p) for p in paths]]
-    res = run(cmd, check=False, timeout=900)
-    if not res.stdout.strip():
-        log.warning("exiftool lieferte keine Daten: %s", res.stderr_tail(5))
-        return {}
-    try:
-        entries = json.loads(res.stdout)
-    except json.JSONDecodeError as exc:
-        log.warning("exiftool-Ausgabe unlesbar (%s), EXIF wird uebersprungen", exc)
-        return {}
+
+    with tempfile.TemporaryDirectory(prefix="slideshow-exif-") as tmp:
+        argfile = Path(tmp) / "dateien.args"
+        # Absolute Pfade: exiftool ueberliest in einer Argumentdatei jede Zeile,
+        # die mit '#' beginnt. Ein absoluter Pfad faengt nie so an.
+        argfile.write_text("\n".join(str(p.resolve()) for p in paths) + "\n",
+                           encoding="utf-8")
+        # -charset filename=utf8 gehoert zwingend dazu: sonst liest exiftool die
+        # Datei unter Windows in der ANSI-Codepage, und jeder Umlaut in einem
+        # Ordnernamen macht aus einem Pfad eine nicht existierende Datei.
+        cmd = ["exiftool", "-j", "-n", "-q", "-charset", "filename=utf8",
+               *_EXIF_TAGS, "-@", str(argfile)]
+        res = run(cmd, check=False, timeout=900)
+
+    entries: list[dict] = []
+    if res.stdout.strip():
+        try:
+            entries = json.loads(res.stdout)
+        except json.JSONDecodeError as exc:
+            log.warning("exiftool-Ausgabe unlesbar (%s)", exc)
+
     out: dict[str, dict] = {}
     for e in entries:
         src = e.get("SourceFile")
         if src:
             out[str(Path(src).resolve())] = e
+
+    if not out and len(paths) > EXIF_AUSFALL_AB:
+        # Frueher eine Warnung. Aber ohne EXIF faellt `capture_time` auf die
+        # mtime zurueck, und damit ist die Zeitstruktur des Materials weg —
+        # Reihenfolge, Tagesgrenzen, Kapitel und die Auswahl bauen alle darauf
+        # auf. Das faellt sonst erst im fertigen Film auf.
+        raise SlideshowError(
+            f"exiftool lieferte fuer keines der {len(paths)} Bilder Daten. Ohne "
+            f"EXIF gibt es keine Aufnahmezeitpunkte — die Reihenfolge kaeme dann "
+            f"aus den Dateidaten und waere vermutlich falsch.\n"
+            f"exiftool meldet:\n{res.stderr_tail(5) or '(nichts)'}")
     return out
 
 
@@ -453,8 +497,14 @@ def _probe_image(project: Project, path: Path, exif: dict, taken: set[str]) -> M
         capture_time=ts,
         time_source=source,
         gps=gps_from_exif(exif),
+        rating=_ganzzahl(exif.get("Rating")),
+        label=str(exif.get("Label") or "").strip(),
         image=ImageInfo(width=disp_w, height=disp_h, orientation=orientation, icc=icc,
-                        portrait=bool(disp_h > disp_w)),
+                        portrait=bool(disp_h > disp_w),
+                        exposure_time=_zahl(exif.get("ExposureTime")),
+                        focal_35=_kb_brennweite(exif),
+                        focal=_zahl(exif.get("FocalLength")),
+                        iso=_ganzzahl(exif.get("ISO"))),
     )
     if source in ("mtime", "none"):
         item.warnings.append(
@@ -485,6 +535,62 @@ def _size(path: Path) -> int:
         return path.stat().st_size
     except OSError:
         return 0
+
+
+def _zahl(wert) -> float:
+    """EXIF-Wert als Gleitkommazahl, oder 0.0.
+
+    Robust gegen die drei Formen, in denen exiftool dieselbe Groesse liefern
+    kann: Zahl (mit ``-n``), Bruch (``"1/125"`` ohne ``-n``, etwa wenn ein Tag
+    aus einer Maker-Note kommt) und Liste (manche Kameras schreiben ``ISO`` als
+    Feld mit zwei Werten). Eine Sonde darf hier nie werfen — ein unlesbares
+    Feld ist kein Grund, das Erfassen abzubrechen.
+    """
+    if isinstance(wert, (list, tuple)):
+        wert = wert[0] if wert else None
+    if wert is None or isinstance(wert, bool):
+        return 0.0
+    if isinstance(wert, (int, float)):
+        return float(wert)
+    text = str(wert).strip()
+    if "/" in text:
+        zaehler, _, nenner = text.partition("/")
+        try:
+            n = float(nenner)
+            return float(zaehler) / n if n else 0.0
+        except ValueError:
+            return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def _ganzzahl(wert) -> int:
+    return int(_zahl(wert))
+
+
+def _kb_brennweite(exif: dict) -> float:
+    """Brennweite auf Kleinbild gerechnet — oder 0.0, wenn das niemand weiss.
+
+    Zwei Quellen, in dieser Reihenfolge: das Kameratag und das Composite, das
+    exiftool aus den Sensordaten errechnet. **Beide fehlen oefter als gedacht.**
+    Gemessen an einer Sony ILCE-6700 (APS-C): ``FocalLengthIn35mmFormat``
+    schreibt sie gar nicht, und ``FocalLength35efl`` liefert exiftool dann
+    unveraendert die reale Brennweite zurueck — 114 mm statt der 171 mm, die
+    der Crop ergaebe.
+
+    Deshalb wird hier **nicht** genaehert: eine 0 heisst "unbekannt" und laesst
+    dem Auswerter die Wahl. Wer stattdessen die reale Brennweite einsetzte,
+    schriebe eine Zahl ins Manifest, die aussaehe wie eine Messung.
+    """
+    kb = _zahl(exif.get("FocalLengthIn35mmFormat"))
+    if kb > 0:
+        return kb
+    efl, real = _zahl(exif.get("FocalLength35efl")), _zahl(exif.get("FocalLength"))
+    # Gleichstand heisst: exiftool hatte keine Sensordaten und hat nur
+    # durchgereicht. Das ist keine Umrechnung.
+    return efl if efl > 0 and abs(efl - real) > 0.01 else 0.0
 
 
 def _probe_clip(project: Project, path: Path, taken: set[str], *,
