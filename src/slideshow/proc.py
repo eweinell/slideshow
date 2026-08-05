@@ -6,6 +6,7 @@ stderr-Zeilen im Klartext angezeigt, nicht nur der Returncode.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -56,6 +57,36 @@ def quote(cmd: list[str]) -> str:
     return shlex.join(str(c) for c in cmd)
 
 
+#: Hoechstlaenge einer Kommandozeile. Windows begrenzt ``CreateProcess`` auf
+#: 32767 Zeichen; Linux hat mit ``MAX_ARG_STRLEN`` ein weit hoeheres Limit.
+CMDLINE_LIMIT = 32767
+
+
+def _zu_lang(exc: OSError) -> bool:
+    """Ist der Prozessstart an der Laenge der Argumentliste gescheitert?
+
+    Windows meldet das als ``FileNotFoundError`` mit ``winerror == 206`` — also
+    ausgerechnet als die Ausnahme, die sonst "Programm gibt es nicht" heisst.
+    Ohne diese Unterscheidung raet die Fehlermeldung dazu, ein Werkzeug zu
+    installieren, das laengst installiert ist.
+    """
+    return getattr(exc, "winerror", None) == 206 or exc.errno == errno.E2BIG
+
+
+def _startfehler(cmd: list[str], exc: OSError) -> SlideshowError:
+    if _zu_lang(exc):
+        zeile = len(quote(cmd))
+        return SlideshowError(
+            f"Die Kommandozeile fuer {cmd[0]} ist zu lang: {zeile} Zeichen in "
+            f"{len(cmd)} Argumenten, erlaubt sind {CMDLINE_LIMIT}. Das Werkzeug "
+            f"ist vorhanden — es bekommt nur zu viele Dateien auf einmal. Der "
+            f"Aufruf muss die Liste stapeln oder ueber eine Argumentdatei "
+            f"uebergeben ({cmd[0]} kann das ueber `-@ datei` bzw. eine Concat-Liste).")
+    if isinstance(exc, FileNotFoundError):
+        return SlideshowError(f"Programm nicht gefunden: {cmd[0]} ({exc})")
+    return SlideshowError(f"{cmd[0]} liess sich nicht starten: {exc}")
+
+
 def run(cmd: list[str], *, check: bool = True, timeout: float | None = None,
         cwd: str | os.PathLike | None = None, stdin: str | None = None,
         env: dict[str, str] | None = None, logfile: str | None = None) -> RunResult:
@@ -68,8 +99,8 @@ def run(cmd: list[str], *, check: bool = True, timeout: float | None = None,
             timeout=timeout, cwd=str(cwd) if cwd else None, input=stdin,
             env={**os.environ, **env} if env else None,
         )
-    except FileNotFoundError as exc:
-        raise SlideshowError(f"Programm nicht gefunden: {cmd[0]} ({exc})") from exc
+    except OSError as exc:
+        raise _startfehler(cmd, exc) from exc
     except subprocess.TimeoutExpired as exc:
         raise ExternalToolError(cmd, -1, f"Timeout nach {exc.timeout} s", logfile) from exc
 
