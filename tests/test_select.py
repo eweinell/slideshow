@@ -118,6 +118,22 @@ def test_eine_lange_serie_wird_an_der_groessten_luecke_geteilt():
     assert all(b.end - b.start <= 600.0 for b in mit)
 
 
+def test_eine_intervallaufnahme_zerlegt_sich_ohne_rekursionsfehler():
+    """Regression: bei lauter *gleich grossen* Luecken — Zeitraffer, Serie im
+    festen Takt — nahm die Teilung immer die erste und spaltete jedes Mal genau
+    ein Bild ab. Bei 1240 Aufnahmen, also der Zielgroesse dieses Verfahrens,
+    endete das im RecursionError."""
+    t = _dt.datetime(2026, 6, 1, 8, 0, 0).timestamp()
+    media = [_bild(i, t + i * 30) for i in range(1240)]      # 30 s Takt, 10 h
+
+    trauben = bursts(media, {}, gap=90.0, max_span=600.0)
+
+    assert sum(len(b) for b in trauben) == 1240, "kein Bild verloren"
+    assert all(b.end - b.start <= 600.0 for b in trauben)
+    zeiten = [m.capture_time for b in trauben for m in b.items]
+    assert zeiten == sorted(zeiten), "die Folge bleibt chronologisch"
+
+
 def test_ein_ortssprung_trennt_auch_ohne_zeitluecke():
     t = _dt.datetime(2026, 6, 1, 10, 0, 0).timestamp()
     a, b = _bild(1, t), _bild(2, t + 10)

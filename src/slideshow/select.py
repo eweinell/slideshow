@@ -171,17 +171,38 @@ def _gehoert_dazu(b: Burst, ts: float, m: MediaItem, gap: float) -> bool:
 def _teile_lange(b: Burst, max_span: float) -> list[Burst]:
     """Teilt eine zu lange Traube an ihrer groessten inneren Luecke.
 
-    Rekursiv, weil eine Haelfte immer noch zu lang sein kann. Geteilt wird an
-    der groessten Luecke und nicht in der zeitlichen Mitte: die groesste Luecke
-    ist die Stelle, an der am ehesten wirklich etwas anderes anfing.
+    Geteilt wird an der groessten Luecke und nicht in der zeitlichen Mitte: die
+    groesste Luecke ist die Stelle, an der am ehesten wirklich etwas anderes
+    anfing.
+
+    **Bei Gleichstand gewinnt die mittigste Luecke**, und daran haengt mehr als
+    Geschmack. Eine Intervallaufnahme — Zeitraffer, Serienbild im festen Takt —
+    hat lauter *gleich grosse* Luecken; die erste davon zu nehmen spaltet dann
+    jedes Mal ein einziges Bild ab. Der Aufwand waere quadratisch, und die
+    urspruenglich rekursive Fassung lief bei 1240 gleichmaessig verteilten
+    Aufnahmen in einen ``RecursionError``. Mit der Mitte halbiert sich die
+    Traube stattdessen.
+
+    Iterativ statt rekursiv aus demselben Grund: die Tiefe haenge sonst an den
+    Daten, und die kommen hier von aussen.
     """
-    if len(b) < 2 or (b.end - b.start) <= max_span:
-        return [b]
-    luecken = [(b.times[i + 1] - b.times[i], i) for i in range(len(b) - 1)]
-    _, schnitt = max(luecken)
-    links = Burst(items=b.items[:schnitt + 1], times=b.times[:schnitt + 1])
-    rechts = Burst(items=b.items[schnitt + 1:], times=b.times[schnitt + 1:])
-    return _teile_lange(links, max_span) + _teile_lange(rechts, max_span)
+    fertig: list[Burst] = []
+    stapel = [b]
+    while stapel:
+        akt = stapel.pop()
+        if len(akt) < 2 or (akt.end - akt.start) <= max_span:
+            fertig.append(akt)
+            continue
+        mitte = (len(akt) - 1) / 2.0
+        _, _, schnitt = max((akt.times[i + 1] - akt.times[i], -abs(i - mitte), i)
+                            for i in range(len(akt) - 1))
+        # Rechts zuerst auf den Stapel, damit links zuerst wieder herunterkommt
+        # und ``fertig`` chronologisch bleibt.
+        stapel.append(Burst(items=akt.items[schnitt + 1:],
+                            times=akt.times[schnitt + 1:]))
+        stapel.append(Burst(items=akt.items[:schnitt + 1],
+                            times=akt.times[:schnitt + 1]))
+    return fertig
 
 
 # --------------------------------------------------------------------------
