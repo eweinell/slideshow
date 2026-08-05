@@ -35,6 +35,31 @@ $o = & .\.venv\Scripts\slideshow.exe --project $p probe "$p\src" 2>&1
 ($o | Select-String "Manifest") -join ""
 ```
 
+### Die teurere Falle: Kodierung
+
+**`Get-Content`/`Set-Content` zerstören die Umlaute in jeder Datei dieses
+Repos.** In PowerShell 5.1 liest `Get-Content -Raw` mit der ANSI-Codepage und
+`Set-Content -Encoding utf8` schreibt ein BOM. Ein Textersatz über diesen Weg
+macht aus `großem` ein `groÃŸem`, aus `–` ein `â€“` — in *allen* Zeilen, nicht
+nur der bearbeiteten. Der Schaden fällt erst im `git diff` auf (400 geänderte
+Zeilen statt 5) und sieht dort nach einem Zeilenenden-Problem aus.
+
+Für Textänderungen das Edit-Werkzeug nehmen. Muss es PowerShell sein, dann über
+.NET mit ausdrücklicher Kodierung:
+
+```powershell
+$t = [System.IO.File]::ReadAllText($pfad, [System.Text.Encoding]::UTF8)
+[System.IO.File]::WriteAllText($pfad, $t, (New-Object System.Text.UTF8Encoding($false)))
+```
+
+Ist es schon passiert, lässt es sich umkehren — die UTF-8-Bytes wurden als
+CP1252 gelesen:
+
+```powershell
+$b = [System.Text.Encoding]::GetEncoding(1252).GetBytes($kaputt)
+$heil = [System.Text.Encoding]::UTF8.GetString($b)
+```
+
 ## Tests
 
 **Drei Tests in `tests/test_media.py` schlagen dauerhaft fehl** —
@@ -105,7 +130,9 @@ Verletzt man eine davon, fällt es erst spät und woanders auf:
 | **`fit_grid` misst lokal, nicht global** | Die Konfidenz ist nur für Fenster bis ~30 s kalibriert. `MAX_FIT_WINDOW` und `CONF_THRESHOLD` hängen zusammen — wer an einem dreht, muss den anderen nachmessen. Unter 16 s zerfallen zusätzlich die Fixture-Songs, und die konstruktive Garantie hinter Abnahmekriterium A5 fällt. |
 | **Titel- und Zwischenfolien** | **Vollständig** ([`docs/briefing-titelfolien.md`](docs/briefing-titelfolien.md), Stufen 1–3). `slideshow chapters` → `chapters.yaml` → `build` → `render`. Generator (`titles.py`), Phrasenlage, Stille-Regel, Fokusblende, Rundlauf, Deckungsrechnung, MLT. Offen ist nur die Sichtprüfung in Bewegung — sie braucht ffmpeg und eine echte Tonspur. |
 | **Manuelle Reihenfolge** | **Vollständig** ([`docs/briefing-manuelle-reihenfolge.md`](docs/briefing-manuelle-reihenfolge.md), Stufen 1–2). `slideshow order` → `order.yaml` → `build` → `render`. Generator (`order.py`) mit `--by day\|place\|none` und `--update`, Auflösung mit allen drei Fehlerfällen samt Zeile, `rest: error\|append\|drop`, `group:` als dritter Kapitelanker. Dazu `slideshow chapters --from-groups` (`order.group_anchors` → `chapters.dump_group_chapters_yaml`): ein Kapitel je Block statt aus Zeitlücken geraten — [Rezept 4](docs/rezepte.md#4-kapitelweise-erzählen). Offen ist nur Stufe 3 (wiederholtes Material, `--from edit.yaml`, Kontaktbogen) — bewusst zurückgestellt. |
-| **Auswahl aus großem Material** | **Stufen 0–2 umgesetzt** ([`docs/briefing-auswahl.md`](docs/briefing-auswahl.md)). `slideshow select` wählt nach Zeitstruktur (Trauben, gedämpfte Tagesquote, Spreizung) und schreibt `order.yaml` mit `rest: drop`; `preprocess` folgt der Auswahl (`--order`/`--all`) — [Rezept 5b](docs/rezepte.md#5b-aus-tausend-bildern-auswählen-lassen). Dazu Stufe 0: `read_exif_batch` läuft über `-@ argfile` (brach vorher **ab 193 Dateien** ab und meldete dabei „Programm nicht gefunden: exiftool"). Offen ist Stufe 3 (Kontaktbogen `slideshow sheet`; der erzeugte Dateikopf verweist bereits darauf). |
+| **Auswahl aus großem Material** | **Vollständig** ([`docs/briefing-auswahl.md`](docs/briefing-auswahl.md), Stufen 0–3). `slideshow select` wählt nach Zeitstruktur (Trauben, gedämpfte Tagesquote, Spreizung) und schreibt `order.yaml` mit `rest: drop`; `preprocess` folgt der Auswahl (`--order`/`--all`); `slideshow sheet` (auch `select --sheet`) erzeugt den Kontaktbogen `contact.html` — [Rezept 5b](docs/rezepte.md#5b-aus-tausend-bildern-auswählen-lassen). Dazu Stufe 0: `read_exif_batch` läuft über `-@ argfile` (brach vorher **ab 193 Dateien** ab und meldete dabei „Programm nicht gefunden: exiftool"). Offen ist nur A10, die Sichtprüfung an einem Sammelbecken über 1000 Aufnahmen. |
+| **Rückweg aus dem Bogen** | `slideshow order --apply auswahl.txt` (oder `-` für die Zwischenablage) spielt die markierten Änderungen ein: `sheet.parse_changes` liest das Format, `order.apply_changes` schreibt. **Der Bogen schreibt weiterhin nichts** — Entscheidung 7 gilt, nur der Rückweg ist jetzt ein Kommando statt Handarbeit (an echtem Material waren es ~160 Tausche). Zwei Fallen dabei: eine Chronologieprüfung über eine `set` meldet jede sortierte Datei als unsortiert, und PowerShell setzt vor jede Pipe ein BOM. |
+| **Kontaktbogen: zwei Fallen** | `sheet` **würfelt nicht neu**, es rekonstruiert aus `order.yaml` (`selection_from_order`) — gewählt ist, was in `items:` steht. Damit ist der **Kopf der `order.yaml` eine Schnittstelle**: `read_params` liest Seed, Traubenabstand und Mindestlangkante aus den Kommentarzeilen zurück, die `select` dort hinterlegt. Wer die Kopfzeilen in `select._kopf` umformuliert, muss `_KOPF` in `sheet.py` mitziehen, sonst rechnet der Bogen still mit den Vorgaben. Zweitens: die JPEGs in `testset1/` haben **keine eingebettete EXIF-Vorschau** (RawTherapee-Export), der Bogen skaliert dort also über ffmpeg — der schnelle Pfad lässt sich daran nicht messen. |
 | **HLG unter ffmpeg 8.1.2** | Siehe oben, die drei roten Tests. Kein Briefing vorhanden. |
 | **Blendenmodus wird nicht geprüft** | `_XFADE_MODES.get(mode, "fade")` in `kenburns.py` macht aus einem vertippten Modus stillschweigend eine normale Blende — die einzige Stelle im Schema ohne Validierung. `known_modes()` gibt es bereits. |
 | **Ken-Burns-Richtung** | **Umgesetzt** (Entscheidung 7 des Titelfolien-Briefings). `plan_motion` nimmt die Kennung (`src`) statt des Slot-Index, `motion_key` hasht sie mit `blake2b`. Einfügen und Umsortieren sind damit dauerhaft billig; der Preis ist ein nur noch statistischer Zoomwechsel und identische Bewegung bei einem doppelt verwendeten Bild. |

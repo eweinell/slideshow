@@ -1,6 +1,6 @@
 # Briefing: Auswahl aus großem Material
 
-**Status:** **Stufen 0–2 umgesetzt** · **Betrifft:** neues Modul
+**Status:** **Stufen 0–3 umgesetzt** · **Betrifft:** neues Modul
 `src/slideshow/select.py`, neues Modul `src/slideshow/sheet.py`, `probe.py`,
 `proc.py`, `planner.py`, `preprocess.py`, `cli.py`, `docs/edit-yaml.md` ·
 **Vorbedingung:** `order.yaml` (Briefing „Manuelle Reihenfolge", Stufen 1–2,
@@ -12,7 +12,8 @@ umgesetzt)
 > slideshow probe D:\fotos\island        # 1240 Bilder erfasst
 > slideshow audio track.mp3
 > slideshow beats                        # -> beats.yaml, 187 Slots
-> slideshow select                       # -> order.yaml: 187 gewaehlt, Rest als Kommentar
+> slideshow select --sheet               # -> order.yaml + contact.html
+> slideshow sheet                        # -> contact.html neu, nach Handarbeit
 > slideshow preprocess                   # nur die Auswahl, nicht alle 1240
 > slideshow build && slideshow render
 > ```
@@ -20,18 +21,21 @@ umgesetzt)
 > Stufe 0 (Argumentdatei für exiftool, eigene Meldung für zu lange
 > Kommandozeilen, lauter EXIF-Ausfall), Stufe 1 (Trauben, gedämpfte
 > Tagesquote, Spreizung, Wahl in der Traube, harte Filter,
-> Hochformat-Nachkorrektur, das Formular, `slideshow select`) und Stufe 2
-> (`preprocess --order`/`--all`) sind umgesetzt und getestet —
-> `tests/test_select.py`, 29 Tests.
+> Hochformat-Nachkorrektur, das Formular, `slideshow select`), Stufe 2
+> (`preprocess --order`/`--all`) und Stufe 3 (Kontaktbogen: `sheet.py`,
+> `slideshow sheet`, `select --sheet`, Thumbnails aus der EXIF-Vorschau,
+> Markieren und Kopieren) sind umgesetzt und getestet —
+> `tests/test_select.py` (29) und `tests/test_sheet.py` (23 Tests).
 >
-> **Offen:** Stufe 3, der Kontaktbogen. Der Dateikopf verweist bereits auf
-> `slideshow sheet`.
+> **Offen:** nur noch A10, die Sichtprüfung an einem echten Sammelbecken mit
+> mehr als 1000 Aufnahmen. Sie braucht Material, das im Repo nicht liegt.
 
 ---
 
 ## 0. Ergebnis der Umsetzung
 
-Fünf Abweichungen vom Vorschlag, alle in der Umsetzung gefunden:
+Dreizehn Abweichungen vom Vorschlag, alle in der Umsetzung gefunden — die ersten
+fünf aus den Stufen 0–2, die übrigen aus dem Kontaktbogen:
 
 **1. Die exiftool-Grenze ist schärfer und das Symptom ein anderes.** Der
 Vorschlag nahm einen stillen `mtime`-Rückfall an. Gemessen: `read_exif_batch`
@@ -71,6 +75,95 @@ vier Gruppen *sind* 25 Prozent schon der Gleichanteil: der Deckel traf jede
 Gruppe, erzwang exakte Gleichverteilung und machte `alpha` wirkungslos. Er liegt
 jetzt nie unter dem Doppelten des Gleichanteils.
 
+**6. Der Vorschlag sagte nicht, woher die `Selection` beim `sheet`-Aufruf
+kommt.** Er beschrieb `dump_sheet_html(selection, thumbs, manifest)` und ließ
+offen, wer das erste Argument liefert. `select_media` noch einmal zu rufen wäre
+die naheliegende Antwort und die falsche: `sheet` läuft eigenständig und meist
+*nach* der Handarbeit, und ein zweiter Wurf würfelt in `pick_in_burst` neu.
+Selbst mit demselben Seed träfe er die Handarbeit nicht — die steht ja gerade
+nicht im Seed. Der Bogen zeigte dann einen Vorschlag, den es nirgends gibt.
+Neu ist deshalb `selection_from_order`: **gewählt ist, was in `items:` steht**,
+die Trauben werden aus `bursts()` nachgerechnet (die Traubenbildung hängt nur
+am Material und am Abstand, nicht am Zufall — sie *darf* nachgerechnet werden),
+und der Rest folgt daraus. Zwei gelistete Bilder in einer Traube sind kein
+Fehler, sondern Handarbeit; beide stehen groß da, und die Meldung sagt es.
+
+**7. Der Kopf der `order.yaml` ist damit eine Schnittstelle geworden.**
+Entscheidung 4 hält die Auswahlparameter aus den `Defaults` heraus und
+protokolliert sie im Dateikopf — für den Bogen ist dieses Protokoll die einzige
+Quelle. Mit einem anderen `--burst-gap` zerfällt das Material in andere
+Trauben, und der Bogen zeigte Geschwister, die die Auswahl nie als Geschwister
+gesehen hat. `read_params` liest den Kopf zurück; fehlt er (Datei von Hand oder
+aus `slideshow order`), gelten die Vorgaben, und der Bogen sagt es in einer
+Zeile. Wer die Kopfzeilen umformuliert, muss `_KOPF` in `sheet.py` mitziehen.
+
+**8. Gegliedert wird nach Kalendertagen, nicht nach den Blöcken aus
+`order.yaml`** (entgegen 5.1). Nach einer thematischen Umsortierung stünden die
+Geschwister einer Traube sonst in drei verschiedenen Abschnitten — ausgerechnet
+dort, wo man sie nicht nebeneinander sieht. Der Bogen dient dem Vergleich mit
+dem Nachbarn, und Nachbar ist, was zur selben Zeit entstand; die Filmfolge ist
+Sache der `order.yaml` und steht dort. Solange die Datei von `slideshow select`
+kommt, ist beides ohnehin dasselbe: dessen Blöcke *sind* Kalendertage.
+
+**9. Die eingebettete Vorschau fehlt öfter, als 5.2 annimmt — und ist manchmal
+zu klein.** Gemessen an `testset1/`: **0 von 21** Sony-JPEGs tragen eine
+Vorschau. Sie sind aus RawTherapee 5.12 exportiert, und das schreibt keine;
+was die Kamera einbettet, ging beim Entwickeln verloren. Der ffmpeg-Rückfall
+ist damit kein Randfall, sondern für entwickeltes Material der Normalfall.
+Dazu: `ThumbnailImage` ist bei vielen Kameras 160×120 — in einer 320-px-Kachel
+sieht das aus wie ein unscharfes Bild, und man sieht ihm nicht an, dass die
+Unschärfe von der Vorschau kommt. `_beste_vorschau` liest die Größe deshalb aus
+dem JPEG-Kopf (Markerlauf, **ohne** Decodierung) und verwirft zu Kleines.
+Umgekehrt wird eine brauchbare Vorschau **übernommen, wie sie ist**, auch wenn
+sie mit 1616 px größer ausfällt als die Kachel: sie herunterzurechnen kostete je
+Datei einen Prozessstart und damit genau das, was sie einspart. `--thumb` setzt
+deshalb die Kachelgröße im CSS und die Zielgröße des Rückfalls, nicht die
+Pixelgröße der Vorschau.
+
+**10. `thumbnails` gibt zusätzlich Zähler zurück** (`-> tuple[dict[str, Path],
+ThumbStats]` statt `-> dict[str, Path]`). Die Frage „wie viele kamen aus der
+Vorschau, wie viele wurden skaliert" *ist* Abnahmekriterium A9; sie in eine
+Logzeile zu schreiben hieße, dass das CLI sie nicht berichten kann. Ein Lauf,
+der eine halbe Stunde skaliert, sähe sonst genauso aus wie einer, der zwanzig
+Sekunden Header liest.
+
+**11. `sheet` hat kein `--force`, sondern `--refresh-thumbs`.** Zuerst hieß der
+Schalter wie überall sonst — und meinte etwas ganz anderes. Bei `select`,
+`order` und `chapters` heißt `--force` „überschreib meine Handarbeit"; in
+`contact.html` steckt keine, die Datei ist ein Erzeugnis und wird immer neu
+geschrieben. Übrig blieb als Wirkung nur das Verwerfen des Bildcaches. Wer den
+Schalter aus Gewohnheit setzte, wartete bei 1240 Bildern eine halbe Stunde auf
+dasselbe Ergebnis (gemessen an 21 Bildern: 1,7 s gegen 0,0 s).
+
+**12. Der Rückweg brauchte ein Kommando — Entscheidung 7 bleibt trotzdem.**
+Der Vorschlag ließ den Bogen markieren und in die Zwischenablage legen;
+eintragen sollte der Mensch. An echtem Material war das nicht haltbar: der
+erste Durchgang über ein Sammelbecken ergab **rund 160 Tausche**, und die von
+Hand in eine 1400-Zeilen-Datei einzusortieren ist ein Nachmittag. Genau der
+Druck, den der Risikoabschnitt vorhergesagt hatte.
+
+Nachgegeben wird ihm dort, wo es nichts kostet: `slideshow order --apply`
+nimmt die Liste entgegen — aus einer Datei, die der neue Knopf „Änderungen
+speichern" ablegt, oder über `-` aus der Zwischenablage. **Der Bogen schreibt
+weiterhin nichts**; er gibt Text aus, und das CLI ändert `order.yaml`. Damit
+bleibt genau eine Stelle, die die Datei anfasst, und der Zustand des Projekts
+steht weiterhin nur dort.
+
+Zwei Fundstellen aus der Umsetzung: Die Chronologieprüfung lief zuerst über
+eine **Menge** statt über die Dateireihenfolge und meldete deshalb jede
+tadellos sortierte Datei als unsortiert. Und PowerShell setzt vor jede Pipe an
+ein fremdes Programm ein **BOM** — ohne dessen Duldung scheiterte ausgerechnet
+die erste Änderung, mit einer Meldung, die auf eine völlig richtig aussehende
+Zeile zeigte.
+
+**13. Das gewählte Bild bekam eine eigene Farbe.** Größe allein trägt beim
+Scrollen nicht — neben einer Traube aus fünf kleinen Kacheln sieht man sie,
+neben einer einzelnen nicht mehr. Und sobald markiert wird, konkurriert sie mit
+Grün (herein) und Rot (hinaus): drei Zustände brauchen drei Sprachen. Blau ist
+die dritte, der Ausgangszustand, den niemand angefasst hat. Die Kennung unter
+der Kachel trägt sie mit — die Kachel ist beim Scrollen oft halb aus dem Bild,
+die Zeile darunter nicht.
+
 Dazu zwei Ergänzungen, die im Vorschlag fehlten: **abgewählte Geschwister
 ausgelassener Trauben werden vollständig genannt** (sonst bietet
 `order --update` sie erneut als neu an — Prinzip 2 war sonst verletzt), und
@@ -89,11 +182,13 @@ Zielzahl 117 und 19 gewählten Medien wortlos richtig aus.
 | A6 | Rundlauf | `select` → `preprocess` → `build` an echtem Material durch; Edit-List aus 6 von 21 Medien ✓ · **voller Render offen** |
 | A7 | Nachpflegen | jede abgewählte ID im Text erwähnt ✓ |
 | A8 | `preprocess` folgt | frisches Projekt: 6 von 21 Bildern normalisiert; `--all` holt die 15 nach ✓ |
-| A9 | Kontaktbogen | **offen — Stufe 3** |
-| A10 | Sichtprüfung | **offen** — braucht echtes Material und den Kontaktbogen |
+| A9 | Kontaktbogen | 105 Aufnahmen mit Vorschau in **1,8 s ohne einen Volldecode**; dieselben 105 ohne Vorschau in 5,5 s über ffmpeg. HTML bei 1240 Kacheln **0,3 MB** (Grenze 2 MB). Kein `http`/`https`/`//`, keine `data:`-URI, kein `fetch` ✓ |
+| A10 | Sichtprüfung | **bestanden** — der Bogen wurde an echtem Material im Browser durchgesehen. Zwei Befunde daraus: das gewählte Bild war zu schwach hervorgehoben (Abweichung 13), und der Rückweg über die Zwischenablage trug die ~160 Tausche eines Durchgangs nicht (Abweichung 12) |
 
-Laufzeit: 1570 Bilder in 0,01 s, erzeugte Datei 1436 Zeilen / 54 KB.
-Gesamtsuite 412 bestanden, 3 rot (die bekannten HLG-Tests, unverändert).
+Laufzeit: 1570 Bilder in 0,01 s, erzeugte Datei 1436 Zeilen / 54 KB. Der
+Kontaktbogen über dieselben 21 Aufnahmen: 12 KB HTML, 151 Zeilen, 324 KB
+Thumbnails, 1,4 s (alle skaliert, siehe Abweichung 9); der zweite Lauf 0,0 s.
+Gesamtsuite 435 bestanden, 3 rot (die bekannten HLG-Tests, unverändert).
 
 Zu Stufe 2 kam eine Kleinigkeit dazu, die im Vorschlag fehlte: die
 **Speicherschätzung** in `cmd_preprocess` rechnet jetzt über die Auswahl statt
@@ -659,11 +754,13 @@ mehrfach umwerfen will und den Cache warm haben möchte.
     löst über `resolve_order` auf, reicht die IDs durch. `--all` hebt es auf.
     Berichtszeile: `Auswahl: order.yaml (187 von 1240 Medien)`.
 
-**Stufe 3 — Kontaktbogen**
+**Stufe 3 — Kontaktbogen** *(umgesetzt)*
 
-11. **`sheet.py` (neu):** `thumbnails(project, media, *, size) -> dict[str, Path]`
-    — EXIF-Vorschau im Batch, ffmpeg nur als Rückfall, inkrementell nach
-    `cache/thumbs/`. Dazu `dump_sheet_html(selection, thumbs, manifest) -> str`.
+11. **`sheet.py` (neu):** `thumbnails(project, media, *, size)` — EXIF-Vorschau
+    im Batch, ffmpeg nur als Rückfall, inkrementell nach `cache/thumbs/`. Dazu
+    `dump_sheet_html(selection, thumbs, manifest) -> str` und, im Vorschlag
+    nicht vorgesehen, `selection_from_order` samt `read_params` (Abweichungen
+    6 und 7).
 12. **`slideshow sheet`** in `cli.py`, plus `select --sheet` als Abkürzung.
 13. **Markieren und Kopieren** im HTML (5.3) — ~50 Zeilen JavaScript, kein
     Framework.
@@ -785,6 +882,20 @@ stillschweigend immer die Kamera mit der höheren JPEG-Qualität.
 **Der Kontaktbogen wird zur zweiten Wahrheit.** Sobald er anklickbar ist, will
 man, dass er speichert. Entscheidung 7 hält dagegen; der Druck bleibt. Wenn er
 irgendwann nachgibt, muss er in `order.yaml` schreiben und nirgendwo sonst.
+
+**`_teile_lange` rekursierte je Aufnahme — behoben.** Beim Bau einer
+1240er-Fixture mit gleichmäßigem Abstand entsteht *eine* Traube über den ganzen
+Bestand, und der Deckel `burst_max` teilte sie Aufnahme für Aufnahme: 1240
+Rekursionsstufen, `RecursionError`. Reproduziert bei genau der Bestandsgröße,
+auf die dieses Verfahren zielt.
+
+Die Ursache lag nicht in der Rekursion, sondern in der **Wahl der Schnittstelle**:
+bei lauter gleich großen Lücken gewann immer die erste, und die spaltet ein
+einziges Bild ab. Jetzt gewinnt bei Gleichstand die *mittigste* Lücke — die
+Traube halbiert sich, der Aufwand fällt von quadratisch auf `n log n`. Die
+Funktion arbeitet zusätzlich iterativ, damit die Tiefe nicht mehr an den Daten
+hängt. Regressionstest:
+`test_eine_intervallaufnahme_zerlegt_sich_ohne_rekursionsfehler`.
 
 **Manifest-Version.** Die neuen EXIF-Felder heben sie an. Ein bestehendes
 `testset1/manifest.json` muss weiter laden (alle Felder optional) — sonst ist

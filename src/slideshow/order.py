@@ -345,13 +345,22 @@ def dump_order_yaml(bloecke: list[Block], manifest: Manifest, *, by: str = "day"
     return "\n".join(zeilen) + "\n"
 
 
-def _kontext(m: MediaItem, tag_eins: _dt.date | None, offsets: dict[str, float]) -> str:
-    """Der Kommentar hinter einer Zeile — das, was man zum Sortieren braucht."""
+def _kontext(m: MediaItem, tag_eins: _dt.date | None, offsets: dict[str, float],
+             *, knapp: bool = False) -> str:
+    """Der Kommentar hinter einer Zeile — das, was man zum Sortieren braucht.
+
+    ``knapp`` laesst den Tag weg und nennt nur die Uhrzeit. Das ist die Form,
+    die ``slideshow select`` schreibt: dort steht der Tag schon ueber dem Block,
+    und bei zweihundert Zeilen zaehlt jede Wiederholung. Eine eingefuegte Zeile
+    muss aussehen wie ihre Nachbarn, sonst sieht die Datei nach zwei Werkzeugen
+    aus.
+    """
     teile: list[str] = []
     ts = effective_capture_time(m, offsets)
     if ts is not None and m.time_source != "none":
         wann = _dt.datetime.fromtimestamp(ts)
-        teile.append(f"{day_label(ts, tag_eins)} {wann:%H:%M}")
+        teile.append(f"{wann:%H:%M}" if knapp
+                     else f"{day_label(ts, tag_eins)} {wann:%H:%M}")
     if m.kind == "clip":
         info = m.clip
         dauer = (info.cache_duration or info.effective_duration) if info else 0.0
@@ -461,6 +470,164 @@ def _letzte_erwaehnung(text: str, manifest: Manifest) -> int:
         if any(t.group(1) in bekannt for t in _ITEM_RE.finditer(zeile.replace("#", " "))):
             letzte = nr
     return letzte
+
+
+# --------------------------------------------------------------------------
+# Aenderungen aus dem Kontaktbogen einspielen
+# --------------------------------------------------------------------------
+
+def apply_changes(text: str, manifest: Manifest, rein: list[str], raus: list[str],
+                  *, quelle: str = "order.yaml") -> tuple[str, list[str]]:
+    """Nimmt Medien herein und heraus — auf dem Quelltext, nicht auf dem Modell.
+
+    Der Rueckweg vom Kontaktbogen. Bei einer Handvoll Tausche traegt man sie
+    selbst ein; bei hundertsechzig ist das ein Nachmittag, und genau dafuer gibt
+    es diese Funktion.
+
+    Gearbeitet wird wie in :func:`update_order_text` auf dem **Text**: die
+    Kommentare sind in dieser Datei die halbe Miete — sie tragen die
+    Alternativen, die Begruendungen und bei ``rest: drop`` die Abwahl selbst.
+    Ein Neuschreiben aus dem Modell verloere sie.
+
+    **Wohin ein hereingenommenes Bild kommt:** vor den ersten Eintrag, der
+    *spaeter* aufgenommen wurde. Solange die Bloecke chronologisch liegen — und
+    das tun sie, wenn die Datei aus ``slideshow select`` stammt —, landet es
+    damit von selbst im richtigen Tagesblock, weil die Blockkoepfe zwischen den
+    Eintraegen stehen. Nach einer thematischen Umsortierung stimmt nur noch die
+    Zeit, nicht mehr der Block; darauf weist die Meldung hin.
+
+    Idempotent: ein Bild, das schon gelistet ist, wird nicht doppelt
+    eingetragen, und eines, das gar nicht drinsteht, laesst sich nicht
+    herausnehmen. Beides ist eine Meldung, kein Abbruch — bei hundertsechzig
+    Aenderungen ist die halb angewandte Liste der schlechtere Ausgang.
+    """
+    by_id = {m.id: m for m in manifest.media}
+    offsets = manifest.clock_offsets
+    name = Path(quelle).name
+
+    unbekannt = [mid for mid in [*rein, *raus] if mid not in by_id]
+    if unbekannt:
+        raise SchemaError(
+            f"{len(unbekannt)} Kennungen aus der Aenderungsliste stehen nicht im "
+            f"Manifest: {_liste(unbekannt)}. Stammt die Liste von einem anderen "
+            f"Projekt, oder wurde seither neu erfasst?", file=quelle)
+
+    beides = sorted(set(rein) & set(raus))
+    if beides:
+        raise SchemaError(
+            f"{len(beides)} Medien sollen zugleich herein und hinaus: "
+            f"{_liste(beides)}. Die Liste widerspricht sich — im Bogen noch "
+            f"einmal ansehen.", file=quelle)
+
+    zeilen = text.splitlines()
+    stellen = item_lines(text)
+    gelistet = {mid for mid in stellen if mid in by_id}
+    meldungen: list[str] = []
+
+    # -- herausnehmen ---------------------------------------------------
+    # Auskommentiert, nicht geloescht: die Zeile steht an der Stelle, an die das
+    # Bild einsortiert war, und ihr Kommentar sagt, was es zeigte. Wer den
+    # Tausch bereut, macht ihn mit einem Handgriff rueckgaengig.
+    heute = _dt.date.today().isoformat()
+    nicht_drin = [mid for mid in raus if mid not in gelistet]
+    getan_raus = 0
+    for mid in raus:
+        for nr in stellen.get(mid, []):
+            roh = zeilen[nr - 1]
+            einzug = len(roh) - len(roh.lstrip())
+            zeilen[nr - 1] = (f"{' ' * einzug}# {roh.strip()}"
+                              f"   # heraus {heute}")
+            getan_raus += 1
+
+    # -- hereinnehmen ---------------------------------------------------
+    schon_drin = [mid for mid in rein if mid in gelistet]
+    offen = [mid for mid in rein if mid not in gelistet]
+    tag_eins = first_day(chronological(manifest), offsets)
+    # Alle Einfuegungen vorher bestimmen und erst danach anwenden, von hinten
+    # nach vorn — sonst verschiebt die erste Einfuegung alle folgenden Zeilen.
+    # Knapper Kontext: die Datei kommt aus `select`, und dort steht der Tag
+    # ueber dem Block. Eine eingefuegte Zeile soll aussehen wie ihre Nachbarn.
+    knapp = _knappe_zeilen(text)
+    nach_stelle: dict[int, list[str]] = {}
+    for mid in sorted(offen, key=lambda x: _zeitschluessel(by_id[x], offsets)):
+        idx = _einfuegepunkt(by_id[mid], zeilen, by_id, offsets)
+        neu = (f"      - {mid}"
+               f"{_kontext(by_id[mid], tag_eins, offsets, knapp=knapp)}")
+        nach_stelle.setdefault(idx, []).append(neu)
+    for idx in sorted(nach_stelle, reverse=True):
+        zeilen[idx:idx] = nach_stelle[idx]
+
+    # -- Meldungen ------------------------------------------------------
+    if offen:
+        meldungen.append(f"{len(offen)} Medien hereingenommen")
+    if getan_raus:
+        meldungen.append(f"{getan_raus} Zeilen auskommentiert")
+    if schon_drin:
+        meldungen.append(f"{len(schon_drin)} standen bereits in {name} und "
+                         f"bleiben unveraendert: {_liste(schon_drin)}")
+    if nicht_drin:
+        meldungen.append(f"{len(nicht_drin)} sollten heraus, standen aber gar "
+                         f"nicht in {name}: {_liste(nicht_drin)}")
+    if not (offen or getan_raus):
+        meldungen.append(f"nichts zu tun — {name} steht bereits so da")
+
+    # Die Folge *nach* der Aenderung, in Dateireihenfolge — aus dem fertigen
+    # Text gelesen und nicht aus `gelistet` zusammengesetzt: das ist eine Menge
+    # und hat gar keine Reihenfolge. Daraus gebaut meldete die Pruefung eine
+    # unsortierte Datei, wo eine tadellos sortierte stand.
+    neuer_text = "\n".join(zeilen) + "\n"
+    danach = item_lines(neuer_text)
+    ids_danach = [mid for mid, nrs in sorted(danach.items(), key=lambda kv: kv[1][0])
+                  if mid in by_id]
+    if offen and not is_chronological(manifest, ids_danach):
+        meldungen.append(
+            "Die Reihenfolge ist nicht chronologisch. Hereingenommene Medien "
+            "stehen an der ersten zeitlich passenden Stelle — das ist nicht "
+            "unbedingt die Gruppe, in die sie thematisch gehoeren.")
+    return (neuer_text, meldungen)
+
+
+#: Eine Eintragszeile, deren Kommentar mit der Uhrzeit beginnt — die Form aus
+#: ``slideshow select``. ``slideshow order`` schreibt stattdessen "Tag 3 · …".
+_KNAPP = re.compile(r"^\s*-\s*[A-Za-z0-9_-]+\s+#\s*\d{1,2}:\d{2}\b", re.M)
+
+
+def _knappe_zeilen(text: str) -> bool:
+    """Schreibt diese Datei die kurze Kommentarform?
+
+    Geraten wird an dem, was dasteht, statt an der Herkunft: eine Datei kann
+    von Hand entstanden oder umgeschrieben worden sein, und der Dateikopf
+    ueberlebt nicht jede Bearbeitung.
+    """
+    return bool(_KNAPP.search(text))
+
+
+def _zeitschluessel(m: MediaItem, offsets: dict[str, float]) -> tuple[float, str]:
+    """Aufnahmezeit als Sortierschluessel; Datumsloses ans Ende."""
+    ts = effective_capture_time(m, offsets)
+    return (float("inf") if ts is None else ts, m.path)
+
+
+def _einfuegepunkt(m: MediaItem, zeilen: list[str], by_id: dict[str, MediaItem],
+                   offsets: dict[str, float]) -> int:
+    """Index, **vor** dem die neue Zeile steht.
+
+    Gesucht ist die erste Eintragszeile mit spaeterer Aufnahmezeit. Gibt es
+    keine, kommt das Bild hinter den letzten Eintrag — nicht ans Dateiende, wo
+    es unter die Schlusskommentare rutschte.
+    """
+    ziel = _zeitschluessel(m, offsets)
+    letzter = 0
+    for nr, zeile in enumerate(zeilen):
+        vor_kommentar = zeile.split("#", 1)[0]
+        treffer = [t.group(1) for t in _ITEM_RE.finditer(vor_kommentar)]
+        gefunden = next((t for t in treffer if t in by_id), None)
+        if gefunden is None:
+            continue
+        letzter = nr + 1
+        if _zeitschluessel(by_id[gefunden], offsets) > ziel:
+            return nr
+    return letzter
 
 
 # --------------------------------------------------------------------------

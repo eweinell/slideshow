@@ -813,6 +813,15 @@ Analyse — [Rezept 5b](rezepte.md#5b-aus-tausend-bildern-auswählen-lassen)
 beschreibt das Verfahren, [`briefing-auswahl.md`](briefing-auswahl.md)
 begründet es.
 
+Angesehen wird das Ergebnis mit `slideshow sheet`: eine HTML-Seite, auf der
+jede Traube als Kachelgruppe steht, das gewählte Bild groß, seine Geschwister
+klein daneben. Der Bogen **liest** diese Datei und schreibt sie nie — was in
+`items:` steht, ist gewählt, auch nach Handarbeit. Ein Klick markiert einen
+Tausch, ein Knopf legt die YAML-Zeilen in die Zwischenablage; eintragen macht
+der Mensch. Die Auswahlparameter, die `slideshow select` in den Dateikopf
+schreibt, liest der Bogen von dort zurück — wer den Kopf umschreibt, nimmt ihm
+den Traubenabstand, und er rechnet still mit der Vorgabe weiter.
+
 Danach gilt für die Datei nichts Besonderes: sie ist eine gewöhnliche
 `order.yaml`, und `order --update` pflegt sie nach, ohne die Auswahl zu
 verlieren.

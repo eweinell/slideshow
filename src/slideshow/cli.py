@@ -17,6 +17,7 @@ from .proc import DryRun
 # zweites Mal in den `--help`-Texten.
 from .select import (BURST_GAP, BY_CHOICES, DAY_ALPHA, MAX_PORTRAIT, MAX_SHARE,
                      MIN_LONG_EDGE, MIN_PER_DAY)
+from .sheet import THUMB_SIZE
 
 log = logging.getLogger("slideshow.cli")
 
@@ -146,6 +147,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="neu hinzugekommenes Material einpflegen und dabei "
                          "Sortierung, Gruppennamen und Kommentare behalten — der "
                          "Weg nach einem erneuten `probe`")
+    od.add_argument("--apply", default=None, metavar="auswahl.txt",
+                    help="Aenderungen aus dem Kontaktbogen einspielen: markierte "
+                         "Medien hereinnehmen, andere auskommentieren. `-` liest "
+                         "die Zeilen von der Eingabe, zum Einfuegen aus der "
+                         "Zwischenablage")
     od.add_argument("--force", action="store_true",
                     help="vorhandene Datei ueberschreiben und damit die Sortierung "
                          "verwerfen (globales --dry-run zeigt sie nur an)")
@@ -198,9 +204,52 @@ def build_parser() -> argparse.ArgumentParser:
                          f"darueber wird innerhalb der Traube getauscht")
     se.add_argument("--no-keep-clips", action="store_true",
                     help="Clips wie Bilder behandeln statt sie alle zu nehmen")
+    se.add_argument("--sheet", action="store_true",
+                    help="danach gleich den Kontaktbogen erzeugen "
+                         "(`slideshow sheet`) — die Auswahl kennt keine "
+                         "Bildinhalte, angesehen werden muss sie trotzdem")
     se.add_argument("--force", action="store_true",
                     help="vorhandene order.yaml ueberschreiben und damit Auswahl "
                          "und Sortierung verwerfen")
+
+    sh = sub.add_parser(
+        "sheet", help="Kontaktbogen zur Auswahl erzeugen -> contact.html",
+        description="Erzeugt eine HTML-Seite, auf der die Auswahl aus order.yaml "
+                    "zu sehen ist: nach Tagen gegliedert, jede Traube als "
+                    "Kachelgruppe, das gewaehlte Bild gross, seine Geschwister "
+                    "klein daneben. Der Bogen liest order.yaml und schreibt "
+                    "nichts — ein Klick markiert einen Tausch, der Knopf legt "
+                    "die YAML-Zeilen in die Zwischenablage, eintragen macht der "
+                    "Mensch.")
+    sh.add_argument("-o", "--output", default=None, metavar="contact.html",
+                    help="Zieldatei (Default: contact.html im Projektverzeichnis)")
+    sh.add_argument("--manifest", default=None,
+                    help="abweichendes Manifest (Default: manifest.json im Projekt)")
+    sh.add_argument("--order", default=None, metavar="order.yaml",
+                    help="Auswahl, die gezeigt wird (Default: order.yaml im "
+                         "Projekt). Was dort in `items:` steht, ist gewaehlt — "
+                         "auch nach Handarbeit")
+    sh.add_argument("--thumb", type=int, default=THUMB_SIZE, metavar="PX",
+                    help=f"Kachelgroesse in Bildpunkten (Default: {THUMB_SIZE})")
+    sh.add_argument("--jobs", type=int, default=None,
+                    help="parallele ffmpeg-Laeufe fuer Bilder ohne eingebettete "
+                         "Vorschau")
+    auswahl = sh.add_mutually_exclusive_group()
+    auswahl.add_argument("--all", action="store_true", dest="alles",
+                         help="alles zeigen: Auswahl, Geschwister, ausgelassene "
+                              "Trauben, technische Ausschluesse (Default)")
+    auswahl.add_argument("--selected", action="store_true",
+                         help="nur die gewaehlten Medien — der schnelle Blick auf "
+                              "den Film, ohne die Alternativen")
+    # Bewusst nicht `--force`. Der heisst bei `select`, `order` und `chapters`
+    # "ueberschreib meine Handarbeit"; hier gibt es keine — contact.html ist ein
+    # Erzeugnis und wird immer neu geschrieben. Wer den Schalter aus Gewohnheit
+    # setzte, verwuerfe nur den Bildcache und wartete bei 1240 Bildern eine
+    # halbe Stunde auf dasselbe Ergebnis.
+    sh.add_argument("--refresh-thumbs", action="store_true", dest="force",
+                    help="Thumbnails neu erzeugen, statt vorhandene "
+                         "wiederzuverwenden — noetig, wenn ein Bild unter "
+                         "gleichem Namen neu entwickelt wurde")
 
     bu.add_argument("--chapters", default=None, metavar="chapters.yaml",
                     help="Titel- und Zwischenfolien einsetzen "
@@ -806,7 +855,13 @@ def cmd_order(args, project: Project) -> int:
     out = Path(args.output) if args.output else (project.root / "order.yaml")
     con = console()
 
-    if args.update:
+    if args.apply:
+        if not out.exists():
+            raise SlideshowError(
+                f"{out} gibt es noch nicht — `--apply` aendert eine bestehende "
+                f"Auswahl. Erst `slideshow select`, dann den Bogen ansehen.")
+        text, meldungen = _apply_changes(args, out, manifest)
+    elif args.update:
         if not out.exists():
             raise SlideshowError(f"{out} gibt es noch nicht — `--update` pflegt eine "
                                  f"bestehende Datei nach. Ohne den Schalter wird sie "
@@ -826,7 +881,7 @@ def cmd_order(args, project: Project) -> int:
     # Wie bei den Kapiteln: die Datei ist Handarbeit, sobald einmal sortiert
     # wurde. Sie kommentarlos zu ueberschreiben hiesse, die Sortierung zu
     # loeschen — dafuer gibt es `--update`, und erst danach `--force`.
-    if out.exists() and not (args.force or args.update):
+    if out.exists() and not (args.force or args.update or args.apply):
         raise SlideshowError(
             f"{out} gibt es bereits und enthaelt die Sortierung. `--update` pflegt "
             f"neues Material ein und behaelt sie, `--force` wirft sie weg, "
@@ -836,10 +891,57 @@ def cmd_order(args, project: Project) -> int:
     con.print(f"Reihenfolge: {out}")
     for m in meldungen:
         con.print(f"  [dim]{m}[/dim]")
-    if not args.update:
+    if args.apply:
+        con.print("Den Bogen neu erzeugen, um den Stand zu sehen: "
+                  "`slideshow sheet`")
+    elif not args.update:
         con.print("[yellow]Die Reihenfolge ist noch chronologisch.[/yellow] Zum "
                   "Sortieren die Zeilen verschieben. Danach: `slideshow build`")
     return 0
+
+
+def _apply_changes(args, out: Path, manifest) -> tuple[str, list[str]]:
+    """Die Aenderungsliste aus dem Kontaktbogen einlesen und anwenden.
+
+    Zwei Wege hinein, weil zwei Arbeitsweisen: ``--apply auswahl.txt`` fuer die
+    Datei, die der Knopf "Aenderungen speichern" ablegt, und ``--apply -`` fuer
+    das, was in der Zwischenablage liegt. Der zweite Weg ist der bequemere bei
+    einer Handvoll Tausche, der erste der einzige bei hundertsechzig.
+    """
+    from .order import apply_changes
+    from .sheet import parse_changes
+
+    con = console()
+    if args.apply == "-":
+        con.print("[dim]Zeilen aus dem Kontaktbogen einfuegen, dann Strg+Z und "
+                  "Enter (Windows) bzw. Strg+D (Linux).[/dim]")
+        roh = sys.stdin.read()
+    else:
+        pfad = Path(args.apply)
+        if not pfad.exists():
+            raise SlideshowError(
+                f"Aenderungsliste fehlt: {pfad}. Sie entsteht im Kontaktbogen "
+                f"ueber den Knopf 'Aenderungen speichern' — oder `--apply -` "
+                f"nimmt sie aus der Zwischenablage entgegen.")
+        roh = pfad.read_text(encoding="utf-8")
+
+    rein, raus, unklar = parse_changes(roh)
+    if unklar:
+        stellen = "; ".join(f"Zeile {nr}: {z!r}" for nr, z in unklar[:5])
+        mehr = f" (+{len(unklar) - 5} weitere)" if len(unklar) > 5 else ""
+        raise SlideshowError(
+            f"{len(unklar)} Zeilen der Aenderungsliste sind weder ein Eintrag "
+            f"noch ein Kommentar: {stellen}{mehr}. Erwartet wird, was der "
+            f"Kontaktbogen ausgibt — `      - img_042` zum Hereinnehmen, "
+            f"`      #  raus: img_042` zum Herausnehmen.")
+    if not (rein or raus):
+        raise SlideshowError(
+            "Die Aenderungsliste nennt kein einziges Medium. Im Bogen wird durch "
+            "Anklicken markiert; erst dann fuellt sich der Zettel.")
+
+    con.print(f"Aenderungen: {len(rein)} herein, {len(raus)} hinaus")
+    return apply_changes(out.read_text(encoding="utf-8"), manifest, rein, raus,
+                         quelle=str(out))
 
 
 def cmd_select(args, project: Project) -> int:
@@ -890,6 +992,87 @@ def cmd_select(args, project: Project) -> int:
     con.print("[yellow]Die Auswahl ist ein Vorschlag.[/yellow] Sie kennt keine "
               "Bildinhalte — ansehen mit `slideshow sheet`, tauschen durch "
               "Zeilentausch in der Datei. Danach: `slideshow preprocess`")
+    if args.sheet:
+        # Der Bogen wird bewusst nicht aus `sel` gebaut, sondern aus der eben
+        # geschriebenen Datei: sonst gaebe es zwei Wege zum selben Bild, und
+        # nur einer davon liefe je wieder. `--sheet` ist eine Abkuerzung fuer
+        # den zweiten Aufruf, nicht ein zweiter Codepfad.
+        con.print("")
+        return cmd_sheet(_SheetArgs(args, order=str(out)), project)
+    return 0
+
+
+class _SheetArgs:
+    """Die Schalter, die ``select --sheet`` an ``cmd_sheet`` weiterreicht.
+
+    Argparse-Namespaces zweier Subkommandos zu mischen ginge auch, faellt aber
+    beim naechsten neuen Schalter um. Hier steht schwarz auf weiss, was der
+    Bogen aus dem `select`-Aufruf uebernimmt (Projekt, Manifest, `--dry-run`)
+    und was seine Vorgaben sind.
+    """
+
+    def __init__(self, args, *, order: str) -> None:
+        self.order = order
+        self.manifest = args.manifest
+        self.output = None
+        self.thumb = THUMB_SIZE
+        self.jobs = None
+        self.alles = True
+        self.selected = False
+        self.force = False
+        self.dry_run = args.dry_run
+        self.quiet = args.quiet
+
+
+def cmd_sheet(args, project: Project) -> int:
+    from .models import Manifest
+    from .order import load_order, resolve_order
+    from .sheet import (dump_sheet_html, selection_from_order, sheet_media,
+                        thumbnails)
+
+    manifest = Manifest.load(Path(args.manifest) if args.manifest else project.manifest)
+    con = console()
+
+    pfad = Path(args.order) if args.order else (project.root / "order.yaml")
+    if not pfad.exists():
+        raise SlideshowError(
+            f"{pfad} gibt es nicht. Der Kontaktbogen zeigt eine *Auswahl*, und "
+            f"die steht in order.yaml — `slideshow select` erzeugt sie, "
+            f"`slideshow order` eine Reihenfolge ohne Abwahl.")
+
+    text = pfad.read_text(encoding="utf-8")
+    olist, zeilen = load_order(pfad)
+    ids, meldungen = resolve_order(manifest, olist, quelle=str(pfad), zeilen=zeilen)
+    sel = selection_from_order(manifest, olist, text, ids=ids)
+
+    out = Path(args.output) if args.output else (project.root / "contact.html")
+    medien = sheet_media(sel, manifest, nur_auswahl=args.selected)
+    thumbs, stats = thumbnails(project, medien, size=args.thumb, force=args.force,
+                               jobs=args.jobs, dry=DryRun(enabled=args.dry_run))
+    html = dump_sheet_html(sel, thumbs, manifest, base=out.parent,
+                           nur_auswahl=args.selected, thumb=args.thumb,
+                           quelle=pfad.name)
+
+    if args.dry_run:
+        con.print(f"Kontaktbogen: {out}  ({len(medien)} Kacheln, "
+                  f"{len(html) / 1024:.0f} KB)")
+        return 0
+    out.write_text(html, encoding="utf-8")
+
+    con.print(f"Kontaktbogen: {out}")
+    con.print(f"  [dim]{len(sel.ids)} gewaehlt, {len(medien)} Kacheln, "
+              f"{len(html) / 1024:.0f} KB[/dim]")
+    con.print(f"  [dim]Thumbnails: {stats.aus_vorschau} aus der EXIF-Vorschau, "
+              f"{stats.skaliert} skaliert, {stats.aus_cache} aus dem Cache "
+              f"({stats.sekunden:.1f} s)[/dim]")
+    if stats.fehlend:
+        con.print(f"  [yellow]{len(stats.fehlend)} ohne Thumbnail: "
+                  f"{', '.join(stats.fehlend[:8])}[/yellow]")
+    for m in meldungen + sel.meldungen:
+        con.print(f"  [yellow]{m}[/yellow]")
+    con.print(f"[yellow]Der Bogen schreibt nichts.[/yellow] Ein Klick markiert "
+              f"einen Tausch, der Knopf legt die Zeilen in die Zwischenablage — "
+              f"eintragen von Hand in {pfad.name}.")
     return 0
 
 
@@ -1190,7 +1373,8 @@ def cmd_selftest(args, project: Project) -> int:
 _COMMANDS = {
     "doctor": cmd_doctor, "probe": cmd_probe, "audio": cmd_audio,
     "preprocess": cmd_preprocess, "beats": cmd_beats, "chapters": cmd_chapters,
-    "order": cmd_order, "select": cmd_select, "build": cmd_build,
+    "order": cmd_order, "select": cmd_select, "sheet": cmd_sheet,
+    "build": cmd_build,
     "render": cmd_render, "export-mlt": cmd_export_mlt, "selftest": cmd_selftest,
 }
 

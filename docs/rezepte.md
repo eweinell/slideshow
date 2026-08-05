@@ -323,7 +323,8 @@ die Zielzahl aus der Regionenkarte kommt, muss `beats` davor.
 slideshow probe /material/island     # 1240 Bilder
 slideshow audio track.mp3
 slideshow beats                      # → beats.yaml, 187 Slots
-slideshow select                     # → order.yaml: 187 gewählt, Rest als Kommentar
+slideshow select --sheet             # → order.yaml: 187 gewählt, Rest als Kommentar
+                                     #   und contact.html zum Ansehen
 slideshow preprocess                 # nur die Auswahl, nicht alle 1240
 slideshow build && slideshow render
 ```
@@ -353,11 +354,70 @@ Traube stehen direkt darunter:
       #  statt: img_DSC06271 (10:13) · img_DSC06272 (10:14) · img_DSC06274 (10:15)
 ```
 
+**Den Vorschlag ansehen: der Kontaktbogen.**
+
+```bash
+slideshow sheet                      # → contact.html, im Browser öffnen
+```
+
+Eine einzelne HTML-Datei, nach Tagen gegliedert: jede Traube eine Kachelgruppe,
+das gewählte Bild groß und farbig, seine Geschwister klein und matt daneben,
+unter jeder Kachel die Medien-ID. Ausgelassene Trauben stehen gestrichelt in
+derselben Reihe — man sieht, *dass* dort etwas übersprungen wurde, und was.
+Technische Ausschlüsse tragen ihren Grund als rotes Schild (`zu klein:
+1024x768`).
+
+- **Drei Farben, drei Zustände.** Blau umrandet ist das Bild, das die Auswahl
+  gesetzt hat — der Ausgangszustand. Ein Klick auf ein Geschwister markiert es
+  grün (kommt herein) und das blaue Bild derselben Traube rot (geht hinaus).
+- **Der Bogen liest `order.yaml` und schreibt nichts.** Er legt die Änderungen
+  in die Zwischenablage oder als Datei ab; einspielen tut sie das CLI. Damit
+  steht der Zustand des Projekts immer in `order.yaml` und nirgendwo sonst.
+- **Er zeigt den Stand der Datei**, nicht einen neuen Wurf. Nach einem
+  Zeilentausch von Hand einfach noch einmal laufen lassen — das getauschte Bild
+  steht danach groß da.
+- **Er ist billig.** Die Vorschaubilder kommen aus dem EXIF-Header der
+  Aufnahmen, ohne einen Bildpunkt zu decodieren; nur wo keine eingebettete
+  Vorschau liegt, wird über ffmpeg skaliert. Der zweite Lauf erzeugt nur
+  Fehlendes (`cache/thumbs/`, `--force` wirft sie weg).
+- **Kein Server, kein Netz, keine Bibliothek.** Die Datei lässt sich per
+  Doppelklick öffnen und in fünf Jahren noch.
+
+```bash
+slideshow sheet --selected           # nur die Auswahl, ohne die Alternativen
+slideshow sheet --thumb 480          # größere Kacheln
+slideshow sheet --order alt.yaml     # eine andere Auswahl ansehen
+slideshow sheet --refresh-thumbs     # Vorschaubilder neu bauen
+```
+
+**Die Änderungen einspielen.** Bei drei Tauschen trägt man sie selbst ein; bei
+hundertsechzig ist das ein Nachmittag. Dafür nimmt das CLI die Liste entgegen,
+die der Bogen ausgibt:
+
+```bash
+# im Bogen markieren, dann "Aenderungen speichern" → auswahl.txt
+slideshow order --apply auswahl.txt
+
+# oder: "Zeilen kopieren" und einfügen
+slideshow order --apply -            # Strg+Z und Enter beenden die Eingabe
+```
+
+Hereingenommene Medien landen an der chronologisch richtigen Stelle — und
+solange die Blöcke chronologisch liegen, damit von selbst im richtigen
+Tagesblock. Herausgenommene werden **auskommentiert, nicht gelöscht**: die
+Zeile bleibt dort stehen, wo das Bild einsortiert war, mit Datum daneben. Wer
+den Tausch bereut, macht ihn mit einem Handgriff rückgängig.
+
+Der Vorgang ist wiederholbar: dieselbe Liste zweimal eingespielt ändert beim
+zweiten Mal nichts, und was schon drinsteht oder gar nicht drin war, meldet
+sich, statt den Lauf abzubrechen. Danach `slideshow sheet` noch einmal, und der
+Bogen zeigt den neuen Stand.
+
 **Worauf achten.**
 
 - **Die Auswahl ist ein Vorschlag.** Sie kennt keine Bildinhalte. Ein technisch
   tadelloses Ergebnis kann ausgerechnet die drei Bilder auslassen, um die es in
-  dem Film geht — durchsehen lohnt.
+  dem Film geht — dafür gibt es den Kontaktbogen, und durchsehen lohnt.
 - **Ein zweiter Vorschlag** kostet nichts: `slideshow select --force` würfelt
   neu, `--seed 4711` holt einen bestimmten zurück. Der Seed steht im Dateikopf.
 - **`--dry-run` zeigt, ohne zu schreiben** — mitsamt der Tabelle, welcher Tag

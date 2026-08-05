@@ -11,6 +11,7 @@ slideshow preprocess                          # → cache/
 slideshow beats                               # → beats.yaml  ← ansehen!
 slideshow order                               # → order.yaml  ← optional, zum Sortieren
 slideshow select                              # → order.yaml  ← statt dessen, bei sehr viel Material
+slideshow sheet                               # → contact.html ← die Auswahl ansehen
 slideshow build                               # → edit.yaml
 slideshow render edit.yaml -o out/master.mp4
 ```
