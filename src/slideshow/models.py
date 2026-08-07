@@ -378,6 +378,22 @@ class KBDefaults(BaseModel):
         return v
 
 
+def _blendenmodus_pruefen(v: str) -> str:
+    """Unbekannter Blendenmodus ist ein Fehler, kein stiller Rueckfall.
+
+    Der Import steht im Funktionskoerper, nicht auf Modulebene: ``kenburns``
+    importiert ``models``, die Gegenrichtung waere oben ein Zyklus. Zur
+    Validierungszeit ist ``kenburns`` laengst geladen.
+    """
+    from .kenburns import known_modes
+
+    gueltig = known_modes()
+    if v not in gueltig:
+        raise ValueError(f"unbekannter Blendenmodus {v!r} — gueltig sind: "
+                         + ", ".join(gueltig))
+    return v
+
+
 class XfadeDefaults(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -385,6 +401,11 @@ class XfadeDefaults(BaseModel):
     beats: float = 1.0
     dur: float | None = None
     mode: str = "dissolve"
+
+    @field_validator("mode")
+    @classmethod
+    def _modus_bekannt(cls, v: str) -> str:
+        return _blendenmodus_pruefen(v)
     #: Automatisch zwischen alle benachbarten Segmente Blenden setzen.
     #: Default an: harte Schnitte zwischen 100 Standbildern wirken abgehackt,
     #: und die Uebergaenge sind ohnehin eigene, einzeln loeschbare Segmente.
@@ -564,6 +585,11 @@ class XfadeSegment(BaseModel):
     beats: float | None = None
     dur: float | None = None
     mode: str = "dissolve"
+
+    @field_validator("mode")
+    @classmethod
+    def _modus_bekannt(cls, v: str) -> str:
+        return _blendenmodus_pruefen(v)
 
 
 Segment = Annotated[StillSegment | TitleSegment | ClipSegment | XfadeSegment,

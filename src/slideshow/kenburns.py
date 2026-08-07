@@ -345,6 +345,10 @@ def clip_input_args(src: str, *, start: float, frames: int, fps: float) -> list[
 def xfade_expr(mode: str, duration_frames: int, fps: float) -> str:
     """``xfade``-Filterausdruck fuer ein Uebergangs-Segment."""
     d = duration_frames / fps
+    # Der Rueckfall ist nach der Schemapruefung (`_blendenmodus_pruefen` in
+    # models.py) unerreichbar und bleibt trotzdem stehen: die Funktion nimmt
+    # einen rohen String und soll auch dann einen Filterausdruck liefern
+    # statt mit KeyError abzubrechen.
     transition = _XFADE_MODES.get(mode, "fade")
     return f"xfade=transition={transition}:duration={d:.6f}:offset=0"
 

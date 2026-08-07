@@ -125,6 +125,40 @@ def test_xfade_auf_unbekanntes_segment(tmp_path):
     assert exc.value.path and "to" in exc.value.path
 
 
+def test_vertippter_blendenmodus_wird_abgelehnt(tmp_path):
+    """Frueher wurde daraus stillschweigend eine normale Blende."""
+    text = BASIS + "  - {type: xfade, from: 1, to: 2, dur: 0.5, mode: disolve}\n"
+    with pytest.raises(SchemaError) as exc:
+        EditList.load(_write(tmp_path, text))
+    meldung = str(exc.value)
+    assert "disolve" in meldung, "der vertippte Wert gehoert in die Meldung"
+    assert "wipeleft" in meldung, "und die gueltigen Modi dazu"
+    assert exc.value.path == "segments[3].mode"
+    assert exc.value.file and exc.value.file.endswith("edit.yaml")
+    assert exc.value.line, "die Meldung soll auf die Zeile zeigen"
+
+
+def test_vertippter_blendenmodus_in_den_defaults_wird_abgelehnt(tmp_path):
+    text = BASIS.replace("  still_seconds: 4.0",
+                         "  still_seconds: 4.0\n  xfade: {mode: disolve}")
+    with pytest.raises(SchemaError) as exc:
+        EditList.load(_write(tmp_path, text))
+    assert "disolve" in str(exc.value)
+    assert exc.value.path == "defaults.xfade.mode"
+
+
+def test_alle_bekannten_blendenmodi_sind_gueltig(tmp_path):
+    from slideshow.kenburns import known_modes, xfade_expr
+
+    for modus in known_modes():
+        text = BASIS + f"  - {{type: xfade, from: 1, to: 2, dur: 0.5, mode: {modus}}}\n"
+        edit = EditList.load(_write(tmp_path, text))
+        assert edit.segments[3].mode == modus
+    # `dissolve` bleibt der Alias auf ffmpegs `fade` — die Validierung
+    # vergleicht Schluessel, sie uebersetzt nicht.
+    assert "transition=fade:" in xfade_expr("dissolve", 30, 60.0)
+
+
 def test_fehlende_quelldatei_nennt_den_pfad(tmp_path):
     from slideshow.build import check_sources_exist
     from slideshow.paths import Project

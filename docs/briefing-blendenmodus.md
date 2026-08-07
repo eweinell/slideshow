@@ -1,9 +1,10 @@
 # Briefing: Blendenmodus validieren
 
-**Status:** Konzept, offen · geprüft gegen 360ef0b (07.08.2026) ·
-**Betrifft:** `models.py`, ein Test; `kenburns.py` bleibt unverändert ·
-**Aufwand:** klein — bewusst als Briefing festgehalten, weil die Entscheidung
-*wo* geprüft wird, einen Import-Zyklus berührt.
+**Status:** **Umgesetzt** (07.08.2026), Variante (a) ·
+**Betrifft:** `models.py` (`_blendenmodus_pruefen` plus je ein
+`field_validator` an `XfadeDefaults.mode` und `XfadeSegment.mode`),
+`tests/test_schema.py` (drei Tests), `docs/edit-yaml.md`; in `kenburns.py` nur
+ein Kommentar am verbliebenen Rückfall.
 
 ---
 

@@ -249,7 +249,7 @@ Strings je Prozess gesalzen und lieferte bei jedem Lauf andere Bewegungen.
 | `auto` | bool | `true` | Automatisch zwischen alle benachbarten Segmente Blenden setzen. Harte Schnitte zwischen hundert Standbildern wirken abgehackt. **Wirkt nur in `build`**, nicht beim Laden — siehe Kasten unten. |
 | `beats` | float | `1.0` | Standarddauer einer Blende in Beats (Beat-Region). |
 | `dur` | float | – | Standarddauer in Sekunden. In `free`-Regionen der einzig sinnvolle Weg. |
-| `mode` | string | `dissolve` | Siehe [Blendenmodi](#blendenmodi). |
+| `mode` | string | `dissolve` | Siehe [Blendenmodi](#blendenmodi). Ein unbekannter Modus ist ein Fehler. |
 
 Der Schnittpunkt liegt **auf** dem Beat; eine Blende der Dauer `T` belegt
 `[t − T/2, t + T/2]`. Der Schnitt bleibt also auf dem Raster, die Blende ist
@@ -494,7 +494,7 @@ schließt die Quell- und Bewegungs-Hashes beider Nachbarn ein.
 | `from`, `to` | int | Indizes der Nachbarsegmente in `segments` (0-basiert, über das ganze Array gezählt — die Blende zwischen Segment 0 und 2 ist selbst Segment 1). |
 | `dur` | float | Dauer in Sekunden. |
 | `beats` | float | Dauer in Beats, nur in einer Beat-Region. |
-| `mode` | string | Siehe unten. |
+| `mode` | string | Siehe unten. Ein unbekannter Modus ist ein Fehler. |
 
 Einen Übergang **entfernen** heißt: das `xfade`-Segment löschen. Die Nachbarn
 stoßen dann hart aneinander; ihre Indizes in den übrigen `from`/`to` müssen
@@ -502,14 +502,15 @@ angepasst werden.
 
 #### Blendenmodi
 
-`dissolve` (= `fade`), `fadeblack`, `fadewhite`, `wipeleft`, `wiperight`,
-`wipeup`, `wipedown`, `slideleft`, `slideright`, `smoothleft`, `smoothright`,
-`circleopen`, `circleclose`, `pixelize`, `hblur`.
+`dissolve` (= `fade`), `fade`, `fadeblack`, `fadewhite`, `wipeleft`,
+`wiperight`, `wipeup`, `wipedown`, `slideleft`, `slideright`, `smoothleft`,
+`smoothright`, `circleopen`, `circleclose`, `pixelize`, `hblur`.
 
-> **Vorbehalt:** Ein unbekannter Modus wird derzeit *stillschweigend* zu einer
-> normalen Blende (`kenburns.py`, `_XFADE_MODES.get(mode, "fade")`). Ein
-> Tippfehler wie `dissovle` fällt also nicht auf. Anders als bei allen übrigen
-> Schlüsseln gibt es hier keine Prüfung.
+Ein Modus außerhalb dieser Liste ist ein **Fehler** — die Meldung nennt Pfad,
+Zeile, den geschriebenen Wert und die gültigen Modi. Ein Tippfehler wie
+`dissovle` lief früher stillschweigend als normale Blende durch; eine alte
+Datei mit einem solchen Wert bricht jetzt ab und will den gemeinten Modus
+ausgeschrieben haben.
 
 ### `kb` am Segment
 
