@@ -335,7 +335,7 @@ meldet jeder Lauf mit Kapiteln einen Ausfall, den es nicht gibt.
 | Aspekt | Festlegung |
 |---|---|
 | Modell | `claude-opus-5` als Default, `--model` überschreibt |
-| Bild | Cache-Bild auf 1024×576 herunterskaliert, JPEG q80, base64 |
+| Bild | Cache-Bild auf 1024×576 herunterskaliert, JPEG q80, base64 — eine Genauigkeits-, keine Kostenentscheidung (9) |
 | Format | `output_config.format` mit JSON-Schema → garantiert parsebare Antwort |
 | Aufwand | `output_config: {"effort": "low"}` — die Aufgabe ist Klassifikation, kein Denksport |
 | `max_tokens` | **großzügig, nicht knapp** — siehe unten |
@@ -604,13 +604,47 @@ Sonnet 5 liegt bis 31.08.2026 auf einem Einführungspreis von 2/10 — dann
 etwa ein Drittel günstiger als oben. Für die Planung ist der Regelpreis
 angesetzt.
 
+### Bildgröße — skaliert wird nur oberhalb des Deckels
+
+Eine Frage, die beim Lesen sofort kommt: lohnt es, kleinere Bilder zu
+schicken, oder rechnet die API das ohnehin herunter? Beides, je nach Größe.
+
+**Oberhalb der Maximalkante des Modells wird skaliert und *dann* abgerechnet.**
+Das Cache-Bild ungefragt zu schicken kostet also nicht die 44 000 Tokens, die
+`(7680·4320)/750` ergäbe — es landet bei ~2576 px Langkante und damit beim
+Deckel von ~4784 Tokens. „Vollformat" wird nie als Vollformat bezahlt.
+
+**Unterhalb des Deckels wird nichts hochskaliert.** Dort zahlt man, was man
+schickt, und die Tokenzahl geht linear mit der Fläche.
+
+| Analysebild | Tokens ≈ w·h/750 | Bildanteil je 100 | **Gesamt je 100** |
+|---|---|---|---|
+| Cache-Bild ungefragt geschickt (→ 2576 px) | 4784 | 2,39 $ | 3,10 $ |
+| EXIF-Vorschau, wie eingebettet (1616×1077) | 2320 | 1,16 $ | 1,87 $ |
+| **1024×576 (Festlegung Abschnitt 5)** | **786** | **0,39 $** | **1,10 $** |
+| 768×432 | 442 | 0,22 $ | 0,93 $ |
+| 512×288 | 197 | 0,10 $ | 0,81 $ |
+| 320×180 | 77 | 0,04 $ | 0,74 $ |
+
+Die Formel ist eine Näherung und die Deckel sind modellabhängig — vor dem
+ersten großen Lauf gehört das mit `count_tokens` an fünf echten Bildern in
+beiden Größen nachgemessen (A6).
+
 ### Was daraus folgt
 
-- **Die Ausgabetokens dominieren, nicht das Bild.** Auf Opus 5 macht die
-  Eingabe 0,47 ct je Bild aus, die Ausgabe 0,63 bis 1,75 ct. Das Analysebild
-  von 1024×576 auf 768×432 zu verkleinern spart 17 ct je 100 Bilder — der
-  falsche Hebel. Der richtige ist `effort` (und **nicht** `max_tokens`,
-  Abschnitt 5).
+- **Die Bildgröße hat einen Boden, den sie nicht unterschreiten kann.** Der
+  bildunabhängige Teil — 250 Ausgabetokens, gecachter Präfix, Nutzertext —
+  sind **0,71 $ je 100 Bilder**, und den bekommt keine Auflösung weg. Selbst
+  ein kostenloses Bild spart nur 36 %. Von 1024×576 auf Thumbnailgröße sind es
+  35 ct je 100, von 1024×576 auf 768×432 nur 17 ct. Der Hebel ist `effort`
+  (und **nicht** `max_tokens`, Abschnitt 5).
+- **Über die Auflösung entscheidet trotzdem nicht der Preis, sondern die
+  Aufgabe.** Die 1024×576 stehen hier, weil daraus **Koordinaten** kommen
+  sollen. Eine Schutzbox auf einem 320er Bild ist auf ±3 Pixel genau,
+  hochgerechnet auf 7680 sind das ±72 — und eine zu große Schutzbox klemmt den
+  Zoom auf 1,05 und lässt das Bild stehen (Abschnitt 12). Für koordinatenfreie
+  Etiketten (14.2) gilt das nicht; dort sind 512×288 die naheliegende Wahl,
+  und dort lohnt das Sparen auch.
 - **Die Absolutkosten sind vernachlässigbar — für die Kamerafahrt.** Ein
   Urlaubsprojekt mit 100 gewählten Fotos kostet einmalig ein bis zwei Dollar
   und wird bei Wiederholungsläufen aus `vision.yaml` bedient. Dagegen stehen
@@ -976,15 +1010,37 @@ es einfach anzuschließen:
    Bilder mit — 1240 statt 187, also 13,60 USD statt 2,05 auf Opus 5 (9).
 3. **Das Nicht-Ziel ist ausdrücklich bestätigt**, nicht nur unterlassen.
 
-Der Ausweg ist ein Zuschnitt, kein Umbau, und er löst alle drei Punkte:
+Der Ausweg ist ein Zuschnitt, kein Umbau, und er löst alle drei Punkte — ganz
+umsonst ist er allerdings nicht zu haben:
 
 - **Nur die strittigen Bilder.** Analysiert werden die Mitglieder von Trauben
   mit ≥ 2 Bildern, also genau die Menge, über die `pick_in_burst` überhaupt
   entscheidet. Auf realem Material ist das ein Bruchteil des Bestands.
-- **Auf den Thumbnails.** `sheet.thumbnails` (`sheet.py:259`) legt für den
-  Kontaktbogen bereits 320-px-Vorschauen nach `cache/thumbs/` — aus der
+- **Auf den Thumbnails — aber normiert.** `sheet.thumbnails` (`sheet.py:259`)
+  legt für den Kontaktbogen bereits Vorschauen nach `cache/thumbs/` — aus der
   eingebetteten EXIF-Vorschau, **ohne einen einzigen Volldecode**. Genau das
   Bildmaterial, das eine Auswahlanalyse braucht.
+
+  **Was dabei nicht übersehen werden darf: diese Dateien haben keine
+  einheitliche Größe.** Der Bogen übernimmt die Vorschau *so, wie sie ist* —
+  genau das ist der Trick, der den Volldecode spart; `--thumb` setzt nur die
+  CSS-Kachel und die Zielgröße des ffmpeg-Rückfalls, nicht die Pixelgröße der
+  Vorschau (Abweichung 9 im Auswahl-Briefing). In `cache/thumbs/` liegen
+  deshalb nebeneinander 1616-px-Vorschauen und 320-px-Rückfälle: **2320 gegen
+  77 Bildtokens, Faktor 30** (Abschnitt 9). Eine Vorschau, die die Kamera
+  großzügig eingebettet hat, wäre in der Analyse dreimal teurer als das
+  geplante 1024×576-Bild — der vermeintlich billige Weg wäre der teuerste.
+
+  Schlimmer als der Preis ist die Folge für das Urteil: die Analysequalität
+  hinge daran, wie großzügig der Hersteller war. Bei zwei Kameras in einer
+  Traube — dem Fall, den `bursts()` ausdrücklich zulässt — würden ausgerechnet
+  die Geschwister ungleich beurteilt, zwischen denen zu entscheiden ist.
+
+  **Also: vor dem Request auf eine feste Kante normieren (Vorschlag 512×288),
+  nicht die Vorschau durchreichen.** Das kostet Rechenzeit, die der schnelle
+  Pfad gerade eingespart hat — ein Skalierlauf über die strittigen Bilder,
+  einmalig und cachebar. Wer 14.2 baut, sollte diesen Posten von Anfang an
+  einplanen statt ihn zu entdecken.
 - **Und deshalb ohne Koordinaten.** Die Thumbnails haben das Originalformat,
   nicht die Normalform; Boxen daraus gälten nicht im Filterkoordinatensystem
   (E2). Das ist kein Problem, weil die Auswahl **keine Koordinaten braucht** —
