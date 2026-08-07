@@ -604,6 +604,73 @@ Sonnet 5 liegt bis 31.08.2026 auf einem Einführungspreis von 2/10 — dann
 etwa ein Drittel günstiger als oben. Für die Planung ist der Regelpreis
 angesetzt.
 
+### Erstanbieter-API oder Bedrock? Preise für europäische Regionen
+
+Claude läuft auch auf Amazon Bedrock, und für ein Projekt, das private
+Personenfotos verschickt, ist das nicht nur eine Abrechnungsfrage — siehe E11
+und E6. Die Preise stehen hier, die Entscheidung in E11.
+
+**Grundsatz.** Die Bedrock-Grundpreise entsprechen den Listenpreisen der
+Erstanbieter-API. Bedrock kennt aber zwei Endpunktarten, und genau daran hängt
+der Aufpreis:
+
+- **Global** — dynamisches Routing über alle Regionen, **kein Aufpreis**.
+- **Regional / EU-Inferenzprofil** — garantiertes Routing durch die gewählte
+  Region beziehungsweise innerhalb der EU, **10 % Aufpreis auf alles**:
+  Eingabe, Ausgabe, Cache-Schreiben, Cache-Lesen.
+
+Wer Bedrock wegen der Datenresidenz nimmt, zahlt also die 10 % — sie *sind* die
+Datenresidenz. Verfügbare EU-Regionen: Frankfurt (`eu-central-1`), Zürich
+(`eu-central-2`), Stockholm (`eu-north-1`), Mailand (`eu-south-1`), Spanien
+(`eu-south-2`), Irland (`eu-west-1`), London (`eu-west-2`), Paris
+(`eu-west-3`) — alle mit EU-Inferenzprofil.
+
+**Kosten je 100 Bilder**, gerechnet mit dem Tokenprofil von oben (786 Bild- +
+40 Texttokens, 1200 Tokens gecachter Präfix, 250 Ausgabetokens):
+
+| Modell (Bedrock-ID `anthropic.…`) | Preis in/out je M | Präfix cached? | Global | **EU (+10 %)** |
+|---|---|---|---|---|
+| `claude-fable-5` | 10 / 50 | ja (512) | 2,20 $ | **2,42 $** |
+| `claude-opus-5` | 5 / 25 | ja (512) | 1,10 $ | **1,21 $** |
+| `claude-opus-4-8` | 5 / 25 | ja (1024) | 1,10 $ | **1,21 $** |
+| `claude-opus-4-7` | 5 / 25 | **nein (2048)** | 1,64 $ | **1,80 $** |
+| `claude-sonnet-5` bis 31.08.2026 | 2 / 10 | ja (1024) | 0,44 $ | **0,48 $** |
+| `claude-sonnet-5` ab 01.09.2026 | 3 / 15 | ja (1024) | 0,66 $ | **0,72 $** |
+| `claude-haiku-4-5` | 1 / 5 | **nein (4096)** | 0,33 $ | **0,36 $** |
+
+Zwei Zeilen darin sind kontraintuitiv und beide kommen vom
+Cache-Mindestpräfix, nicht vom Listenpreis:
+
+- **Opus 4.7 ist teurer als Opus 5**, obwohl beide 5/25 kosten: sein
+  Mindestpräfix liegt bei 2048 Tokens, unsere 1200 cachen dort nicht.
+- **Haiku 4.5 spart weniger, als der Listenpreis verspricht** (4096) — der
+  Abstand zu Sonnet 5 schrumpft dadurch auf ein Drittel statt zwei Dritteln.
+
+**Auf das reale Projekt hochgerechnet** (187 gewählte Bilder, EU-Endpunkt):
+Opus 5 **2,26 $**, Sonnet 5 **1,35 $**, Haiku 4.5 **0,67 $**. Für die
+Auswahlanalyse aus 14.2 über ein Sammelbecken von 1240 Bildern: 15,00 $ /
+8,93 $ / 4,46 $.
+
+**Was auf Bedrock fehlt und hier zählt:** die **Message-Batches-API gibt es
+nicht**. Die −50 % aus der Tabelle weiter oben sind auf Bedrock also nicht zu
+haben — was insofern schade ist, als der Grund, sie auf der Erstanbieter-API
+abzulehnen (29 Tage Aufbewahrung, E4), auf Bedrock gerade entfiele. Ebenfalls
+nicht vorhanden: Files-API und URL-Bildquellen (beides egal, wir schicken
+base64) und der serverseitige Refusal-Rückfall (egal, Abschnitt 8 fängt je
+Bild selbst ab). **Vorhanden und für dieses Briefing entscheidend sind
+strukturierte Ausgabe, Prompt-Caching und Thinking.**
+
+> **Der Vollständigkeit halber, ohne Empfehlung:** Bedrock führt auch
+> bildfähige Fremdmodelle, und die sind dramatisch billiger — Amazon Nova Lite
+> liegt bei etwa 0,06/0,24 $ je Million, was auf ungefähr 0,02 $ je 100 Bilder
+> hinausliefe, Nova Pro auf etwa 0,24 $. Diese Zahlen stammen aus
+> Sekundärquellen, nicht aus der AWS-Preisliste, und **die Rechnung trägt
+> ohnehin nicht**: das Tokenmodell oben ist auf Claudes Bildzählung geeicht,
+> andere Modellfamilien zählen Bilder anders, und vor allem hängt Abschnitt 5
+> an einer **garantiert schemakonformen** Antwort und an brauchbaren
+> Bounding-Box-Koordinaten. Wer hier wechseln will, misst das an fünf echten
+> Bildern nach, statt einer Preistabelle zu glauben.
+
 ### Bildgröße — skaliert wird nur oberhalb des Deckels
 
 Eine Frage, die beim Lesen sofort kommt: lohnt es, kleinere Bilder zu
@@ -781,6 +848,12 @@ Daraus folgen drei technische Festlegungen:
 > `--no-vision` als dauerhafte Abschaltung in `build`. Der Punkt gehört
 > zusätzlich in die README, nicht nur in den `--help`-Text.
 
+**Die Tabelle oben ist nicht die einzige mögliche.** Über Amazon Bedrock
+gelten andere Zusagen — die Inferenz läuft dort auf AWS-verwalteter
+Infrastruktur ohne Zugriff von Anthropic-Personal, und ein regionaler Endpunkt
+hält die Bilder in der gewählten EU-Region. Das ist genau der Punkt, an dem
+E6 heute am schwächsten ist; siehe E11 und Abschnitt 9.
+
 Quellen: [API and data retention](https://platform.claude.com/docs/en/manage-claude/api-and-data-retention),
 [How long do you store my organization's data?](https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-my-organization-s-data),
 [Data retention practices for Covered Models](https://support.claude.com/en/articles/15425996-data-retention-practices-for-covered-models).
@@ -833,6 +906,42 @@ unvernünftig, aber schwerer zu erklären.
 > **Empfehlung: (a).** (c) bleibt als Nachtrag offen, wenn die Sichtprüfung
 > Monotonie zeigt. (b) ist ausgeschlossen — sie kauft eine Zusage, die
 > `main` bewusst verkauft hat.
+
+### E11 — Erstanbieter-API oder Amazon Bedrock? *(neu in Rev. 2)*
+
+Die Preise stehen in Abschnitt 9; sie entscheiden die Frage **nicht**. Auf
+187 Bilder gerechnet trennt Opus 5 auf einem EU-Endpunkt (2,26 $) von Haiku
+auf der Erstanbieter-API (0,62 $) weniger als ein Kaffee. Entschieden wird
+über Datenhaltung und Betriebsaufwand.
+
+**(a) Erstanbieter-API** *(Empfehlung für v1)* — ein Schlüssel, vorausbezahltes
+Guthaben, alle Funktionen inklusive Batch-API, Modell-IDs ohne Präfix, `ant`
+und `count_tokens` verfügbar. Die Datenlage ist die aus E6: 30 Tage Regel-
+aufbewahrung, kein Training, aber bis zu 2 Jahre bei automatisch markierten
+Inhalten, und ZDR praktisch nicht erreichbar.
+
+**(b) Amazon Bedrock, EU-Inferenzprofil** — dieselbe Messages-API,
+`AnthropicBedrockMantle`, Modell-IDs mit `anthropic.`-Präfix, 10 % Aufpreis.
+Der Gewinn liegt genau dort, wo E6 heute am schwächsten ist: die Inferenz läuft
+auf AWS-verwalteter Infrastruktur, **Anthropic-Personal hat keinen Zugriff
+darauf**, die Datenhaltung richtet sich nach Amazon Bedrock statt nach den
+Anthropic-Zusagen, und der regionale Endpunkt garantiert, dass die Bilder die
+gewählte Region nicht verlassen. Für private Urlaubsfotos mit erkennbaren
+Personen ist das der sachlich bessere Ort. Preis dafür: AWS-Konto und
+IAM-Einrichtung, keine Batch-API, und die AWS-Datenschutzbedingungen sind
+eigenständig zu lesen — sie sind nicht die aus E6, im Guten wie im
+Ungewissen.
+
+**(c) Fremdmodell auf Bedrock** — ausgeschlossen, solange Abschnitt 5 an
+garantiert schemakonformer Ausgabe und brauchbaren Boxkoordinaten hängt. Der
+Preisvorteil ist real und irrelevant: er spart zwei Dollar.
+
+> **Empfehlung: (a) für v1, (b) als unterstützter Pfad.** Das kostet wenig,
+> weil beide dieselbe Messages-API sprechen: `analyze` braucht eine
+> Client-Weiche und einen Präfix am Modellnamen, sonst nichts. Wer die Fotos
+> nicht aus der EU herauslassen will, soll das ohne Umbau tun können — und die
+> Bestätigung beim ersten Lauf (E6) muss dann die **andere** Zusagentabelle
+> zeigen, nicht die von Anthropic.
 
 ---
 
