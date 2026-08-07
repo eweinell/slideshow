@@ -1089,7 +1089,14 @@ Zwei Fehlerbilder folgen daraus, beide gut sichtbar:
   Kapitels zu iterieren und das mit der geringsten nötigen Abdunklung zu
   nehmen, kostet fünf Messungen und keinen einzigen Request. Das ist der
   billigste echte Gewinn im ganzen Abschnitt 14 — und ein Argument dafür, ihn
-  unabhängig von diesem Briefing zu bauen.
+  unabhängig von diesem Briefing zu bauen. **Nachtrag 07.08.2026: genau das
+  ist geschehen — der Kontrast-Teil ist als eigenes Briefing ausgekoppelt
+  ([`briefing-titelfolien-hintergrund.md`](briefing-titelfolien-hintergrund.md));
+  dort steht auch die Nebenbedingung, die hier fehlte: eine Wahl abseits des
+  ersten Bildes schaltet die Fokusblende ab (0.3) und braucht deshalb Vorrangregel
+  und Meldung.** Für dieses Briefing bleibt der API-Teil: Gesichter unter der
+  Textfläche, `quiet`-Flächen, Szenenpräferenz — als weiterer Filter auf
+  derselben Kandidatenkette.
 - **Textlage.** `titles.py` setzt die Textfläche heute fest. Mit `quiet` ließe
   sich zwischen zwei, drei festen Lagen wählen (unten, Mitte, oben), statt das
   Bild zu verdunkeln, bis der feste Platz trägt. Das ist ein größerer Eingriff
@@ -1226,7 +1233,7 @@ würde diese Zusage angreifen. Was hineinpasst, ist kleiner und harmlos: eine
 
 | # | Einsatz | Nutzen | Aufwand | Empfehlung |
 |---|---|---|---|---|
-| 14.1 | Titelfolien-Hintergrund + Textlage | hoch | klein | **bauen** — der Kontrast-Teil sogar ohne API |
+| 14.1 | Titelfolien-Hintergrund + Textlage | hoch | klein | **bauen** — der Kontrast-Teil ohne API ist ausgekoppelt ([`briefing-titelfolien-hintergrund.md`](briefing-titelfolien-hintergrund.md)) |
 | 14.3 | Etiketten im Kontaktbogen | mittel | sehr klein | **bauen**, zusammen mit 14.2 |
 | 14.2 | Wahl in der Traube | hoch | groß | eigenes Briefing; `stage:`-Feld jetzt vorsehen |
 | 14.4 | Vielfalt nach `scene` | mittel | klein | mitnehmen, wenn 14.2 kommt |
