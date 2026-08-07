@@ -1094,9 +1094,15 @@ Zwei Fehlerbilder folgen daraus, beide gut sichtbar:
   ([`briefing-titelfolien-hintergrund.md`](briefing-titelfolien-hintergrund.md));
   dort steht auch die Nebenbedingung, die hier fehlte: eine Wahl abseits des
   ersten Bildes schaltet die Fokusblende ab (0.3) und braucht deshalb Vorrangregel
-  und Meldung.** Für dieses Briefing bleibt der API-Teil: Gesichter unter der
-  Textfläche, `quiet`-Flächen, Szenenpräferenz — als weiterer Filter auf
-  derselben Kandidatenkette.
+  und Meldung.** **Nachtrag 08.08.2026: der Kontrast-Teil ist umgesetzt**
+  (`build._bg_nach_tragfaehigkeit`, `titles.measure_darkening`) — mit einer
+  Korrektur an der eigenen Erwartung: „die Abdunklung läuft an ihre Grenze"
+  passiert mit `min_contrast: 4.5` nie. Selbst Reinweiß trägt den Text bei
+  Faktor 0,45, die erreichbare Skala hat drei Stufen. Der Fall „trägt den Text
+  gar nicht" existiert erst bei angehobenem `min_contrast`. Für dieses
+  Briefing bleibt der API-Teil: Gesichter unter der Textfläche,
+  `quiet`-Flächen, Szenenpräferenz — als weiterer Filter auf derselben
+  Kandidatenkette.
 - **Textlage.** `titles.py` setzt die Textfläche heute fest. Mit `quiet` ließe
   sich zwischen zwei, drei festen Lagen wählen (unten, Mitte, oben), statt das
   Bild zu verdunkeln, bis der feste Platz trägt. Das ist ein größerer Eingriff

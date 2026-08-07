@@ -148,8 +148,13 @@ def resolve_bg(segments: list, index: int) -> str:
 
     ``build`` schreibt den aufgeloesten Wert in die Datei, damit er sichtbar
     und korrigierbar bleibt (Entscheidung 4). Steht in einer von Hand
-    geschriebenen Edit-List trotzdem noch ``auto``, greift dieselbe Regel —
-    sonst haetten die beiden Wege verschiedene Ergebnisse.
+    geschriebenen Edit-List trotzdem noch ``auto``, greift hier die
+    *einfache* Regel — die Wahl nach Tragfaehigkeit
+    (``docs/briefing-titelfolien-hintergrund.md``) ist eine Leistung von
+    ``build``, deren Ergebnis sichtbar in ``edit.yaml`` steht. Beim Backen
+    gaebe es keinen Ort, an dem sie sichtbar wuerde: ``ensure_title_assets``
+    schreibt die Datei nicht, die Wahl waere unsichtbar und bei jedem Backen
+    neu (Entscheidung E2 des Briefings). Wer sie will, geht ueber ``build``.
 
     Gesucht wird das naechste **Standbild**; ein Clip taugt nicht als
     Standhintergrund. Findet sich keines, faellt es auf ``none`` (Text auf
@@ -368,26 +373,10 @@ def render_title(seg: TitleSegment, defaults: Defaults, *, bg_source: Path | Non
     Gibt die Kennzahlen der Kontrastmessung zurueck (Abnahmekriterium T6).
     """
     t = defaults.title
-    warnungen: list[str] = []
+    m = _messung(seg, t, bg_source, size, font)
+    warnungen = list(m["warnungen"])
+    grund, faktor, kontrast = m["grund"], m["faktor"], m["kontrast"]
 
-    # Reihenfolge: erst der Satz, dann der Hintergrund. Die Abdunklung wird
-    # unter der Textflaeche gemessen, und die kennt man erst, wenn der Text
-    # steht — ein Sonnenuntergang bleibt auch unscharf hell, aber eben nicht
-    # ueberall gleich.
-    satz = _layout(seg, t, size, font)
-    warnungen += satz["warnungen"]
-    text = _text_layer(size, satz)
-    box = _messbox(text, size)
-
-    grund, bg_warnungen, art = _background(seg, t, bg_source, size)
-    warnungen += bg_warnungen
-
-    # Startwert nur fuer Fotos. Eine ausdruecklich gewaehlte Farbflaeche pauschal
-    # auf 55 % zu daempfen hiesse, die Wahl des Anwenders zu ueberschreiben;
-    # nachgefuehrt wird sie trotzdem, wenn sie den Text nicht traegt.
-    start = t.darken if art == "image" else 1.0
-    faktor, kontrast = _fit_darkening(grund, box, start=start,
-                                      minimum=t.min_contrast)
     if kontrast < t.min_contrast:
         warnungen.append(
             f"Der Hintergrund traegt den hellen Text nicht: gemessener Kontrast "
@@ -398,13 +387,61 @@ def render_title(seg: TitleSegment, defaults: Defaults, *, bg_source: Path | Non
 
     # Das Zusammenflachen ist der einzige Schritt, der in Stufe 2 entfaellt,
     # wenn der Text als eigene Ebene stehen bleiben soll (Entscheidung 1c).
-    grund.paste(text, (0, 0), text)
+    grund.paste(m["text"], (0, 0), m["text"])
     out.parent.mkdir(parents=True, exist_ok=True)
     grund.save(out, format="JPEG", quality=95, subsampling=0, optimize=True,
                progressive=False)
     return {"warnungen": warnungen, "kontrast": round(kontrast, 2),
-            "abdunklung": faktor, "schrift_faktor": satz["scale"],
-            "box": list(box), "canvas": list(size)}
+            "abdunklung": faktor, "schrift_faktor": m["satz"]["scale"],
+            "box": list(m["box"]), "canvas": list(size)}
+
+
+def measure_darkening(seg: TitleSegment, defaults: Defaults, *,
+                      bg_source: Path | None, size: tuple[int, int],
+                      font: Path) -> tuple[float, float]:
+    """Abdunklung und Kontrast, die diese Folie beim Backen bekaeme.
+
+    Dieselbe Rechnung wie in :func:`render_title`, nur ohne die Pixel zu
+    schreiben — und ausdruecklich derselbe Codepfad (:func:`_messung`). Zwei
+    Implementierungen derselben Rechnung driften; eine Folie, deren Wahl mit
+    anderen Zahlen begruendet wurde als denen, mit denen sie gebacken wird,
+    waere genau der stille Fehler, den dieses Repo sonst ausschliesst.
+
+    Aufrufer ist ``build``: ``bg: auto`` waehlt damit das tragfaehigste der
+    ersten Bilder eines Abschnitts (``docs/briefing-titelfolien-hintergrund.md``).
+    Der Preis ist der der halben Erzeugung — Original laden, auf die Leinwand
+    skalieren, blurren —, deshalb misst der Aufrufer so faul wie moeglich.
+    """
+    m = _messung(seg, defaults.title, bg_source, size, font)
+    return (m["faktor"], m["kontrast"])
+
+
+def _messung(seg: TitleSegment, t: TitleDefaults, bg_source: Path | None,
+             size: tuple[int, int], font: Path) -> dict:
+    """Satz, Textebene, Grund — und die daran gemessene Abdunklung.
+
+    Alles bis unmittelbar **vor** das Zusammenflachen. Genau diese Kette
+    teilen sich die Wahl des Hintergrunds und sein Backen.
+    """
+    # Reihenfolge: erst der Satz, dann der Hintergrund. Die Abdunklung wird
+    # unter der Textflaeche gemessen, und die kennt man erst, wenn der Text
+    # steht — ein Sonnenuntergang bleibt auch unscharf hell, aber eben nicht
+    # ueberall gleich.
+    satz = _layout(seg, t, size, font)
+    text = _text_layer(size, satz)
+    box = _messbox(text, size)
+
+    grund, bg_warnungen, art = _background(seg, t, bg_source, size)
+
+    # Startwert nur fuer Fotos. Eine ausdruecklich gewaehlte Farbflaeche pauschal
+    # auf 55 % zu daempfen hiesse, die Wahl des Anwenders zu ueberschreiben;
+    # nachgefuehrt wird sie trotzdem, wenn sie den Text nicht traegt.
+    start = t.darken if art == "image" else 1.0
+    faktor, kontrast = _fit_darkening(grund, box, start=start,
+                                      minimum=t.min_contrast)
+    return {"satz": satz, "text": text, "box": box, "grund": grund, "art": art,
+            "faktor": faktor, "kontrast": kontrast,
+            "warnungen": satz["warnungen"] + bg_warnungen}
 
 
 # --- Satz -----------------------------------------------------------------

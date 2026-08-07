@@ -442,6 +442,26 @@ class TitleDefaults(BaseModel):
     #: gemessene Kontrast ``min_contrast`` traegt.
     darken: float = 0.55
     min_contrast: float = 4.5
+    #: ``bg: auto``: wie viele Bilder am Anfang eines Abschnitts als
+    #: Hintergrund in Frage kommen (``docs/briefing-titelfolien-hintergrund.md``).
+    auto_candidates: int = 5
+    #: ``bg: auto``: ab welcher Abdunklung das erste Bild als *nicht mehr
+    #: tragfaehig* gilt und die uebrigen Kandidaten gemessen werden.
+    #:
+    #: Das erste Bild hat Vorrang, solange es traegt — eine andere Wahl
+    #: schaltet die Fokusblende ab (:func:`slideshow.build._ist_fokusblende`),
+    #: und die ist ein Gestaltungsmittel, kein Nebenprodukt. Gewechselt wird
+    #: deshalb erst beim hellen Himmel, nicht fuer einen Messschritt.
+    #:
+    #: **0,50 und nicht die 0,40 aus dem Briefing**, weil die Untergrenze
+    #: ``DARKEN_FLOOR`` mit ``min_contrast: 4.5`` gar nicht erreichbar ist:
+    #: der hellste denkbare Grund ist Reinweiss, und der traegt den Text bei
+    #: 0,45. Die erreichbare Skala hat mit den Vorgaben genau drei Stufen
+    #: (0,55 / 0,50 / 0,45), eine Schwelle von 0,40 loeste also nie aus. 0,50
+    #: heisst: die unterste Stufe ist der Rettungsfall. Wer ``min_contrast``
+    #: anhebt, verlaengert die Skala nach unten, und die Schwelle bleibt eine
+    #: absolute Zahl.
+    auto_darken_min: float = 0.50
     #: Safe Area ringsum, Anteil der Kante. Ueberlebt TV-Overscan.
     safe: float = 0.10
     #: Blendenchoreografie, als Faktor auf die Standardblende. Der Film atmet
@@ -458,6 +478,14 @@ class TitleDefaults(BaseModel):
     def _phrase_positiv(cls, v: int) -> int:
         if v < 1:
             raise ValueError("phrase_beats muss >= 1 sein")
+        return v
+
+    @field_validator("auto_candidates")
+    @classmethod
+    def _kandidaten_positiv(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("auto_candidates muss >= 1 sein — das erste Bild "
+                             "eines Abschnitts ist immer ein Kandidat")
         return v
 
 

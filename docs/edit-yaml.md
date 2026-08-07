@@ -280,12 +280,16 @@ gerechnet, nicht geraten — die Begründungen stehen in
 | `blur` | float | `60.0` | Blur-Sigma des Hintergrunds, auf 7680er Basis. Derselbe Wert wie das Hochformat-Komposit — die beiden Bildsprachen müssen zusammenpassen. |
 | `darken` | float | `0.55` | **Startwert** der Abdunklung. Der Generator misst die Leuchtdichte unter der Textfläche und führt den Wert in festen Schritten nach, bis der Kontrast trägt. |
 | `min_contrast` | float | `4.5` | Gefordertes Kontrastverhältnis zwischen Text und Hintergrund (WCAG 2.1). Gemessen wird das **95. Perzentil** der Leuchtdichte unter der Textfläche, nicht ihr Mittel — sonst bleibt die Folie im Durchschnitt lesbar und über ihrer hellsten Stelle trotzdem nicht. Wird der Wert bis zur Untergrenze nicht erreicht, folgt eine Warnung statt stiller Unlesbarkeit. |
+| `auto_candidates` | int | `5` | Wie viele Bilder am Anfang eines Abschnitts als `bg: auto` in Frage kommen. `1` schaltet die Wahl ab: dann gilt wieder allein die Position. Muss ≥ 1 sein. |
+| `auto_darken_min` | float | `0.50` | Ab welcher Abdunklung das erste Bild als nicht mehr tragfähig gilt — siehe [`bg: auto` nach Tragfähigkeit](#bg-auto-nach-tragfähigkeit). |
 | `safe` | float | `0.10` | Safe Area ringsum, Anteil der Kante. Überlebt TV-Overscan und einen 4:5-Beschnitt. |
 | `xfade_in` | float | `1.5` | Blende **in** die Folie hinein, als Faktor auf die Standardblende. Der Film atmet in die Zäsur ein. |
 | `xfade_out` | float | `1.0` | Blende **aus** der Folie heraus, ohne Fokusblende. |
 | `xfade_focus` | float | `2.0` | Blende heraus, wenn der Hintergrund das Folgebild ist (Fokusblende). Länger, weil der Schärfezug Zeit braucht. |
 
-Die drei `xfade_*`-Faktoren ändern nur die Choreografie, nicht das Bild — sie
+Die drei `xfade_*`-Faktoren ändern nur die Choreografie, nicht das Bild, und
+`auto_candidates`/`auto_darken_min` entscheiden nur, *welches* Bild
+hinter die Folie kommt — das steht danach als `bg:` in der Datei. Alle fünf
 gehen deshalb **nicht** in den Cache-Key des Titelassets ein. Alles andere
 schon: eine Änderung an `size` oder `darken` erzeugt eine neue Datei.
 
@@ -338,7 +342,7 @@ Hintergrund aus dem Material.
 |---|---|---|---|
 | `title` | string | – | Überschrift. **Pflicht** und nicht leer — eine Folie ohne Überschrift ist ein Fehler, kein Sonderfall. |
 | `subtitle` | string | – | Zweite Zeile. `auto` in `chapters.yaml` wird beim Bauen zum Aufnahmedatum des folgenden Bildes aufgelöst und steht danach als Text hier. |
-| `bg` | string | `auto` | Hintergrund: `auto` (erstes Bild des neuen Abschnitts, unscharf), ein Pfad, `#rrggbb` als Farbfläche oder `none` für Text auf Schwarz. `build` schreibt den aufgelösten Wert zurück. |
+| `bg` | string | `auto` | Hintergrund: `auto` (ein Bild des neuen Abschnitts, unscharf — siehe [nach Tragfähigkeit](#bg-auto-nach-tragfähigkeit)), ein Pfad, `#rrggbb` als Farbfläche oder `none` für Text auf Schwarz. `build` schreibt den aufgelösten Wert zurück. |
 | `dur` | float | – | Wie beim Standbild. Gewinnt immer. |
 | `beats` | float | von `defaults.title.beats` | Wie beim Standbild — nur in einer Beat-Region gültig. |
 | `hold` | bool | `false` | Wie beim Standbild. |
@@ -401,11 +405,54 @@ Ausnahme:
 Als Untergrenze der Standzeit gilt eine Lesezeitregel — `1,8 s + 0,25 s je
 Wort`. Sie begründet eine Warnung, keine stille Korrektur.
 
+#### `bg: auto` nach Tragfähigkeit
+
+`auto` nimmt **das erste Bild des neuen Abschnitts** — solange es den Text
+trägt. Beim Bauen misst `build` dafür dieselbe Rechnung, die später das Asset
+backt: Satz, Textfläche, Hintergrund unscharf, Abdunklung nachführen bis
+`min_contrast` steht. Bleibt der nötige Faktor bei `auto_darken_min` oder
+darüber, ist die Sache erledigt — eine Messung, dasselbe Ergebnis wie früher.
+
+Erst darunter — der helle Himmel am Kapitelanfang — werden auch die übrigen
+`auto_candidates` Bilder **des eigenen Abschnitts** gemessen, und es gewinnt
+das mit der geringsten nötigen Abdunklung; bei Gleichstand das frühere. Der
+gewählte Pfad steht danach als konkreter Wert in der Datei.
+
+> **Eine abweichende Wahl kostet die Fokusblende** — die setzt voraus, dass
+> Hintergrund und Folgebild dasselbe sind. Deshalb hat das erste Bild Vorrang,
+> und deshalb steht die Wahl im Bericht:
+>
+> ```text
+> Kapitel 'Malmö': Hintergrund img_101 (Abdunklung 0.55) statt img_098 (0.45)
+> — das erste Bild des Abschnitts trägt den Text erst unterhalb von 0.50.
+>   Die Fokusblende entfällt damit.
+> ```
+>
+> Wer Stabilität will, schreibt `bg:` im Kapitel fest — ein ausdrücklicher Wert
+> (Medien-ID, Farbfläche, `none`) umgeht die Messung vollständig.
+
+Die Skala ist kürzer, als sie aussieht: die Abdunklung läuft in Schritten von
+0,05 vom Startwert `darken` abwärts, und mit `min_contrast: 4.5` trägt selbst
+Reinweiß den Text bei 0,45. Mit den Vorgaben gibt es also genau drei Stufen —
+0,55, 0,50 und 0,45 —, und `auto_darken_min: 0.50` heißt: **nur die unterste
+ist ein Rettungsfall.** Wer `min_contrast` anhebt, verlängert die Skala nach
+unten, ohne dass die Schwelle etwas anderes bedeutet.
+
+Trägt **kein** Kandidat den Text, bleibt es beim ersten Bild — ein anderes wäre
+genauso unlesbar und die Fokusblende zusätzlich weg. Gemeldet wird es zweimal:
+beim Bauen als Wahl, beim Backen an der Folie selbst.
+
+In einer von Hand geschriebenen Edit-List gilt weiterhin die einfache Regel
+(nächstes Standbild): die Messwahl ist eine Leistung von `build`, deren
+Ergebnis sichtbar in der Datei steht. Beim Backen gäbe es keinen Ort, an dem
+sie sichtbar würde.
+
 #### Fokusblende
 
-Steht der Hintergrund einer Folie auf `auto`, ist er das erste Bild des neuen
-Abschnitts. Die Blende *aus* der Folie heraus führt dann auf **dasselbe Bild,
-scharf**: der Hintergrund löst sich vor den Augen des Zuschauers auf.
+Steht der Hintergrund einer Folie auf `auto`, ist er in aller Regel das erste
+Bild des neuen Abschnitts. Die Blende *aus* der Folie heraus führt dann auf
+**dasselbe Bild, scharf**: der Hintergrund löst sich vor den Augen des
+Zuschauers auf.
 
 Damit das wie ein Schärfezug wirkt und nicht wie ein Schnitt zwischen zwei
 ähnlichen Bildern, muss die Kamerafahrt über die Blende hinweg stetig sein.
@@ -552,7 +599,7 @@ chapters:
 | `group` | string | – | Name einer Gruppe aus [`order.yaml`](#orderyaml--die-reihenfolge-von-hand); die Folie steht vor deren erstem Medium. Siehe unten. |
 | `title` | string | – | Überschrift. Pflicht und nicht leer. |
 | `subtitle` | string | `auto` | Zweite Zeile. `auto` bildet `Tag 11 · 24. Juli` aus dem Aufnahmezeitpunkt des folgenden Bildes; Tag 1 ist das früheste Aufnahmedatum des Projekts. Weglassen mit `subtitle: null`. |
-| `bg` | string | `auto` | Wie am Segment, **zusätzlich als [Medien-ID](#medien-ids)** (`bg: img_075`). In dieser Datei stehen IDs; einen Cache-Pfad müsste man erst nachschlagen. `build` löst sie auf und schreibt den Pfad nach `edit.yaml`. Was weder ID noch bekannter Pfad, Farbfläche oder `none` ist, bricht mit Nennung des Kapitels ab. |
+| `bg` | string | `auto` | Wie am Segment, **zusätzlich als [Medien-ID](#medien-ids)** (`bg: img_075`). Ein ausdrücklicher Wert umgeht die Messung aus [nach Tragfähigkeit](#bg-auto-nach-tragfähigkeit). In dieser Datei stehen IDs; einen Cache-Pfad müsste man erst nachschlagen. `build` löst sie auf und schreibt den Pfad nach `edit.yaml`. Was weder ID noch bekannter Pfad, Farbfläche oder `none` ist, bricht mit Nennung des Kapitels ab. |
 | `beats`, `dur` | float | von `defaults.title` | Standzeit. |
 | `style` | enum | `card` | Wie am Segment. |
 | `motion` | enum | von `defaults.title.motion` | Wie am Segment. `none` lässt die Folie stillstehen. |
@@ -641,6 +688,10 @@ dunkel, zu unruhig, zu wenig Himmel für zwei Zeilen Text. Welches Bild `auto`
 hier trifft, nennt `slideshow chapters` im Kommentar, damit man es austauschen
 kann, ohne es erst zu suchen. Zeigt `bg` auf ein Bild, das **nicht** das
 folgende ist, entfällt die Fokusblende: es gibt dann nichts scharf aufzulösen.
+Denselben Preis zahlt `auto`, wenn es dem ersten Bild den Text nicht zutraut —
+den Fall nennt der Bericht ([nach
+Tragfähigkeit](#bg-auto-nach-tragfähigkeit)). Nur „zu hell" misst das Werkzeug
+allerdings; „zu unruhig" bleibt Handarbeit.
 
 ### Die Grenzen finden lassen
 

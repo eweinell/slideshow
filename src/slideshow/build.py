@@ -102,7 +102,8 @@ def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
         raise SlideshowError("Keine vorverarbeiteten Medien gefunden. "
                              "`slideshow preprocess` zuerst laufen lassen.")
 
-    kapitel_warnungen = insert_titles(intents, chapters or [], media, defaults, size)
+    kapitel_warnungen = insert_titles(intents, chapters or [], media, defaults, size,
+                                      project=project, manifest=manifest)
 
     # Ob eine Tonspur da ist, entscheidet die *Datei*, nicht die Dauer: die
     # Karte fuer ein Projekt ohne Ton traegt zwar eine Laenge, aber keinen Pfad.
@@ -235,14 +236,19 @@ class _Lage:
 
 def insert_titles(intents: list[Intent], chapters: list[Chapter],
                   media: list[MediaItem], defaults: Defaults,
-                  size: tuple[int, int]) -> list[str]:
+                  size: tuple[int, int], *, project: Project | None = None,
+                  manifest: Manifest | None = None) -> list[str]:
     """Setzt die Kapitel als Titel-Intents in die Medienfolge ein.
 
     Aufgeloest wird hier alles, was spaeter nicht mehr zu ermitteln ist:
-    ``bg: auto`` auf das erste Bild des neuen Abschnitts, eine Medien-ID im
-    ``bg:`` auf deren Cache-Pfad und ``subtitle: auto`` auf das Aufnahmedatum.
-    Alles landet als konkreter Wert in ``edit.yaml`` — sichtbar und von Hand
+    ``bg: auto`` auf ein Bild des neuen Abschnitts, eine Medien-ID im ``bg:``
+    auf deren Cache-Pfad und ``subtitle: auto`` auf das Aufnahmedatum. Alles
+    landet als konkreter Wert in ``edit.yaml`` — sichtbar und von Hand
     korrigierbar statt als Zauberei im Code.
+
+    ``project``/``manifest`` braucht nur die Wahl nach Tragfaehigkeit
+    (:func:`_bg_nach_tragfaehigkeit`); ohne sie bleibt es bei der reinen
+    Positionsregel. ``build_edit_list`` reicht beides durch.
     """
     warnungen: list[str] = []
     if not chapters:
@@ -282,12 +288,39 @@ def insert_titles(intents: list[Intent], chapters: list[Chapter],
     aufgeloest.sort(key=lambda x: x[0])
     warnungen += _chronologie_hinweise(aufgeloest, verwendet, erster_tag)
 
+    # Abschnittsgrenzen: bis wohin ein Kapitel reicht. Nur innerhalb des
+    # eigenen Abschnitts darf ``bg: auto`` sich ein Bild suchen.
+    grenzen = [p for p, _ in aufgeloest] + [len(verwendet)]
+    schrift = _titelschrift(defaults, aufgeloest, warnungen) \
+        if project is not None else None
+
     for versatz, (pos, kap) in enumerate(aufgeloest):
         folgebild = next((m for m in verwendet[pos:] if m.kind == "image"), None)
+        # Vor dem Hintergrund aufgeloest: die Messung braucht den fertigen Satz,
+        # und die Textflaeche haengt an der zweiten Zeile.
+        subtitle = kap.subtitle
+        if subtitle == "auto":
+            subtitle = _auto_subtitle(folgebild, erster_tag)
+            if subtitle is None:
+                warnungen.append(
+                    f"Titel {kap.title!r}: `subtitle: auto` braucht einen "
+                    f"Aufnahmezeitpunkt, das folgende Bild hat keinen. Zweite Zeile "
+                    f"bleibt leer.")
+
         bg = kap.bg
         if bg == "auto":
             if folgebild is not None:
                 bg = folgebild.cache_path
+                kandidaten = [m for m in verwendet[pos:grenzen[versatz + 1]]
+                              if m.kind == "image"][:defaults.title.auto_candidates]
+                if schrift is not None and kandidaten:
+                    gewaehlt, meldung = _bg_nach_tragfaehigkeit(
+                        kandidaten, kap, subtitle, defaults, size,
+                        project=project, manifest=manifest, font=schrift,
+                        koppelbar=verwendet[pos].kind == "image")
+                    bg = gewaehlt.cache_path
+                    if meldung:
+                        warnungen.append(meldung)
             else:
                 bg = "none"
                 warnungen.append(
@@ -311,14 +344,6 @@ def insert_titles(intents: list[Intent], chapters: list[Chapter],
                  f"Medien-ID noch der Cache-Pfad eines Bildes aus dem Manifest.")
                 + f"  IDs stehen im Manifest, z. B. `bg: {beispiel}`; eine "
                   f'Farbflaeche waere `bg: "#1b2a3a"`.', path="chapters")
-        subtitle = kap.subtitle
-        if subtitle == "auto":
-            subtitle = _auto_subtitle(folgebild, erster_tag)
-            if subtitle is None:
-                warnungen.append(
-                    f"Titel {kap.title!r}: `subtitle: auto` braucht einen "
-                    f"Aufnahmezeitpunkt, das folgende Bild hat keinen. Zweite Zeile "
-                    f"bleibt leer.")
 
         seg = TitleSegment(title=kap.title, subtitle=subtitle, bg=bg,
                            beats=kap.beats, dur=kap.dur, style=kap.style,
@@ -339,6 +364,105 @@ def insert_titles(intents: list[Intent], chapters: list[Chapter],
     for p, intent in enumerate(intents):
         intent.index = p
     return warnungen
+
+
+def _titelschrift(defaults: Defaults, aufgeloest: list[tuple[int, Chapter]],
+                  warnungen: list[str]) -> Path | None:
+    """Die Schriftdatei fuer die Messung — oder ``None``, wenn es keine gibt.
+
+    Erst gesucht, wenn ueberhaupt ein Kapitel ``bg: auto`` traegt: ein Projekt
+    mit lauter festen Hintergruenden soll nicht an einer Abhaengigkeit
+    scheitern, die es nicht benutzt.
+
+    Und ohne Schrift bricht ``build`` **nicht** ab, sondern faellt auf die
+    Positionsregel zurueck: die liefert weiterhin ein Ergebnis, und das Backen
+    meldet die fehlende Schrift ohnehin mit Installationsbefehl.
+    """
+    if not any(kap.bg == "auto" for _pos, kap in aufgeloest):
+        return None
+    from .titles import find_font
+    try:
+        return find_font(defaults.title.font)
+    except SlideshowError as exc:
+        warnungen.append(
+            f"Keine Schriftdatei fuer die Titelfolien gefunden ({exc}) — `bg: auto` "
+            f"nimmt das erste Bild jedes Abschnitts, ohne seine Tragfaehigkeit zu "
+            f"messen.")
+        return None
+
+
+def _bg_nach_tragfaehigkeit(kandidaten: list[MediaItem], kap: Chapter,
+                            subtitle: str | None, defaults: Defaults,
+                            size: tuple[int, int], *, project: Project,
+                            manifest: Manifest | None, font: Path,
+                            koppelbar: bool) -> tuple[MediaItem, str | None]:
+    """Das tragfaehigste der ersten Bilder eines Abschnitts als Hintergrund.
+
+    ``docs/briefing-titelfolien-hintergrund.md``. Das erste Bild hat
+    **Vorrang, solange es traegt**: eine andere Wahl kostet die Fokusblende
+    (:func:`_ist_fokusblende` vergleicht ``title.bg`` mit dem Folgebild), und
+    die ist ein Gestaltungsmittel. Die Messwahl ist der Rettungsweg fuer den
+    hellen Himmel, kein Optimierer, der fuer 5 % weniger Abdunklung eine
+    Choreografie opfert.
+
+    Daher wird **faul** gemessen: traegt das erste Bild, kostet ein Kapitel
+    genau eine Messung, und das Ergebnis ist dasselbe wie ohne diese Funktion.
+
+    Gemessen wird mit :func:`slideshow.titles.measure_darkening` — derselbe
+    Codepfad, den das Backen nimmt. Eine Folie, deren Wahl mit anderen Zahlen
+    begruendet waere als denen, mit denen sie gebacken wird, waere ein stiller
+    Fehler.
+    """
+    from .preprocess import titel_bildquelle
+    from .titles import measure_darkening
+
+    t = defaults.title
+    canvas = title_canvas(size)
+
+    def messen(item: MediaItem) -> tuple[float, float] | None:
+        quelle, _hinweis = titel_bildquelle(project, manifest, item.cache_path)
+        if quelle is None:
+            # Ohne Datei gaebe es eine Schwarzflaeche zu messen, und die truege
+            # jeden Text — ein fehlendes Bild waere sonst der beste Kandidat.
+            return None
+        probe = TitleSegment(title=kap.title, subtitle=subtitle,
+                             bg=item.cache_path, style=kap.style)
+        return measure_darkening(probe, defaults, bg_source=quelle,
+                                 size=canvas, font=font)
+
+    erst = messen(kandidaten[0])
+    if erst is None or erst[0] >= t.auto_darken_min:
+        return (kandidaten[0], None)
+
+    gemessen = [(kandidaten[0], *erst)]
+    for item in kandidaten[1:]:
+        wert = messen(item)
+        if wert is not None:
+            gemessen.append((item, *wert))
+
+    traegt = [g for g in gemessen if g[2] >= t.min_contrast]
+    if not traegt:
+        beste = max(k for _m, _f, k in gemessen)
+        return (kandidaten[0],
+                f"Kapitel {kap.title!r}: keiner der {len(gemessen)} Kandidaten traegt "
+                f"den Text — bester Kontrast {beste:.1f}:1 bei maximaler Abdunklung, "
+                f"gefordert sind {t.min_contrast:g}:1. Es bleibt bei "
+                f"{kandidaten[0].id}; `bg:` im Kapitel von Hand setzen.")
+
+    # ``max`` liefert bei Gleichstand den *ersten* Treffer — und die Faktoren
+    # sind durch die Schrittweite 0,05 diskret, Gleichstand ist also der
+    # Normalfall. Frueher gewinnt: bleibt es damit beim ersten Bild, ist nichts
+    # passiert.
+    bester, faktor, _kontrast = max(traegt, key=lambda g: g[1])
+    if bester is kandidaten[0]:
+        return (kandidaten[0], None)
+
+    return (bester,
+            f"Kapitel {kap.title!r}: Hintergrund {bester.id} (Abdunklung "
+            f"{faktor:.2f}) statt {kandidaten[0].id} ({erst[0]:.2f}) — das erste "
+            f"Bild des Abschnitts traegt den Text erst unterhalb von "
+            f"{t.auto_darken_min:.2f}."
+            + ("  Die Fokusblende entfaellt damit." if koppelbar else ""))
 
 
 def _erster_aufnahmetag(media: list[MediaItem]) -> _dt.date | None:

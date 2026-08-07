@@ -99,7 +99,9 @@ slideshow render
 **Was herauskommt.** Ein Film in Aufnahmereihenfolge mit ganzseitigen
 Titelfolien an den erkannten Abschnittsgrenzen. Jede Folie hat den unscharfen,
 abgedunkelten Hintergrund des ersten Bildes ihres Abschnitts und löst sich in
-genau dieses Bild scharf auf.
+genau dieses Bild scharf auf — sofern es den Text trägt; sonst nimmt `build`
+das tragfähigste der ersten fünf Bilder und meldet es. Dann entfällt die
+Auflösung, weil sie voraussetzt, dass Hintergrund und Folgebild dasselbe sind.
 
 **Worauf achten.** `chapters` findet die Grenzen, **nicht** die Namen — einen
 Ortsnamen kann das Werkzeug nicht erfinden, und eine leere Überschrift bricht
@@ -233,7 +235,8 @@ Kopfzeilen der Folgetage löscht:
 ineinander — `group:` zeigt immer auf das *erste* Medium des Blocks, und `bg:
 auto` der Folie nimmt genau dieses Bild als unscharfen Grund. Das Bild, das du
 der Erkennbarkeit wegen vorziehst, wird damit zum Hintergrund seiner eigenen
-Kapitelfolie, und die Blende danach löst es scharf auf.
+Kapitelfolie, und die Blende danach löst es scharf auf — es sei denn, es ist zu
+hell für den Text; dann wählt `build` ein anderes und sagt es im Bericht.
 
 **Worauf achten.** Was `--from-groups` schreibt, ist eine Vorlage mit drei
 bereits getroffenen Entscheidungen:

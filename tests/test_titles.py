@@ -52,10 +52,13 @@ def _beat_region(start: float = 0.0, end: float = 90.0) -> Region:
 
 
 def _bauen(manifest: Manifest, regions: list[Region], chapters: list[Chapter], *,
-           dauer: float = 90.0, defaults: Defaults | None = None):
+           dauer: float = 90.0, defaults: Defaults | None = None, project=None):
+    """Ohne ``project`` misst ``bg: auto`` nicht — es bleibt bei der reinen
+    Positionsregel, und genau die ist hier Gegenstand. Die Messwahl steht in
+    ``test_titles_hintergrund.py``."""
     beatmap = BeatMap(audio={"file": manifest.audio.file, "duration": dauer},
                       regions=regions)
-    return build_edit_list(None, manifest, beatmap, defaults=defaults or Defaults(),
+    return build_edit_list(project, manifest, beatmap, defaults=defaults or Defaults(),
                            fps=FPS, size=(1280, 720), chapters=chapters)
 
 

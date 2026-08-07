@@ -1,14 +1,53 @@
 # Briefing: Titelfolien-Hintergrund nach Tragfähigkeit wählen
 
-**Status:** Konzept, offen · geprüft gegen 360ef0b (07.08.2026) ·
-**Betrifft:** `build.py` (`insert_titles`), `titles.py` (Messfunktion
-herausziehen), `models.py` (`TitleDefaults`) ·
+**Status:** **Umgesetzt** (08.08.2026), bis auf die Sichtprüfung A8 ·
+konzipiert gegen 360ef0b ·
+**Betrifft:** `build.py` (`insert_titles`, `_bg_nach_tragfaehigkeit`),
+`titles.py` (`measure_darkening`), `models.py` (`TitleDefaults`) ·
 **Herkunft:** Abschnitt 14.1 des Ken-Burns-Briefings
 ([`briefing-kenburns-inhaltsabhaengig.md`](briefing-kenburns-inhaltsabhaengig.md))
 nennt diesen Teil „den billigsten echten Gewinn im ganzen Abschnitt 14 — und
 ein Argument dafür, ihn unabhängig von diesem Briefing zu bauen." Genau das
 tut dieses Briefing: **der Kontrast-Teil, ohne API.** Der API-Teil (Gesichter
 unter der Textfläche, Szenenpräferenz) bleibt dort.
+
+---
+
+> ## Nachtrag zur Umsetzung (08.08.2026): die Schwelle liegt bei 0,50
+>
+> **`auto_darken_min` ist 0,50 geworden, nicht die hier empfohlenen 0,40.**
+> Der Grund ist kein Geschmack, sondern eine Rechnung, die dieses Briefing
+> nicht angestellt hat: die Abdunklung ist ein *Faktor auf die sRGB-Werte*,
+> und der hellste denkbare Grund ist Reinweiß. Nachgemessen mit
+> `_fit_darkening` und den Vorgaben (`min_contrast: 4.5`, Startwert 0,55,
+> Schritt 0,05):
+>
+> | Grund | nötige Abdunklung |
+> |---|---|
+> | Grau 255 (Reinweiß) | **0,45** |
+> | Grau 230 | 0,50 |
+> | Grau 200 und dunkler | 0,55 (Startwert trägt) |
+>
+> Die erreichbare Skala hat mit den Vorgaben also **genau drei Stufen**, und
+> `DARKEN_FLOOR` (0,25) ist unerreichbar — er greift erst, wenn jemand
+> `min_contrast` anhebt (bei 6,0 wird es 0,35, bei 7,0 dann 0,30). Eine
+> Schwelle von 0,40 hätte **nie ausgelöst**: das Merkmal wäre eingebaut und
+> tot gewesen. Die Begründung in E1b („drei Messschritte unter dem Startwert
+> und deutlich über dem Boden 0,25") rechnete mit einer Skala, die es nicht
+> gibt.
+>
+> 0,50 hält die Absicht von E1b ein: der Normalfall bleibt unangetastet, ein
+> einzelner Messschritt rechtfertigt keinen Verlust der Fokusblende, und
+> gewechselt wird auf der untersten Stufe. Als absolute Zahl bleibt sie auch
+> bei angehobenem `min_contrast` sinnvoll.
+>
+> **Zwei Folgen für den Rest dieses Papiers.** Schritt 5 und Abnahmekriterium
+> A3 („kein Kandidat trägt den Text") beschreiben mit den Vorgaben einen Fall,
+> den es nicht geben kann — der zugehörige Test stellt `min_contrast` deshalb
+> auf 12,0. Und das Fehlerbild aus Abschnitt 1 („die Folie trägt den Text gar
+> nicht") ist mit `min_contrast: 4.5` überzeichnet; was bleibt, ist „matschig":
+> eine Folie auf 0,45 statt auf 0,55. Der Gewinn ist real, aber kleiner als
+> hier angenommen. Ob er die Fokusblende aufwiegt, muss A8 zeigen.
 
 ---
 
@@ -126,7 +165,8 @@ und macht die Wahl nervös: jedes nachgereichte Bild kann den Hintergrund
 aller folgenden Kapitel kippen.
 
 > **Empfehlung: (b).** Beide Werte sind `TitleDefaults`-Schlüssel
-> (`auto_candidates: 5`, `auto_darken_min: 0.40`), **keine CLI-Argumente** —
+> (`auto_candidates: 5`, `auto_darken_min: 0.40` — umgesetzt als **0,50**,
+> siehe Nachtrag oben), **keine CLI-Argumente** —
 > Architektur-Invariante 1. Wichtig: beide gehören **nicht** in
 > `layout_params` (`titles.py:222`) — sie ändern das gebackene Bild nicht
 > und dürfen keine Assets invalidieren; genau davor warnt der dortige
@@ -175,14 +215,40 @@ jedem Bau acht Zeilen „Kapitel X: erstes Bild trägt" ausgibt, trainiert das
   Kapitelanfang: ist die Folie lesbarer, und fällt der Entfall der
   Fokusblende dort auf?
 
+**Stand 08.08.2026:** A1–A7 erfüllt, nachgewiesen in
+`tests/test_titles_hintergrund.py` (17 Tests; A3 mit angehobenem
+`min_contrast`, siehe Nachtrag). Die Suite ist grün bis auf die drei
+vorbestehenden HDR-Fixture-Fehlschläge. **A8 ist offen** — sie braucht echtes
+Material mit einem hellen Kapitelanfang und ist die einzige Instanz, die über
+den Schwellenwert entscheiden kann.
+
+An `testset1` (21 Fotos, 4 Kapitel) wurde die Kette gegengeprüft: `build`
+läuft in 6,8 s durch — vier Messungen auf der 7680er Leinwand, also rund eine
+Sekunde je Kapitel wie in 2.2 geschätzt. **Gewechselt hat kein Kapitel**, und
+das ist auch richtig: von 19 nachgemessenen Kandidaten verlangten 18 den
+Startwert 0,55, einer 0,50, keiner 0,45. Der Satz enthält schlicht keinen
+hellen Kapitelanfang. A8 braucht deshalb anderes Material — Gegenlicht,
+Schnee, Nebel oder einen weißen Himmel über der ersten Aufnahme eines
+Abschnitts.
+
 ## 5. Betroffene Stellen
 
-| Ort | Änderung |
-|---|---|
-| `build.py` `insert_titles` (`:288`) | Kandidatenkette statt „erstes Bild"; Reihenfolge subtitle ↔ bg drehen; Berichtszeilen |
-| `titles.py` | Messkette aus `render_title` als `measure_darkening` herausziehen; `render_title` ruft sie; `resolve_bg`-Docstring (E2) |
-| `models.py` `TitleDefaults` | `auto_candidates`, `auto_darken_min`; **nicht** in `layout_params` |
-| Tests | `tests/test_titles_generator.py` oder neu: A1–A6; Fixtures mit hellem/dunklem Kandidaten (einfarbige Testbilder genügen) |
+| Ort | Änderung | Stand |
+|---|---|---|
+| `build.py` `insert_titles` | Kandidatenkette statt „erstes Bild"; Reihenfolge subtitle ↔ bg gedreht; `_bg_nach_tragfaehigkeit`, `_titelschrift`; Berichtszeilen | ✓ |
+| `titles.py` | Messkette als `_messung` herausgezogen, `measure_darkening` als öffentlicher Zugang, `render_title` ruft dieselbe; `resolve_bg`-Docstring (E2) | ✓ |
+| `preprocess.py` | `titel_bildquelle` aus `_titel_hintergrund` herausgelöst — dieselbe Quellenwahl ohne Datei-Hash, den `build` über fünf Kandidaten nicht zahlen soll | ✓ |
+| `models.py` `TitleDefaults` | `auto_candidates`, `auto_darken_min`; **nicht** in `layout_params` | ✓ |
+| Tests | neu: `tests/test_titles_hintergrund.py`, A1–A6 an einfarbigen Flächen | ✓ |
+
+Zwei Stellen, die das Briefing nicht vorgesehen hatte:
+
+- **Ein Kandidat ohne lesbare Quelldatei wird übersprungen.** Sonst misst die
+  Kette die Schwarzfläche, die `_background` als Ersatz liefert — und ein
+  gelöschtes Bild wäre der tragfähigste Hintergrund überhaupt.
+- **Die Meldung nennt die Fokusblende nur, wenn es sie gäbe.** Steht an der
+  Kapitelstelle ein Clip, koppelt `_ist_fokusblende` ohnehin nicht; ihren
+  Entfall zu melden hieße, einen Schaden zu behaupten, den es nicht gibt.
 
 ## 6. Doku-Anpassungen (Teil der Umsetzung)
 

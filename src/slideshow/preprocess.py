@@ -280,7 +280,18 @@ def ensure_title_assets(project: Project, edit, manifest: Manifest | None = None
 
 def _titel_hintergrund(project: Project, manifest: Manifest | None,
                        seg) -> tuple[Path | None, str, str]:
-    """Quelldatei und Inhaltshash des Hintergrunds.
+    """Quelldatei und Inhaltshash des Hintergrunds."""
+    from .titles import bg_kind
+
+    if bg_kind(seg.bg) != "image":
+        return (None, "", "")
+    quelle, hinweis = titel_bildquelle(project, manifest, seg.bg)
+    return (quelle, hash_file(quelle) if quelle is not None else "", hinweis)
+
+
+def titel_bildquelle(project: Project, manifest: Manifest | None,
+                     bg: str) -> tuple[Path | None, str]:
+    """Die Datei, aus der der Hintergrund einer Titelfolie entsteht.
 
     Als Quelle dient das **Original** aus dem Manifest, nicht das
     Zwischenprodukt: bei einem Hochformat ist Letzteres bereits ein
@@ -288,29 +299,29 @@ def _titel_hintergrund(project: Project, manifest: Manifest | None,
     Rahmen um ein leicht verwaschenes Hochformat. In ``edit.yaml`` steht
     trotzdem der ``cache/``-Pfad — das ist die Kennung, unter der ein Bild im
     ganzen Projekt auftritt.
+
+    Ohne Inhaltshash, weil ``build`` bei der Wahl des Hintergrunds nur den
+    Pfad braucht (``docs/briefing-titelfolien-hintergrund.md``) und ueber
+    fuenf Kandidaten je Kapitel nicht fuenf 20-MP-Dateien hashen soll. Dass
+    Wahl und Backen dieselbe Datei sehen, haengt daran, dass beide durch
+    diese Funktion gehen.
     """
-    from .titles import bg_kind
-
-    if bg_kind(seg.bg) != "image":
-        return (None, "", "")
-
     if manifest is not None:
-        item = manifest.by_cache_path(seg.bg)
+        item = manifest.by_cache_path(bg)
         if item is not None:
             original = project.abs(item.path)
             if original.exists():
-                return (original, hash_file(original), "")
+                return (original, "")
 
     # Ohne Manifest oder ohne Original bleibt das Zwischenprodukt. Das ist
     # brauchbar, aber bei einem Hochformat sichtbar schlechter — deshalb gesagt.
-    ersatz = project.abs(seg.bg)
+    ersatz = project.abs(bg)
     if ersatz.exists():
-        return (ersatz, hash_file(ersatz),
-                f"Original zu {seg.bg} nicht auffindbar, der Hintergrund entsteht aus "
+        return (ersatz,
+                f"Original zu {bg} nicht auffindbar, der Hintergrund entsteht aus "
                 f"dem Zwischenprodukt. Bei einem Hochformat wird er dadurch doppelt "
                 f"unscharf.")
-    return (None, "",
-            f"Hintergrundbild {seg.bg} fehlt — die Folie bekommt eine Farbflaeche.")
+    return (None, f"Hintergrundbild {bg} fehlt — die Folie bekommt eine Farbflaeche.")
 
 
 # --------------------------------------------------------------------------

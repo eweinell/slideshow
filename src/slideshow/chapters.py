@@ -276,6 +276,8 @@ def _auftakt_zeilen(auftakt_bild: str = "") -> list[str]:
     return [
         "  # Auftakt vor allem Material. `bg: auto` nimmt das erste Bild als",
         f"  # unscharfen Grund; die Blende danach loest es scharf auf{welches}.",
+        "  # Ist es zu hell fuer den Text, waehlt `build` eines der naechsten",
+        "  # und meldet es — dann entfaellt die Aufloesung.",
         "  # Passt es nicht, ein anderes ueber seine Medien-ID setzen",
         '  # (`bg: img_...`) oder ruhig anfangen: `bg: "#1b2a3a"`.',
         "  # Ohne Kamerafahrt, dafuer besser lesbar: `motion: none`.",

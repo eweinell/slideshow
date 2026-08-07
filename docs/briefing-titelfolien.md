@@ -415,6 +415,15 @@ Repertoire, ist aber nicht der Default, weil er den Fluss ausdrücklich bricht.
 
 > **Empfehlung: (a) als Default, (c)/(d)/(e) als Überschreibung.**
 
+> **Nachtrag (08.08.2026).** (a) gilt weiterhin als *Vorrang*, hat aber einen
+> Rettungsweg bekommen: ist das erste Bild zu hell für den Text, wählt `build`
+> das tragfähigste der ersten fünf Bilder des Abschnitts und meldet es —
+> [`briefing-titelfolien-hintergrund.md`](briefing-titelfolien-hintergrund.md).
+> Der Vorrang ist kein Schönheitsgrund: eine andere Wahl schaltet die
+> Fokusblende aus Entscheidung 5 ab, und die ist ein Gestaltungsmittel.
+> Gemessen wird nur die Tragfähigkeit — der Teller in Nahaufnahme aus (c)
+> bleibt Handarbeit.
+
 **Wichtig für die Umsetzung:** Als Quelle für den Hintergrund dient das
 **Original** (`MediaItem.path`), nicht das Zwischenprodukt aus `cache/`. Bei
 einem Hochformat-Foto ist das Zwischenprodukt bereits ein Blur-Komposit; ein
