@@ -104,7 +104,12 @@ def test_abweichung_waechst_nicht_zum_ende_hin(gebaut):
         if delta is not None:
             messwerte.append((cut, delta))
 
-    assert len(messwerte) >= 4
+    # Dieselbe Untergrenze wie oben: messbar sind nur Schnitte *innerhalb* einer
+    # Beat-Region, und davon gibt es einen weniger, seit der Rest am Regionsende
+    # dem Vorgaenger zufaellt statt ein eigenes Bild zu bekommen
+    # (``_rest_zuschlagen``). Auf dieser Fixture bleibt der Rest der ersten
+    # Region bei 2,995 s knapp unter der Mindeststandzeit.
+    assert len(messwerte) >= 3
     mitte = len(messwerte) // 2
     frueh = max(d for _t, d in messwerte[:mitte])
     spaet = max(d for _t, d in messwerte[mitte:])

@@ -98,6 +98,7 @@ Gelten für jedes Segment, das nichts Eigenes sagt.
 | `beats_per_still` | int | `8` | Beats je Standbild in einer Beat-Region. Kleiner = schnellerer Schnitt. |
 | `still_seconds` | float | `4.0` | Standzeit je Bild in einer `free`-Region — der Takt, wenn es kein Raster gibt. Auch der Takt für den stummen Teil hinter dem Tonende. |
 | `still_tolerance` | [float, float] | `[3.0, 6.0]` | Erlaubtes Band, in dem eine `free`-Region **exakt** gefüllt werden darf. Die Region wird in gleich lange Slots geteilt; passt keine Anzahl ins Band, gewinnt die nächstbeste. `min` muss < `max` sein. |
+| `min_still_seconds` | float | `still_tolerance[0]` | Kürzeste Standzeit, die ein eigenes Bild rechtfertigt — siehe [Der Rest am Regionsende](#der-rest-am-regionsende). `0` schaltet die Regel ab. |
 | `hold_seconds` | float | `12.0` | Eine **stille** Region länger als das trägt bewusst *ein* ruhiges Bild statt vieler Wechsel. Greift nur bei `quiet: true`. |
 | `snap_back` | bool | `true` | Nach einem `dur:`-Override auf den nächsten Beat aufrunden, damit der Sync danach wieder steht. Der Versatz bleibt so auf genau einen Schnitt begrenzt. |
 | `clip_snap_tol` | float | `1.0` | Wie weit (in Beats) der Out-Punkt eines Clips maximal auf das Raster gezogen wird. |
@@ -1088,6 +1089,40 @@ Der Standard-Slot einer Beat-Region ist **absolut** definiert
 Cursor. Deshalb findet schon das folgende Bild nach einem Override von selbst
 aufs Raster zurück — ein Tippfehler in `dur:` kann den Rest des Films nicht aus
 dem Takt bringen.
+
+### Der Rest am Regionsende
+
+Die Dauer einer Beat-Region ist so gut wie nie ein ganzzahliges Vielfaches der
+Slotlänge. Zwischen dem letzten vollen Slot und der Regionsgrenze bleibt ein
+Rest, und ausgleichen lässt er sich nicht: die Slotgrenzen *sind* das
+Beat-Raster, die Regionsgrenze liegt daneben.
+
+```
+Region [391,814 .. 411,597]  bpm 117,0  →  12 Beats = 6,154 s
+  ├─ 6,66 s ─┼─ 6,16 s ─┼─ 6,66 s ─┤ 0,30 s │
+                                     ^^^^^^ der Rest
+```
+
+Bekäme der Rest ein eigenes Bild, wäre das über viele Regionen regelmäßig
+weniger als eine Sekunde — unter den beiden angrenzenden Blenden praktisch ein
+Aufblitzen. Liegt er unter `min_still_seconds`, fällt er deshalb dem
+**vorhergehenden** Bild derselben Region zu, und das verdrängte Medium wird in
+der nächsten Region geplant. Nach vorn und nicht nach hinten, weil der Anfang
+des nächsten Bildes der erste Beat der neuen Region ist und dort bleiben soll.
+
+Zwei Ausnahmen:
+
+- **Am Filmende** greift die Regel nicht. Dort ist die Grenze kein
+  musikalischer Schnitt, und der Rest fällt dem letzten Bild ohnehin zu.
+- **Hinter einem Clip** lässt sich nicht verlängern — dessen Länge kommt aus
+  dem Intermediate. Dann bleibt das kurze Bild stehen, und `build` meldet es.
+
+Die Regel kostet pro betroffener Region ein Bild. Bei knappem Material zeigt
+sich das als Überdeckung („n Medien passen nicht mehr in die Musik"); der
+Vorschlag, `beats_per_still` zu senken, steht dann im Bericht.
+
+`free`-Regionen brauchen die Schranke nicht: sie sind über `still_tolerance`
+exakt gekachelt und haben gar keinen Rest.
 
 ---
 

@@ -13,7 +13,8 @@ import pytest
 
 from slideshow.models import Defaults, Region
 from slideshow.planner import (Intent, apply_transitions, coverage, plan_slots,
-                               resolve, to_time, validate_continuity, visible_span)
+                               resolve, slot_capacity, to_frame, to_time,
+                               validate_continuity, visible_span)
 
 FPS = 60.0
 
@@ -226,6 +227,216 @@ def test_sehr_lange_stille_bekommt_ein_hold_bild():
     in_region = [s for s in plan.slots if s.region_index == 0]
     assert len(in_region) == 1
     assert in_region[0].hold
+
+
+# --------------------------------------------------------------------------
+# Die Framerundung darf keinen Beat verschenken
+# --------------------------------------------------------------------------
+
+#: 117 bpm auf 50 fps: ein Beat ist 0,5128 s lang und trifft praktisch nie eine
+#: Framegrenze. Genau dort zeigt sich der Fehler — bei 120 bpm auf 60 fps
+#: (0,5 s = 30 Frames) faellt er nie auf.
+def _krummes_raster():
+    return [Region(type="beat", start=0.0, end=180.0, bpm=117.0, offset=0.317),
+            Region(type="free", start=180.0, end=210.0, reason="stille"),
+            Region(type="beat", start=210.0, end=390.0, bpm=103.5, offset=210.21)]
+
+
+def test_ein_slot_steht_genau_beats_per_still_beats():
+    """Der Cursor ist framegerundet.
+
+    Landet er eine halbe Frame *hinter* einem Beat, sitzt er auf demselben Frame
+    und *ist* dieser Beat. Eine rein numerische Toleranz in
+    ``beat_index_at_or_after`` sah ihn als "danach" und gab dem Slot 13 statt 12
+    Beats. Das traf rund jeden zweiten Slot; an ``sommer26`` gemessen waren es
+    102 von 293 Slots und zusammen 53 s — Kapazitaet, die am Filmende als
+    ungenutztes Material wieder auftauchte.
+    """
+    fps = 50.0
+    defaults = Defaults(beats_per_still=12)
+    plan = plan_slots(_krummes_raster(), _stills(60), defaults, fps=fps,
+                      total_frames=int(390 * fps))
+    # Das letzte Bild einer Region traegt deren Rest (Restplatz-Regel) und ist
+    # damit planmaessig laenger.
+    letztes = {s.region_index: i for i, s in enumerate(plan.slots)}
+    geprueft = 0
+    for i, slot in enumerate(plan.slots[:-1]):
+        region = plan.regions[slot.region_index]
+        if region.type != "beat" or letztes[slot.region_index] == i:
+            continue
+        beat = region.beat_duration()
+        offset = float(region.offset if region.offset is not None else region.start)
+        # Das *erste* Bild einer Region faengt am Regionsanfang an, nicht auf
+        # dem Raster (6.0, Vorlaufregel) — es ist von sich aus laenger.
+        start = slot.start_f / fps - offset
+        if abs(start - round(start / beat) * beat) > 1.0 / fps:
+            continue
+        # Gemessen wird in *Frames*, nicht in Beats: beide Slotgrenzen sind
+        # gerundet, also ist eine Frame Spiel. In Beats ausgedrueckt haengt
+        # dieselbe Toleranz am Tempo und waere bei 194 bpm zu eng.
+        soll = round(12 * beat * fps)
+        assert abs(slot.frames - soll) <= 1, \
+            f"Slot {i} steht {slot.frames} Frames statt {soll} (12 Beats)"
+        geprueft += 1
+    assert geprueft >= 40, f"nur {geprueft} Slots geprueft"
+
+
+def test_die_karte_haelt_was_slot_capacity_verspricht():
+    """``slot_capacity`` ist die Zielzahl fuer ``slideshow select``.
+
+    Vergibt der Planer weniger Slots, waehlt man Bilder aus, fuer die es keinen
+    Platz gibt — und merkt es erst am fertigen Film als Ueberdeckung.
+    """
+    fps = 50.0
+    defaults = Defaults(beats_per_still=12)
+    regions = _krummes_raster()
+    kap = slot_capacity(regions, defaults)
+    plan = plan_slots(regions, _stills(kap + 10), defaults, fps=fps,
+                      total_frames=int(390 * fps))
+    assert len(plan.slots) == kap
+
+
+# --------------------------------------------------------------------------
+# Mindeststandzeit — der Rest am Regionsende
+#
+# Eine beat-Region ist so gut wie nie ein ganzzahliges Vielfaches der
+# Slotlaenge. Der Bruchteil bekam frueher ein eigenes Bild: an echtem Material
+# regelmaessig unter 1 s, unter den Blenden praktisch ein Aufblitzen.
+# --------------------------------------------------------------------------
+
+#: 3 Slots zu 4 s, dann 2,5 s Rest — unter der Mindeststandzeit von 3 s.
+#: Dahinter noch eine Region, damit nicht die Ausnahme am Filmende greift.
+def _regions_mit_rest(ende: float = 14.5):
+    return [Region(type="beat", start=0.0, end=ende, bpm=120.0, offset=0.0),
+            Region(type="free", start=ende, end=ende + 16.0, reason="stille")]
+
+
+def test_der_rest_am_regionsende_bekommt_kein_eigenes_bild():
+    regions = _regions_mit_rest()
+    defaults = Defaults()
+    plan = plan_slots(regions, _stills(10), defaults, fps=FPS,
+                      total_frames=int(round(30.5 * FPS)))
+
+    in_region = [s for s in plan.slots if s.region_index == 0]
+    assert len(in_region) == 3, "der 2,5-s-Rest darf kein viertes Bild werden"
+    for slot in in_region:
+        assert slot.frames / FPS >= defaults.min_still - 1e-9, \
+            f"{slot.frames / FPS:.3f} s unter der Mindeststandzeit"
+
+
+def test_der_rest_faellt_dem_vorgaenger_zu_und_schliesst_die_region():
+    """Er kann nur an einen Nachbarn — und zwar an den *vorherigen*.
+
+    Der Anfang des naechsten Bildes ist der erste Beat der neuen Region und
+    soll dort bleiben; verschoebe man ihn, waere der Sync fuer eine ganze
+    Region dahin.
+    """
+    plan = plan_slots(_regions_mit_rest(), _stills(10), Defaults(), fps=FPS,
+                      total_frames=int(round(30.5 * FPS)))
+    letzter = [s for s in plan.slots if s.region_index == 0][-1]
+    assert letzter.frames / FPS == pytest.approx(6.5), "4 s Slot + 2,5 s Rest"
+    assert letzter.end_f == to_frame(14.5, FPS)
+
+
+def test_das_verdraengte_bild_rutscht_weiter_statt_wegzufallen():
+    """Kein Medium geht verloren — es wird in der naechsten Region geplant."""
+    plan = plan_slots(_regions_mit_rest(), _stills(10), Defaults(), fps=FPS,
+                      total_frames=int(round(30.5 * FPS)))
+    reihe = [s.intent.src for s in plan.slots]
+    assert reihe[:4] == [f"cache/img_{i:03d}.jpg" for i in range(4)], \
+        "die Reihenfolge bleibt unberuehrt"
+    assert plan.slots[3].region_index == 1, \
+        "das vierte Bild gehoert jetzt in die free-Region, nicht an deren Rand"
+    assert "cache/img_003.jpg" not in plan.unused, \
+        "verdraengt heisst verschoben, nicht weggeworfen"
+
+
+def test_ein_tragfaehiger_rest_bekommt_weiterhin_sein_eigenes_bild():
+    """Die Regel greift nur unterhalb der Schwelle — sonst waere sie ein
+    Rundungsfehler mit anderem Vorzeichen."""
+    regions = _regions_mit_rest(15.5)          # 3 Slots zu 4 s, dann 3,5 s Rest
+    plan = plan_slots(regions, _stills(10), Defaults(), fps=FPS,
+                      total_frames=int(round(31.5 * FPS)))
+    in_region = [s for s in plan.slots if s.region_index == 0]
+    assert len(in_region) == 4
+    assert in_region[-1].frames / FPS == pytest.approx(3.5)
+
+
+def test_am_filmende_bleibt_der_rest_ein_bild():
+    """Dort ist die Grenze kein Schnitt, sondern das Ende.
+
+    Bestimmt das Material die Laenge, endet die Regionenkarte genau da, wo das
+    letzte Bild anfangen wollte. Wuerde die Regel auch hier greifen, kostete sie
+    ohne Not ein Medium — und der Rest faellt dem letzten Bild ohnehin zu.
+    """
+    regions = [Region(type="beat", start=0.0, end=14.5, bpm=120.0, offset=0.0)]
+    plan = plan_slots(regions, _stills(4), Defaults(), fps=FPS,
+                      total_frames=to_frame(14.5, FPS))
+    assert len(plan.slots) == 4
+    assert plan.slots[-1].frames / FPS == pytest.approx(2.5)
+    assert not plan.unused
+
+
+def test_ein_nicht_auffangbarer_rest_wird_gemeldet():
+    """Hinter einem Clip laesst sich nicht verlaengern: seine Laenge kommt aus
+    dem Intermediate. Dann bleibt das kurze Bild — aber nicht stillschweigend.
+    """
+    regions = [Region(type="beat", start=0.0, end=12.5, bpm=120.0, offset=0.0),
+               Region(type="free", start=12.5, end=28.5, reason="stille")]
+    intents = [
+        Intent(kind="still", src="cache/img_000.jpg", index=0),
+        Intent(kind="still", src="cache/img_001.jpg", index=1),
+        # Endet auf dem Beat bei 12,0 s und laesst 0,5 s bis zur Regionsgrenze.
+        Intent(kind="clip", src="cache/clip_000.mov", index=2, clip_available=4.0),
+        Intent(kind="still", src="cache/img_002.jpg", index=3),
+        Intent(kind="still", src="cache/img_003.jpg", index=4),
+    ]
+    plan = plan_slots(regions, intents, Defaults(), fps=FPS,
+                      total_frames=int(round(28.5 * FPS)))
+
+    kurz = [s for s in plan.slots if s.region_index == 0][-1]
+    assert kurz.intent.kind == "still"
+    assert kurz.frames / FPS == pytest.approx(0.5)
+    assert any("Mindeststandzeit" in w for w in plan.warnings), \
+        "ein Bild unter der Mindeststandzeit gehoert gemeldet"
+
+
+def test_ein_ausdrueckliches_dur_darf_kuerzer_sein_und_bleibt_unkommentiert():
+    """Wer 1,5 s hinschreibt, meint 1,5 s. Die Schranke ist gegen den *geplanten*
+    Rest gerichtet, nicht gegen Handarbeit."""
+    regions = [Region(type="beat", start=0.0, end=60.0, bpm=120.0, offset=0.0)]
+    intents = _stills(10)
+    intents[3].dur = 1.5
+    intents[3].snap_back = False
+    plan = plan_slots(regions, intents, Defaults(), fps=FPS, total_frames=int(60 * FPS))
+    assert plan.slots[3].frames / FPS == pytest.approx(1.5, abs=1.0 / FPS)
+    assert not any("Mindeststandzeit" in w for w in plan.warnings)
+
+
+def test_die_mindeststandzeit_folgt_dem_toleranzband():
+    """Eine Zahl, nicht zwei: free- und beat-Regionen teilen dieselbe Untergrenze."""
+    assert Defaults().min_still == pytest.approx(3.0)
+    assert Defaults(still_tolerance=(2.0, 5.0)).min_still == pytest.approx(2.0)
+    assert Defaults(min_still_seconds=1.0).min_still == pytest.approx(1.0)
+
+
+def test_die_mindeststandzeit_laesst_sich_abschalten():
+    """``0`` stellt das alte Verhalten wieder her — die Reissleine, falls jemand
+    den Rest ausdruecklich als Bild haben will."""
+    plan = plan_slots(_regions_mit_rest(), _stills(10), Defaults(min_still_seconds=0.0),
+                      fps=FPS, total_frames=int(round(30.5 * FPS)))
+    in_region = [s for s in plan.slots if s.region_index == 0]
+    assert len(in_region) == 4
+    assert in_region[-1].frames / FPS == pytest.approx(2.5)
+
+
+def test_die_kapazitaetsrechnung_kennt_die_regel():
+    """Sonst waehlte ``select`` Bilder aus, fuer die es keinen Slot gibt."""
+    defaults = Defaults()
+    kurz = coverage(plan_slots(_regions_mit_rest(), _stills(10), defaults, fps=FPS,
+                               total_frames=int(round(30.5 * FPS))), defaults)
+    beat = next(r for r in kurz.per_region if r["type"] == "beat")
+    assert beat["capacity"] == 3, "die 2,5 s Rest fassen kein Bild"
 
 
 # --------------------------------------------------------------------------

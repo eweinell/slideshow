@@ -33,9 +33,10 @@ from .models import (BeatMap, Chapter, ClipSegment, Defaults, EditList, KBSpec,
 from .overrides import cut_seconds, resolve_media
 from .paths import Project
 from .planner import (Coverage, Intent, Plan, RenderSegment, apply_transitions,
-                      coverage, default_transition_seconds, fit_regions_to,
-                      material_seconds, plan_slots, resolve, standard_slot,
-                      to_frame, to_time, validate_continuity, visible_span)
+                      beat_index_at_or_after, coverage, default_transition_seconds,
+                      fit_regions_to, material_seconds, plan_slots, resolve,
+                      standard_slot, to_frame, to_time, validate_continuity,
+                      visible_span)
 from .preprocess import title_canvas
 from .probe import chronological
 from .titles import bg_kind, reading_seconds, resolved, title_asset, title_kb
@@ -693,7 +694,11 @@ def _phrasenlage(plan: Plan, i: int, defaults: Defaults,
         return False
 
     vor_start = to_time(vor.start_f, plan.fps)
-    k0 = math.ceil((vor_start - offset) / beat - 1e-6)
+    # Dieselbe Rechnung, die der Planer gleich anstellt — und deshalb *sein*
+    # Aufruf, keine zweite Fassung. Stand hier eine eigene, lag die Folie um
+    # genau einen Beat neben der Phrasengrenze, sobald die beiden Toleranzen
+    # auseinanderliefen.
+    k0 = beat_index_at_or_after(vor_start, offset, beat, plan.fps)
     neu = (ziel - (offset + k0 * beat)) / beat
     if neu < 1.0:
         lage.meldungen[("phrase", seg.title)] = (
@@ -988,6 +993,12 @@ def check_title_phrases(plan: Plan, defaults: Defaults) -> list[str]:
         if region.type != "beat" or not region.bpm:
             continue
         if plan.slots[i - 1].region_index != slot.region_index:
+            continue
+        if plan.slots[i - 1].intent.kind != "still":
+            # Ein Clip davor: ``_phrasenlage`` ruehrt dessen Laenge bewusst nicht
+            # an und sagt das auch. Hier noch einmal zu melden, `build` richte
+            # die Lage neu aus, waere schlicht falscher Rat — ein weiterer Lauf
+            # aendert daran nichts.
             continue
         phrase = phrase_beats * region.beat_duration()
         offset = float(region.offset if region.offset is not None else region.start)

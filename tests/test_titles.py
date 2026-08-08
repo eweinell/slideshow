@@ -111,6 +111,36 @@ def test_ohne_korrekturbedarf_wird_nichts_berichtet():
     assert not [w for w in plan.warnings if "Phrasengrenze" in w]
 
 
+def test_die_phrasenlage_haelt_auch_bei_krummem_raster():
+    """Lagekorrektur und Planer muessen dieselbe Beatrechnung fuehren.
+
+    ``_phrasenlage`` hatte ``beat_index_at_or_after`` ein zweites Mal
+    ausgeschrieben — mit einer rein numerischen Toleranz, waehrend der Planer
+    auf eine halbe Frame prueft. Beide liefen dadurch um genau einen Beat
+    auseinander, und die Folie landete daneben (an ``sommer26`` gemessen:
+    0,52 s, also exakt ein Beat bei 117,25 bpm).
+
+    Sichtbar wird das nur bei einem Raster, das keine Framegrenzen trifft: 120
+    bpm auf 60 fps sind glatte 30 Frames je Beat, dort faellt es nie auf. 117
+    bpm sind 30,77 Frames.
+    """
+    region = Region(type="beat", start=0.0, end=90.0, bpm=117.0, offset=0.317,
+                    conf=0.9)
+    defaults = Defaults(beats_per_still=12)
+    _edit, plan, _cov = _bauen(_manifest(), [region],
+                               [Chapter(before="img_005", title="Malmoe")],
+                               defaults=defaults)
+    (_i, slot), = _titelslots(plan)
+    beat = region.beat_duration()
+    phrase = defaults.title.phrase_beats * beat
+    start = to_time(slot.start_f, FPS)
+    versatz = start - (region.offset + round((start - region.offset) / phrase) * phrase)
+    assert abs(versatz) <= 1.0 / FPS, \
+        f"Titel beginnt {versatz * 1000:+.0f} ms neben der Phrasengrenze"
+    assert not check_title_phrases(plan, defaults), \
+        "und die Nachpruefung darf dann auch nichts zu melden haben"
+
+
 def test_regionsgrenze_gilt_als_phrasengrenze():
     """Eine Regionsgrenze ist per Konstruktion eine musikalische Grenze.
 
@@ -234,10 +264,25 @@ def test_eine_folie_die_erst_beim_nachplanen_in_die_stille_rutscht_bricht_nicht_
     assert plan.regions[slot.region_index].type == "free"
     assert to_time(slot.start_f, FPS) == pytest.approx(16.0), \
         "die Lagekorrektur soll die Folie trotzdem auf die Phrasengrenze ziehen"
-    # Der Vorgaenger traegt die Dehnung sichtbar, wie in Entscheidung 3c.
-    assert plan.slots[i - 1].intent.beats == pytest.approx(8.0)
+
+    # Der Vorgaenger traegt die Dehnung sichtbar (Entscheidung 3c) — hier
+    # allerdings nicht mehr als materialisiertes `beats:`: die Restplatz-Regel
+    # in ``plan_slots`` schlaegt ihm die letzte Sekunde der Beat-Region schon
+    # von selbst zu, weil sie unter der Mindeststandzeit liegt. Fuer die
+    # Lagekorrektur bleibt danach nichts mehr zu tun.
+    vorgaenger = plan.slots[i - 1]
+    standard = 6 * plan.regions[0].beat_duration()
+    assert vorgaenger.frames / FPS > standard, \
+        "der Vorgaenger muss laenger stehen als ein Standardbild"
+    assert to_time(vorgaenger.end_f, FPS) == pytest.approx(16.0)
     assert not any("beat-Region" in w for w in plan.warnings), \
         "aufgeraeumt, also auch nichts mehr zu melden"
+
+    # Der eigentliche Grund fuer Entscheidung 3c: die Lage muss den Weg ueber
+    # die Datei ueberstehen. Sie tut es auch ohne `beats:`, weil die
+    # Restplatz-Regel aus denselben Regionen dasselbe Ergebnis rechnet.
+    zurueck = plan_from_edit(edit)
+    assert [s.start_f for s in zurueck.slots] == [s.start_f for s in plan.slots]
 
 
 def test_der_auftakt_bekommt_keinen_verschiebevorschlag():

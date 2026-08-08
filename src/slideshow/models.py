@@ -509,6 +509,18 @@ class Defaults(BaseModel):
     beats_per_still: int = 8
     still_seconds: float = 4.0
     still_tolerance: tuple[float, float] = (3.0, 6.0)
+    #: Kuerzeste Standzeit, die ein eigenes Bild rechtfertigt.
+    #:
+    #: Greift am *Ende einer beat-Region*: dort ist die Regionsdauer kein
+    #: ganzzahliges Vielfaches der Slotlaenge, und der Bruchteil bekaeme sonst
+    #: ein eigenes Bild — an echtem Material regelmaessig unter 1 s, also ein
+    #: Aufblitzen statt eines Bildes. free-Regionen brauchen die Schranke nicht,
+    #: sie sind ueber ``still_tolerance`` exakt gekachelt.
+    #:
+    #: ``None`` nimmt ``still_tolerance[0]``: dieselbe Untergrenze, die die
+    #: free-Regionen ohnehin einhalten. Zwei Zahlen fuer denselben Begriff
+    #: liefen sonst auseinander, sobald jemand eine davon anfasst.
+    min_still_seconds: float | None = None
     snap_back: bool = True
     portrait: Literal["blur", "black", "crop"] = "blur"
     clip_snap_tol: float = 1.0
@@ -528,6 +540,13 @@ class Defaults(BaseModel):
         if v[0] >= v[1]:
             raise ValueError("still_tolerance muss [min, max] mit min < max sein")
         return v
+
+    @property
+    def min_still(self) -> float:
+        """Die aufgeloeste Mindeststandzeit in Sekunden."""
+        if self.min_still_seconds is None:
+            return float(self.still_tolerance[0])
+        return max(0.0, float(self.min_still_seconds))
 
 
 class StillSegment(BaseModel):

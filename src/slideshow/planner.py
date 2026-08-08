@@ -26,6 +26,17 @@ ist eine Differenz zweier solcher Nummern.
    (``true``, Default) oder exakt seine Sekunden behaelt (``false``). Das ist
    die konservativere Auslegung — ein Tippfehler in ``dur:`` kann den Rest des
    Films nicht mehr aus dem Takt bringen.
+
+.. note::
+   **Der Rest am Regionsende.** Die Dauer einer beat-Region ist so gut wie nie
+   ein ganzzahliges Vielfaches der Slotlaenge. Der Bruchteil bekam frueher ein
+   eigenes Bild — an echtem Material regelmaessig unter 1 s, also ein
+   Aufblitzen. Liegt er unter ``defaults.min_still_seconds``, faellt er
+   deshalb dem vorhergehenden Bild derselben Region zu, und das Medium wird in
+   der naechsten Region geplant (:func:`_rest_zuschlagen`).
+
+   Die free-Regionen brauchen die Regel nicht: sie sind ueber ``linspace``
+   exakt gekachelt und haben gar keinen Rest.
 """
 
 from __future__ import annotations
@@ -51,6 +62,35 @@ def to_frame(t: float, fps: float) -> int:
 
 def to_time(frame: int, fps: float) -> float:
     return frame / fps
+
+
+def beat_index_at_or_after(t: float, offset: float, beat: float, fps: float) -> int:
+    """Der erste Rasterbeat bei oder nach ``t``.
+
+    Die Toleranz ist eine **halbe Frame**, in Beats gerechnet — nicht ``_EPS``.
+    Zeitpunkte auf der Timeline sind framegerundet (siehe :func:`plan_slots`):
+    liegt ``t`` eine halbe Frame hinter einem Beat, sitzt es auf demselben Frame
+    und *ist* dieser Beat. Eine rein numerische Toleranz sieht es dagegen als
+    "danach" und gibt den naechsten Index zurueck — der Slot bekommt dann einen
+    Beat mehr, als ``beats_per_still`` sagt.
+
+    Das trifft rund jeden zweiten Slot, weil die Framerundung mal nach oben und
+    mal nach unten geht (an ``sommer26`` gemessen: 102 von 293 Slots, zusammen
+    53 s — mehr als acht Standardbilder, die am Ende des Films als ungenutztes
+    Material wieder auftauchten). Auf den Sync wirkt es sich nicht aus: die
+    Schnitte liegen so oder so auf dem Raster, es war die *Kapazitaet*, die
+    still verlorenging.
+
+    **Frei stehend und nicht nur Methode von** :class:`RegionGrid`, weil
+    ``build._phrasenlage`` dieselbe Frage stellt: welcher Beat traegt den
+    Vorgaenger einer Titelfolie? Die Rechnung stand dort ein zweites Mal — und
+    lief nach der Korrektur hier prompt um einen Beat auseinander, sodass die
+    Folie neben der Phrasengrenze landete. Eine Kopie weniger.
+    """
+    if not beat:
+        return math.ceil((t - offset) - _EPS)
+    tol = 0.5 / (fps * beat) if fps else _EPS
+    return math.ceil((t - offset) / beat - max(tol, _EPS))
 
 
 # --------------------------------------------------------------------------
@@ -93,7 +133,7 @@ class RegionGrid:
         return self.offset + k * self.beat
 
     def beat_index_at_or_after(self, t: float) -> int:
-        return math.ceil((t - self.offset) / self.beat - _EPS)
+        return beat_index_at_or_after(t, self.offset, self.beat, self.fps)
 
     def default_end(self, cursor: float) -> float:
         """Das Ende des naechsten Standard-Slots ab ``cursor``."""
@@ -131,6 +171,41 @@ class RegionGrid:
         if self.is_beat and self.beat:
             return abs(a - b) / self.beat
         return abs(a - b)
+
+
+def _rest_zuschlagen(slots: list[Slot], region_index: int, cursor_f: int,
+                     end_frame: int, min_still_f: int) -> bool:
+    """Den Rest bis zum Regionsende dem vorhergehenden Bild zuschlagen.
+
+    Der Platz zwischen dem letzten vollen Slot einer beat-Region und deren
+    Grenze ist der Bruchteil von ``Regionsdauer / Slotlaenge``. Ueber viele
+    Regionen ist er ungefaehr gleichverteilt, faellt also regelmaessig unter
+    eine Sekunde — als eigenes Bild ist das ein Aufblitzen, das die Blenden
+    fast vollstaendig verdecken.
+
+    Ausgleichen laesst er sich nicht: die Slotgrenzen *sind* das Beat-Raster,
+    und die Regionsgrenze liegt nun einmal daneben. Er kann nur an einen
+    Nachbarn. Der Vorgaenger bekommt ihn, nicht der Nachfolger — dessen Anfang
+    ist der erste Beat der neuen Region und soll dort auch bleiben.
+
+    Gibt ``True`` zurueck, wenn zugeschlagen wurde; das Medium ist dann noch
+    ungeplant und gehoert in die naechste Region.
+    """
+    if min_still_f <= 0 or end_frame - cursor_f >= min_still_f:
+        return False
+    if not slots or slots[-1].region_index != region_index:
+        # Kein Vorgaenger in dieser Region — die Region ist als Ganzes kuerzer
+        # als die Mindeststandzeit. Ein kurzes Bild ist dann immer noch besser
+        # als eine Luecke; ``merge_short_regions`` haette vorher greifen sollen.
+        return False
+    if slots[-1].intent.kind != "still":
+        # In einen Clip laesst sich nicht hineinverlaengern: seine Laenge kommt
+        # aus dem Intermediate, ein gestreckter Slot friere das letzte Bild ein
+        # — und zwar still, weil die Handle-Rechnung darauf nicht vorbereitet
+        # ist. Dann lieber das kurze Bild und die Warnung dazu.
+        return False
+    slots[-1].end_f = end_frame
+    return True
 
 
 def _free_count(duration: float, still_seconds: float,
@@ -253,15 +328,31 @@ def plan_slots(regions: list[Region], intents: list[Intent], defaults: Defaults,
     # und bekommt ein 1-Frame-Bild angehaengt.
     cursor_f = 0
     ri = 0
+    min_still_f = int(round(defaults.min_still * fps))
 
     def region_end_frame(i: int) -> int:
         return min(to_frame(grids[i].region.end, fps), total_frames)
 
-    for intent in intents:
+    # Index statt `for`, weil die Restplatz-Regel dasselbe Medium noch einmal
+    # ansehen muss — dann in der naechsten Region.
+    i = 0
+    while i < len(intents):
+        intent = intents[i]
         while ri < len(grids) and cursor_f >= region_end_frame(ri):
             ri += 1
         if ri >= len(grids) or cursor_f >= total_frames:
             break
+
+        # Am Ende der *Timeline* greift die Restplatz-Regel nicht. Dort ist die
+        # Grenze kein musikalischer Schnitt, sondern das Filmende — und der Rest
+        # faellt dem letzten Bild ohnehin zu (``stretched`` weiter unten). Beides
+        # anzuwenden kostete nur ein Medium: bestimmt das Material die Laenge,
+        # endet die Karte genau dort, wo das letzte Bild anfangen wollte.
+        grenze = region_end_frame(ri)
+        if grenze < total_frames and _rest_zuschlagen(slots, ri, cursor_f, grenze,
+                                                      min_still_f):
+            cursor_f = slots[-1].end_f
+            continue
 
         grid = grids[ri]
         region = grid.region
@@ -352,6 +443,7 @@ def plan_slots(regions: list[Region], intents: list[Intent], defaults: Defaults,
             # zuschlagen, statt ein Ein-Frame-Bild zu erzeugen.
             end_f = region_end_frame(ri)
         if end_f <= start_f:
+            i += 1
             continue
 
         slots.append(Slot(intent=intent, region_index=ri, start_f=start_f, end_f=end_f,
@@ -360,8 +452,9 @@ def plan_slots(regions: list[Region], intents: list[Intent], defaults: Defaults,
         for w in local:
             warnings.append(f"{intent.src}: {w}")
         cursor_f = end_f
+        i += 1
 
-    unused = [i.src for i in intents[len(slots):]]
+    unused = [x.src for x in intents[i:]]
     stretched = 0
     if slots and slots[-1].end_f < total_frames:
         stretched = total_frames - slots[-1].end_f
@@ -372,6 +465,22 @@ def plan_slots(regions: list[Region], intents: list[Intent], defaults: Defaults,
     # Lueckenlosigkeit erzwingen: jede Grenze ist zugleich Ende und Anfang.
     for a, b in zip(slots, slots[1:]):
         b.start_f = a.end_f
+
+    # Erst hier, nach Streckung und Grenzabgleich, steht die endgueltige Laenge
+    # fest. Was jetzt noch unter der Mindeststandzeit liegt, hat die
+    # Restplatz-Regel nicht auffangen koennen — das gehoert gemeldet.
+    for slot in slots:
+        if slot.frames >= min_still_f:
+            continue
+        if slot.intent.dur is not None or slot.intent.beats is not None:
+            continue                    # ausdruecklich kurz gestellt, kein Befund
+        r = regions[slot.region_index]
+        w = (f"steht nur {slot.frames / fps:.2f} s (Mindeststandzeit "
+             f"{defaults.min_still:.2f} s). Der Platz bis zum Ende der Region "
+             f"[{r.start:.3f}, {r.end:.3f}] reicht nicht weiter und liess sich "
+             f"keinem Vorgaenger zuschlagen.")
+        slot.warnings.append(w)
+        warnings.append(f"{slot.intent.src}: {w}")
 
     return Plan(fps=fps, slots=slots, transitions=[0] * (len(slots) + 1),
                 total_frames=total_frames, regions=regions, warnings=warnings,
@@ -696,7 +805,14 @@ def _region_capacity(r: Region, defaults: Defaults) -> int:
     """Wie viele Standardbilder die Region fassen wuerde."""
     if r.type == "beat" and r.bpm:
         per_still = (r.beats_per_still or defaults.beats_per_still) * r.beat_duration()
-        return max(1, int(round(r.duration / per_still)))
+        # Dieselbe Regel wie im Planer, nicht ein gerundetes ``duration /
+        # per_still``: der Rest am Regionsende bekommt nur dann ein eigenes
+        # Bild, wenn er die Mindeststandzeit erreicht (``_rest_zuschlagen``).
+        # Zwei Rechnungen fuer dieselbe Frage liefen sonst auseinander, und
+        # ``select`` waehlte Bilder aus, fuer die es keinen Slot gibt.
+        voll = int(r.duration // per_still)
+        rest = r.duration - voll * per_still
+        return max(1, voll + (1 if rest >= defaults.min_still else 0))
     n, _hold = _free_count(r.duration, r.still_seconds or defaults.still_seconds,
                            defaults.still_tolerance, defaults.hold_seconds,
                            quiet=r.quiet)
