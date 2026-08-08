@@ -58,6 +58,12 @@ Beurteilung.
    SDR-Clip derselben Szene schneiden.
 2. Rendern und beide im direkten Übergang vergleichen.
 
+> Dieser Check ist zugleich das offene Abnahmekriterium **A4** aus
+> [`briefing-hlg-ffmpeg8.md`](briefing-hlg-ffmpeg8.md): dass die Erkennung
+> unter ffmpeg 8 trägt, ist bisher nur an synthetischem Material belegt. Vor
+> dem Farbeindruck deshalb im Manifest nachsehen, ob `hdr: hlg` steht und die
+> Warnung „HLG-Material — wird nach BT.709 SDR getonemappt" gefallen ist.
+
 **Stellschrauben,** falls der Clip flau oder zu kontrastreich wirkt:
 
 - `doctor` zeigt unter „HDR-Tonemapping", welcher Pfad benutzt wird.

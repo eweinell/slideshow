@@ -84,8 +84,8 @@ statt einer, und eine von Hand geschriebene Edit-List erreicht `render` ohne
 - **A2** — Dasselbe für `defaults.xfade.mode`.
 - **A3** — Alle 16 Schlüssel aus `known_modes()` validieren; `dissolve`
   bleibt gültig und bedeutet weiterhin `fade`.
-- **A4** — Suite grün. Vorbestehende Ausnahme: die drei HDR-Tests, bis
-  [`briefing-hlg-ffmpeg8.md`](briefing-hlg-ffmpeg8.md) umgesetzt ist.
+- **A4** — Suite grün, ohne Ausnahme (die Einschränkung auf die drei HDR-Tests
+  ist mit [`briefing-hlg-ffmpeg8.md`](briefing-hlg-ffmpeg8.md) entfallen).
 
 ## 5. Doku-Anpassungen (Teil der Umsetzung)
 

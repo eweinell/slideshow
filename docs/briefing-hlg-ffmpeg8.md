@@ -1,9 +1,22 @@
 # Briefing: HLG unter ffmpeg 8 — Befund und Abhilfe
 
-**Status:** Konzept, offen · Befund erhoben am 07.08.2026 gegen 360ef0b,
-ffmpeg 8.1.2 (Windows) · **Betrifft:** `fixtures.py`; `probe.py`,
-`preprocess.py` und `doctor.py` bleiben unverändert ·
-**Aufwand:** klein — der Wert dieses Briefings ist die Diagnose, nicht der Patch.
+**Status:** Umgesetzt am 08.08.2026 (A1–A3, A5); **A4 offen** — der Beleg an
+echtem HLG-Material, siehe [`manuelle-checks.md`](manuelle-checks.md), Check 3 ·
+Befund erhoben am 07.08.2026 gegen 360ef0b, ffmpeg 8.1.2 (Windows) ·
+**Betrifft:** `fixtures.py`; `probe.py`, `preprocess.py` und `doctor.py` bleiben
+unverändert · **Aufwand:** klein — der Wert dieses Briefings ist die Diagnose,
+nicht der Patch.
+
+> **Nachtrag zur Umsetzung.** Festlegung 3 („die drei Tests werden nicht
+> angefasst") hat für zwei der drei gehalten. `test_tonemapping_steht_vor_dem_scale`
+> war aus einem **zweiten, unabhängigen Grund** rot, den der Befund nicht
+> erfassen konnte, weil er die Tags maß und nicht den Filtergraphen: der Test
+> schaltet `zscale_usable` ein, lässt `libplacebo_usable` aber auf dem Wert der
+> Maschine — und `tonemap_chain` bevorzugt libplacebo, wo Vulkan läuft. Der
+> Test war damit nur dort grün, wo libplacebo *nicht* nutzbar ist. Er prüft
+> jetzt die **Reihenfolge** (Tonemapper vor Scale) statt den Namen des
+> Tonemappers; das ist seine Aussage laut Docstring, und sie gilt für beide
+> Pfade. Siehe Abschnitt 8.
 
 ---
 
@@ -124,3 +137,23 @@ und verlangt einen Beleg an echtem Material (A4).
 Eine inhaltliche Prüfung des Tonemapping-*Ergebnisses* (Farbmetrik statt
 Filtergraph), PQ/HDR10+-Fixtures über den HLG-Fall hinaus, und jede Änderung
 an der Erkennungslogik selbst.
+
+---
+
+## 8. Was tatsächlich geändert wurde (08.08.2026)
+
+| Ort | Änderung |
+|---|---|
+| `fixtures.py` `make_clips` | HLG-Clip taggt über `-vf setparams=…` statt über die Ausgabeoptionen (Festlegung 1) |
+| `fixtures.py` `hat_transfer` | Nach-Encode-Prüfung mit Warnung (Festlegung 2). Liest mit `probe.color_transfer` — dem Leser des Produktionscodes; eine Fixture, die sich mit anderen Augen prüft als das Werkzeug, prüft sich selbst |
+| `tests/test_media.py` | zwei neue Tests für die Zusicherung (A3: einer am echten Clip, einer mit gestubbtem ffprobe). `test_tonemapping_steht_vor_dem_scale` prüft die Reihenfolge statt `zscale` — siehe Nachtrag oben |
+| Doku | `CLAUDE.md` (Absatz „drei Tests" gestrichen, Baustellenzeile auf *umgesetzt*), Abnahmekriterien in drei Briefings, Verweis auf A4 in `manuelle-checks.md` |
+
+`probe.py`, `preprocess.py` und `doctor.py` sind unverändert — die Diagnose hat
+gehalten: es gab dort nichts zu reparieren.
+
+**Nicht erledigt: A4.** Auf dieser Maschine liegt kein echtes HLG-Material. Der
+Satz „echtes HLG trägt seine Tags im Bitstream" stützt sich weiterhin auf
+synthetische Dateien und die Herstellerpraxis, nicht auf eine Messung. Das ist
+die einzige verbliebene Lücke des Befunds und steht als Check 3 in
+`manuelle-checks.md`.

@@ -982,9 +982,9 @@ Preisvorteil ist real und irrelevant: er spart zwei Dollar.
   `bg: auto` ist für jedes Folienpaar mit Fokusblende die gekoppelte Fahrt
   weiterhin gesetzt: `z1` der Folie = `z0` des Folgebilds und `c1` = `c0`.
   Ohne dieses Kriterium fällt der Schärfezug still aus (0.3).
-- **A10 — Suite.** `pytest` bleibt grün. Vorbestehende Ausnahme: die drei
-  HDR-Tests in `tests/test_media.py`, die schon vor dieser Arbeit unter
-  ffmpeg 8.1.2 scheitern (`CLAUDE.md`, Abschnitt „Tests").
+- **A10 — Suite.** `pytest` bleibt grün, ohne Ausnahme. (Die drei HDR-Tests in
+  `tests/test_media.py` waren es zum Zeitpunkt dieses Briefings nicht; das ist
+  seit [`briefing-hlg-ffmpeg8.md`](briefing-hlg-ffmpeg8.md) erledigt.)
 - **A11 — Sichtprüfung.** Ein realer Lauf, angesehen: fährt die Kamera in die
   Bilder hinein statt an ihnen vorbei? Nicht automatisierbar und trotzdem das
   wichtigste Kriterium — dieselbe Rolle wie A10 im Auswahl-Briefing.

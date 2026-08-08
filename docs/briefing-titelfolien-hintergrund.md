@@ -209,8 +209,8 @@ jedem Bau acht Zeilen „Kapitel X: erstes Bild trägt" ausgibt, trainiert das
   Backfaktor für dieselbe Folie).
 - **A6** — Ohne auffindbare Schrift läuft `build` mit Warnung durch, Wahl
   entfällt.
-- **A7** — Suite grün. Vorbestehende Ausnahme: die drei HDR-Tests, bis
-  [`briefing-hlg-ffmpeg8.md`](briefing-hlg-ffmpeg8.md) umgesetzt ist.
+- **A7** — Suite grün, ohne Ausnahme (die Einschränkung auf die drei HDR-Tests
+  ist mit [`briefing-hlg-ffmpeg8.md`](briefing-hlg-ffmpeg8.md) entfallen).
 - **A8** — Sichtprüfung an echtem Material mit mindestens einem hellen
   Kapitelanfang: ist die Folie lesbarer, und fällt der Entfall der
   Fokusblende dort auf?

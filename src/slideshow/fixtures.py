@@ -16,7 +16,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .proc import have, run
+from .errors import ExternalToolError
+from .proc import ffprobe_json, have, run
 
 log = logging.getLogger("slideshow.fixtures")
 
@@ -171,6 +172,43 @@ def _ffmpeg(args: list[str], *, desc: str) -> bool:
     return res.ok
 
 
+def hat_transfer(path: Path, erwartet: str) -> bool:
+    """Traegt die erzeugte Datei die Transferfunktion wirklich?
+
+    Eine Fixture, die zusichert, was sie erzeugt, ist die Vorbedingung dafuer,
+    dass ein roter Test etwas ueber das *Werkzeug* sagt. Genau hier fehlte die
+    Zusicherung: unter ffmpeg 8.1.2 kamen die Ausgabeoptionen
+    ``-color_trc``/``-color_primaries`` nicht mehr in der Datei an, der
+    HLG-Clip war ungetaggt — und drei Tests zeigten monatelang auf
+    ``detect_hdr`` statt auf die Fixture
+    (``docs/briefing-hlg-ffmpeg8.md``, Befund 07.08.2026).
+
+    Gemessen wird mit demselben Leser, den ``probe`` benutzt
+    (:func:`slideshow.probe.color_transfer`) — eine Fixture, die sich mit
+    anderen Augen prueft als der Produktionscode, prueft sich selbst. Der
+    Import steht im Funktionskoerper, weil ``probe`` die halbe Toolchain
+    nachzieht und ``make_click_track`` sie nicht braucht.
+    """
+    from .probe import color_transfer
+
+    try:
+        data = ffprobe_json(path)
+    except (ExternalToolError, OSError) as exc:
+        log.warning("Fixture %s: Farbtags nicht pruefbar (%s)", path.name, exc)
+        return False
+    stream = next((s for s in data.get("streams", [])
+                   if s.get("codec_type") == "video"), {})
+    ist = color_transfer(stream)
+    if ist == erwartet:
+        return True
+    log.warning(
+        "Fixture %s traegt color_transfer=%r statt %r — dieses ffmpeg schreibt "
+        "die Farbtags nicht wie erwartet. Die Tests, die darauf bauen, pruefen "
+        "sonst die Fixture statt das Werkzeug (docs/briefing-hlg-ffmpeg8.md).",
+        path.name, ist or "(leer)", erwartet)
+    return False
+
+
 def make_clips(outdir: Path, *, seconds: float = 4.0) -> dict[str, Path]:
     """Clips via ``testsrc2`` — deckt die Faelle aus Abschnitt 12 ab."""
     outdir.mkdir(parents=True, exist_ok=True)
@@ -206,10 +244,18 @@ def make_clips(outdir: Path, *, seconds: float = 4.0) -> dict[str, Path]:
         made["vfr"] = p
 
     # --- HLG-getaggt ------------------------------------------------------
+    # Getaggt wird ueber `setparams` an den *Frames*, nicht ueber die
+    # Ausgabeoptionen `-color_trc`/`-color_primaries`: ffmpeg 8.1.2 uebernimmt
+    # die nicht mehr in die Datei, und der Clip war dadurch still ungetaggt
+    # (docs/briefing-hlg-ffmpeg8.md). `setparams` ist ausserdem derselbe Weg,
+    # den `doctor` fuer seine zscale-Probe seit je benutzt — ein Idiom im Repo
+    # statt zwei — und im Gegensatz zu `-x264-params` encoderunabhaengig.
     p = outdir / "clip_hlg.mp4"
-    if _ffmpeg([*src(30), "-c:v", "libx264", "-pix_fmt", "yuv420p10le", "-preset", "veryfast",
-                "-color_trc", "arib-std-b67", "-color_primaries", "bt2020",
-                "-colorspace", "bt2020nc", str(p)], desc="hlg"):
+    if _ffmpeg([*src(30), "-vf", "setparams=color_primaries=bt2020:"
+                "color_trc=arib-std-b67:colorspace=bt2020nc",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p10le", "-preset", "veryfast",
+                str(p)], desc="hlg"):
+        hat_transfer(p, "arib-std-b67")
         made["hlg"] = p
 
     # --- HEVC 4:2:2 10 Bit (XAVC-HS-artig) --------------------------------

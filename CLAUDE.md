@@ -21,6 +21,12 @@ herausfindet.
   sie einkompiliert), die Codec-Auswahl prüft aber praktisch nach und fällt
   korrekt auf libx265 zurück. Vorschläge wie `--codec av1_nvenc` aus dem
   `probe`-Report würden hier fehlschlagen.
+- **`libplacebo` ist hier nutzbar** — Vulkan läuft auf der integrierten GPU.
+  `tonemap_chain` bevorzugt es deshalb, `zscale` kommt nie zum Zug. Ein Test,
+  der `zscale_usable=True` setzt und `libplacebo_usable` auf dem Maschinenwert
+  lässt, prüft dann den anderen Pfad als gedacht (Fall
+  `test_tonemapping_steht_vor_dem_scale`, siehe
+  [`docs/briefing-hlg-ffmpeg8.md`](docs/briefing-hlg-ffmpeg8.md), Abschnitt 8).
 
 ### PowerShell-Falle
 
@@ -62,16 +68,8 @@ $heil = [System.Text.Encoding]::UTF8.GetString($b)
 
 ## Tests
 
-**Drei Tests in `tests/test_media.py` schlagen dauerhaft fehl** —
-`test_hdr_wird_erkannt`, `test_tonemapping_steht_vor_dem_scale`,
-`test_ohne_tonemapper_greift_die_naeherung`. Ursache (Befund 07.08.2026,
-[`docs/briefing-hlg-ffmpeg8.md`](docs/briefing-hlg-ffmpeg8.md)): **die
-Fixture verliert unter ffmpeg 8.1.2 ihre HLG-Tags** — die Ausgabeoptionen
-`-color_trc`/`-color_primaries` kommen nicht mehr in der Datei an.
-`detect_hdr` und die Tonemapping-Kette funktionieren auf getaggtem Material
-nachweislich; es ist eine Fixture-, keine Produktionsregression. **Das ist der
-Ausgangszustand, kein selbst verursachter Schaden.** Wer etwas ändert und
-danach genau diese drei rot sieht, hat nichts kaputtgemacht.
+**Die Suite ist grün** — es gibt keine geduldeten Fehlschläge mehr. Wer einen
+sieht, hat ihn verursacht (oder die Umgebung hat sich geändert).
 
 Bei Zweifeln, ob ein Fehlschlag neu ist: eigene Änderungen wegstashen und
 gegenprüfen —
@@ -137,7 +135,7 @@ Verletzt man eine davon, fällt es erst spät und woanders auf:
 | **Handarbeit in `edit.yaml`** | **Umgesetzt.** `overrides.yaml` ist die dritte Eingabedatei neben `chapters.yaml` und `order.yaml`: `defaults:`, `media:` (nach Medien-ID) und `cuts:` (Blende, verankert am *folgenden* Medium). `slideshow overrides` erzeugt sie, indem es die vorhandene `edit.yaml` gegen einen frischen Bau hält — Reihenfolge, Titel und `fps`/`size` werden dabei **gemeldet** statt übernommen, weil sie anderswohin gehören. Dazu die Reißleine: `dump_edit_yaml` schreibt eine Prüfsumme in die Kopfzeile, und `build` bricht ab, statt eine abweichende Datei zu überschreiben (`--force` ist umgedeutet und schreibt trotzdem). Nebenbefund mit erledigt: die `Defaults` lebten bisher nur zur Laufzeit — was kein CLI-Argument hat, ließ sich gar nicht dauerhaft setzen. Offen ist nur die Sichtprüfung an einem echten Projekt. |
 | **Rückweg aus dem Bogen** | `slideshow order --apply auswahl.txt` (oder `-` für die Zwischenablage) spielt die markierten Änderungen ein: `sheet.parse_changes` liest das Format, `order.apply_changes` schreibt. **Der Bogen schreibt weiterhin nichts** — Entscheidung 7 gilt, nur der Rückweg ist jetzt ein Kommando statt Handarbeit (an echtem Material waren es ~160 Tausche). Zwei Fallen dabei: eine Chronologieprüfung über eine `set` meldet jede sortierte Datei als unsortiert, und PowerShell setzt vor jede Pipe ein BOM. |
 | **Kontaktbogen: zwei Fallen** | `sheet` **würfelt nicht neu**, es rekonstruiert aus `order.yaml` (`selection_from_order`) — gewählt ist, was in `items:` steht. Damit ist der **Kopf der `order.yaml` eine Schnittstelle**: `read_params` liest Seed, Traubenabstand und Mindestlangkante aus den Kommentarzeilen zurück, die `select` dort hinterlegt. Wer die Kopfzeilen in `select._kopf` umformuliert, muss `_KOPF` in `sheet.py` mitziehen, sonst rechnet der Bogen still mit den Vorgaben. Zweitens: die JPEGs in `testset1/` haben **keine eingebettete EXIF-Vorschau** (RawTherapee-Export), der Bogen skaliert dort also über ffmpeg — der schnelle Pfad lässt sich daran nicht messen. |
-| **HLG unter ffmpeg 8.1.2** | **Konzept, offen** ([`docs/briefing-hlg-ffmpeg8.md`](docs/briefing-hlg-ffmpeg8.md)). Befund 07.08.2026: **Fixture-, keine Produktionsregression** — ffmpeg 8 übernimmt `-color_trc`/`-color_primaries` als Ausgabeoption nicht mehr, der Fixture-Clip ist dadurch ungetaggt; `detect_hdr` und die zscale-Kette funktionieren auf getaggtem Material. Abhilfe: Fixture auf `setparams` umstellen (denselben Weg nutzt `doctor` längst) plus Nach-Encode-Prüfung. Offen bleibt der Beleg an echtem HLG-Material (A4). |
+| **HLG unter ffmpeg 8.1.2** | **Umgesetzt** ([`docs/briefing-hlg-ffmpeg8.md`](docs/briefing-hlg-ffmpeg8.md)). Es war eine **Fixture-, keine Produktionsregression**: ffmpeg 8 übernimmt `-color_trc`/`-color_primaries` als Ausgabeoption nicht mehr. `make_clips` taggt jetzt über `setparams` (derselbe Weg wie `doctor`) und prüft mit `fixtures.hat_transfer` nach dem Encode nach — die fehlende Zusicherung war die eigentliche Ursache der Fehldiagnose. `test_tonemapping_steht_vor_dem_scale` war aus einem **zweiten**, unabhängigen Grund rot: es verlangte `zscale`, während `tonemap_chain` libplacebo bevorzugt, wo Vulkan läuft — der Test prüft jetzt die Reihenfolge statt den Tonemapper. Offen bleibt nur A4, der Beleg an echtem HLG-Material. |
 | **Titelfolien-Hintergrund nach Tragfähigkeit** | **Umgesetzt** ([`docs/briefing-titelfolien-hintergrund.md`](docs/briefing-titelfolien-hintergrund.md)). `bg: auto` misst beim Bauen die nötige Abdunklung des ersten Abschnittsbildes (`build._bg_nach_tragfaehigkeit` über `titles.measure_darkening` — derselbe Codepfad wie das Backen); erst unterhalb von `auto_darken_min` gewinnt das tragfähigste der ersten fünf. **Die Schwelle ist 0,50, nicht die im Briefing empfohlenen 0,40**: die Abdunklung ist ein Faktor auf sRGB, Reinweiß trägt den Text bei 0,45, und mit `min_contrast: 4.5` hat die Skala nur die Stufen 0,55/0,50/0,45 — bei 0,40 hätte das Merkmal nie ausgelöst. Offen ist nur A8, die Sichtprüfung an einem hellen Kapitelanfang. |
 | **Ken-Burns-Richtung** | **Umgesetzt** (Entscheidung 7 des Titelfolien-Briefings). `plan_motion` nimmt die Kennung (`src`) statt des Slot-Index, `motion_key` hasht sie mit `blake2b`. Einfügen und Umsortieren sind damit dauerhaft billig; der Preis ist ein nur noch statistischer Zoomwechsel und identische Bewegung bei einem doppelt verwendeten Bild. |
 | **Inhaltsabhängige Ken-Burns-Effekte** | **Konzept, offen** ([`docs/briefing-kenburns-inhaltsabhaengig.md`](docs/briefing-kenburns-inhaltsabhaengig.md), Rev. 2 gegen a8b25ad geprüft). `slideshow analyze` → `vision.yaml` (Bildfakten, nicht Bewegungen) → Planer → `kb:` je Standbild. Der Renderpfad ist fertig, `_segment_from_slot` schreibt `kb:` bereits — zu bauen sind Analyse und Planer. Drei Fallen, die die Umsetzung kennen muss: die Abwechslung darf **nicht** über die Sequenz laufen (sonst ist die Positionsunabhängigkeit aus 2a401f9 wieder weg), ein `kb:` auf dem Bild nach einer Titelfolie schaltet **still die Fokusblende ab** (`_couple_focus_motion` weicht vorhandenen Werten aus), und ein selbst geschriebenes `c:` umgeht den Schwenk-Deckel aus `_pan` — die Klemmung `\|c−0,5\| ≤ 0,5 − 1/(2z)` muss der Planer dann selbst führen. Abschnitt 14 listet auf, wo dieselben Bildfakten sonst tragen (Titelfolien-Hintergrund, Kontaktbogen, Wahl in der Traube). |

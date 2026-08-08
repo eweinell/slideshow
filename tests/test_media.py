@@ -83,6 +83,30 @@ def test_hdr_wird_erkannt(probed):
     assert _item(manifest, "clip_hlg").clip.hdr == "hlg"
 
 
+def test_die_fixture_traegt_ihre_farbtags(clips):
+    """Die Zusicherung, die frueher fehlte (``docs/briefing-hlg-ffmpeg8.md``).
+
+    Ohne sie zeigte ein ungetaggter Clip auf ``detect_hdr`` statt auf die
+    Fixture, und drei Tests waren monatelang aus dem falschen Grund rot.
+    """
+    from slideshow.fixtures import hat_transfer
+    assert hat_transfer(clips["hlg"], "arib-std-b67")
+
+
+def test_verlorene_farbtags_melden_sich(tmp_path, caplog, monkeypatch):
+    """Gegenprobe zur Zusicherung: sabotiert muss sie sich melden."""
+    import logging
+
+    from slideshow import fixtures
+
+    monkeypatch.setattr(fixtures, "ffprobe_json", lambda *a, **k: {
+        "streams": [{"codec_type": "video", "color_space": "bt2020nc"}]})
+    with caplog.at_level(logging.WARNING, logger="slideshow.fixtures"):
+        assert not fixtures.hat_transfer(tmp_path / "clip_hlg.mp4", "arib-std-b67")
+    assert "color_transfer" in caplog.text
+    assert "briefing-hlg-ffmpeg8" in caplog.text
+
+
 def test_422_10bit_erzwingt_cpu_decode(probed):
     """Kriterium 3: erkennen und ``-hwaccel`` deaktivieren, statt mit
     kryptischem NVDEC-Fehler abzubrechen."""
@@ -272,12 +296,28 @@ def test_hdr_clip_bekommt_bt709_tags(probed):
 
 
 def test_tonemapping_steht_vor_dem_scale(probed):
-    """5.2: Tonemapping und Retiming passieren *vor* dem Scale."""
+    """5.2: Tonemapping und Retiming passieren *vor* dem Scale.
+
+    Geprueft wird die **Reihenfolge**, nicht der Tonemapper: welcher von
+    beiden greift, entscheidet die Maschine (``tonemap_chain`` bevorzugt
+    libplacebo, wo Vulkan laeuft). Frueher stand hier ``zscale`` fest — der
+    Test war damit nur dort gruen, wo libplacebo *nicht* nutzbar ist.
+    """
     _project, manifest, caps = probed
     caps = Capabilities(**{**caps.__dict__, "zscale_usable": True,
                            "filters": list(caps.filters) + ["zscale"]})
+    tonemapper = caps.tonemap_chain("hlg").split("=", 1)[0]
     vf = build_clip_filter(_item(manifest, "clip_hlg"), size=SIZE, fps=FPS, caps=caps)
-    assert vf.index("zscale") < vf.index("scale="), "Tonemapping gehoert vor den Scale"
+    glieder = vf.split(",")
+    stelle = {"tonemap": None, "scale": None}
+    for i, glied in enumerate(glieder):
+        if stelle["tonemap"] is None and glied.startswith(tonemapper):
+            stelle["tonemap"] = i
+        if stelle["scale"] is None and glied.startswith("scale="):
+            stelle["scale"] = i
+    assert stelle["tonemap"] is not None, f"{tonemapper} fehlt in der Kette: {vf}"
+    assert stelle["scale"] is not None, f"kein Scale in der Kette: {vf}"
+    assert stelle["tonemap"] < stelle["scale"], "Tonemapping gehoert vor den Scale"
 
 
 def test_ohne_tonemapper_greift_die_naeherung(probed):
