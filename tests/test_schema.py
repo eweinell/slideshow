@@ -81,15 +81,21 @@ def test_fehler_nennt_datei_und_zeile(tmp_path):
     assert exc.value.line, "die Meldung soll auf die Zeile zeigen"
 
 
-def test_beats_in_free_region_wird_vor_dem_rendern_erkannt(tmp_path):
-    """Der Fall aus Kriterium 14 — semantisch, nicht syntaktisch."""
+def test_beats_in_free_region_wird_vor_dem_rendern_gemeldet(tmp_path):
+    """Semantisch, nicht syntaktisch — aber eine Warnung, kein Abbruch.
+
+    Der Pfad bleibt in der Meldung, denn er ist die einzige Angabe, mit der sich
+    die Zeile finden laesst. Abgebrochen wird hier trotzdem nicht: ``build``
+    erzeugt diesen Zustand selbst (Lagekorrektur um eine Titelfolie), und dann
+    haette niemand etwas zu beheben.
+    """
     text = BASIS.replace("{type: still, src: cache/c.jpg}",
                          "{type: still, src: cache/c.jpg, beats: 8}")
     edit = EditList.load(_write(tmp_path, text))
-    with pytest.raises(SchemaError) as exc:
-        validate_edit(edit)
-    assert "beat-Region" in str(exc.value)
-    assert exc.value.path and exc.value.path.startswith("segments[2]")
+    plan = validate_edit(edit)
+    warnung = " ".join(plan.warnings)
+    assert "beat-Region" in warnung
+    assert "segments[2].beats" in warnung
 
 
 def test_regionsluecke_wird_vor_dem_rendern_erkannt(tmp_path):

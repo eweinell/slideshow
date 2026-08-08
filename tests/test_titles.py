@@ -208,6 +208,38 @@ def test_ein_auftakt_mit_beats_in_einer_free_region_bricht_nicht_ab():
     assert any("wirkungslos" in w for w in plan.warnings)
 
 
+def test_eine_folie_die_erst_beim_nachplanen_in_die_stille_rutscht_bricht_nicht_ab():
+    """Derselbe Fehler, eine Stufe spaeter — und deshalb lange unentdeckt.
+
+    Der Auftakt-Fall oben behandelt nur den *ersten* Planungslauf. ``beats``
+    kommt aber ein zweites Mal an den Intent: ``_titel_in_beatregion`` setzt es,
+    und ``plan_with_titles`` plant danach neu. Liegt die Phrasengrenze genau auf
+    dem Regionsende — hier bei 16 s, waehrend die Folie bei 15 s beginnt —, dann
+    dehnt die Lagekorrektur den Vorgaenger, die Folie rutscht in die free-Region
+    und traegt das ``beats`` aus dem vorigen Durchgang noch mit sich.
+
+    Der Ausweg (``_titel_in_freeregion`` raeumt es im naechsten Durchgang weg)
+    kam nie zum Zug, weil ``plan_slots`` davor abbrach.
+    """
+    regions = [_beat_region(0.0, 16.0),
+               Region(type="free", start=16.0, end=90.0,
+                      reason="niedrige Rhythmus-Konfidenz")]
+    edit, plan, _cov = _bauen(_manifest(), regions,
+                              [Chapter(before="img_005", title="Malmoe")],
+                              defaults=Defaults(beats_per_still=6))
+
+    folie = next(s for s in edit.segments if isinstance(s, TitleSegment))
+    assert folie.beats is None, "in der free-Region gibt es keine Beats"
+    i, slot = _titelslots(plan)[0]
+    assert plan.regions[slot.region_index].type == "free"
+    assert to_time(slot.start_f, FPS) == pytest.approx(16.0), \
+        "die Lagekorrektur soll die Folie trotzdem auf die Phrasengrenze ziehen"
+    # Der Vorgaenger traegt die Dehnung sichtbar, wie in Entscheidung 3c.
+    assert plan.slots[i - 1].intent.beats == pytest.approx(8.0)
+    assert not any("beat-Region" in w for w in plan.warnings), \
+        "aufgeraeumt, also auch nichts mehr zu melden"
+
+
 def test_der_auftakt_bekommt_keinen_verschiebevorschlag():
     """Er gehoert an den Anfang, nicht auf eine Zaesur — davor ist nichts."""
     regions = [Region(type="free", start=0.0, end=4.015, reason="Intro"),

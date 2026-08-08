@@ -1472,6 +1472,14 @@ def cmd_render(args, project: Project) -> int:
     _titelassets(project, edit, manifest, dry=DryRun(enabled=args.dry_run))
     check_sources_exist(project, edit)
     plan = validate_edit(edit, manifest)
+    # ``build`` zeigt diese Meldungen in der Deckungstabelle, ``render`` bisher
+    # nicht — wer eine Edit-List von Hand anfasst und direkt rendert, bekam sie
+    # also nie zu sehen. Seit `beats:` in einer free-Region nur noch warnt statt
+    # abzubrechen, waere das der stille Ausfall, den Prinzip 4 ausschliesst.
+    for w in plan.warnings[:10]:
+        console().print(f"  [yellow]WARN[/] {w}")
+    if len(plan.warnings) > 10:
+        console().print(f"  [dim]... {len(plan.warnings) - 10} weitere[/dim]")
 
     out = Path(args.output) if args.output else (project.out / "master.mp4")
     dry = DryRun(enabled=args.dry_run)

@@ -325,7 +325,7 @@ Die Abfolge. Vier Typen, unterschieden über `type`.
 |---|---|---|---|
 | `src` | string | – | Projektrelativer Pfad, üblicherweise nach `cache/`. Pflicht. Der Dateiname ohne Endung ist die [Medien-ID](#medien-ids) des Bildes. |
 | `dur` | float\|string | – | Explizite Dauer in Sekunden. **Gewinnt immer.** |
-| `beats` | float | – | Dauer in Beats. Nur in einer Beat-Region gültig — in einer `free`-Region ist es ein Fehler mit Angabe der Region. Gebrochene Werte (`1.5`) sind erlaubt. |
+| `beats` | float | – | Dauer in Beats. Nur in einer Beat-Region gültig — in einer `free`-Region **warnt** der Planer mit Angabe der Region und nimmt die Standardlänge (kein Abbruch, siehe [Präzedenz der Dauer](#präzedenz-der-dauer)). Gebrochene Werte (`1.5`) sind erlaubt. |
 | `hold` | bool | `false` | Ruhiges Bild über eine lange Stille. Wird von `build` gesetzt, lässt sich aber erzwingen. |
 | `snap_back` | bool | von `defaults` | Nur für dieses Segment. |
 | `portrait` | enum | von `defaults` | Nur für dieses Bild. |
@@ -349,7 +349,7 @@ Hintergrund aus dem Material.
 | `subtitle` | string | – | Zweite Zeile. `auto` in `chapters.yaml` wird beim Bauen zum Aufnahmedatum des folgenden Bildes aufgelöst und steht danach als Text hier. |
 | `bg` | string | `auto` | Hintergrund: `auto` (ein Bild des neuen Abschnitts, unscharf — siehe [nach Tragfähigkeit](#bg-auto-nach-tragfähigkeit)), ein Pfad, `#rrggbb` als Farbfläche oder `none` für Text auf Schwarz. `build` schreibt den aufgelösten Wert zurück. |
 | `dur` | float | – | Wie beim Standbild. Gewinnt immer. |
-| `beats` | float | von `defaults.title.beats` | Wie beim Standbild — nur in einer Beat-Region gültig. |
+| `beats` | float | von `defaults.title.beats` | Wie beim Standbild — nur in einer Beat-Region gültig, in einer `free`-Region wirkungslos und gemeldet. |
 | `hold` | bool | `false` | Wie beim Standbild. |
 | `snap_back` | bool | von `defaults` | Wie beim Standbild. **In langer Stille setzt `build` hier `false`** — siehe unten. |
 | `style` | enum | `card` | `card` ist die ganzseitige Folie. `lower-third` ist reserviert und rendert vorerst wie `card`. |
@@ -1068,6 +1068,20 @@ Für ein Standbild gilt, von oben nach unten, die erste zutreffende Regel:
 2. **`beats:` am Segment** — nur in einer Beat-Region.
 3. **`beats_per_still` / `still_seconds` an der Region** — der regionale Takt.
 4. **`defaults.beats_per_still` / `defaults.still_seconds`** — der globale Takt.
+
+Regel 2 in einer `free`-Region ist **kein Abbruch**, sondern eine Warnung mit
+Regionsangabe und Segmentpfad; es gilt dann Regel 3. Das ist bewusst so, denn
+dieser Zustand entsteht auch ohne Zutun: `build` legt `beats:` bei der
+Lagekorrektur um eine Titelfolie an das vorangehende Bild und plant danach neu
+— wandert ein Segment dabei über eine Regionsgrenze, gäbe es niemanden, der den
+Fehler beheben könnte. Ein `beats:` aus [`overrides.yaml`](#overridesyaml--der-feinschliff)
+hängt aus demselben Grund an einem Medium und nicht an einer Position.
+
+Der Ersatzwert ist der Standard-Slot der Region, nicht `beats` in Sekunden
+umgerechnet: eine `free`-Region ist driftfrei gekachelt und wird von ihren
+Kanten exakt gefüllt. Eine freie Dauer mittendrin verschöbe jeden folgenden
+Schnitt gegen diese Kachelung. Wer dort eine feste Standzeit braucht, nimmt
+`dur:`.
 
 Der Standard-Slot einer Beat-Region ist **absolut** definiert
 (`beats_per_still` Beats ab dem nächsten Rasterbeat), nicht relativ zum

@@ -318,13 +318,28 @@ def plan_slots(regions: list[Region], intents: list[Intent], defaults: Defaults,
                     # Nach einem Override auf den naechsten Beat aufrunden,
                     # damit der Sync danach wieder steht (6.3).
                     end = grid.snap_up(end)
+            elif intent.beats is not None and not grid.is_beat:
+                # Kein Abbruch: dieser Fall entsteht auch ohne Zutun. ``build``
+                # setzt ``beats:`` waehrend der Lagekorrektur (``_adjust_titles``)
+                # und plant danach neu — verschiebt sich das Segment dabei ueber
+                # eine Regionsgrenze, stand hier ein Fehler, den niemand
+                # verursacht hat und den auch niemand beheben konnte. Dasselbe
+                # gilt fuer ein ``beats:`` aus ``overrides.yaml``, das an einem
+                # Medium haengt und nicht an einer Position.
+                #
+                # Der Ersatzwert ist der **Standard-Slot der free-Region**, nicht
+                # etwa ``beats`` in Sekunden umgerechnet: eine free-Region ist
+                # driftfrei gekachelt (siehe ``_free_count``) und wird von ihren
+                # Kanten exakt gefuellt. Eine freie Dauer mittendrin verschoebe
+                # jeden folgenden Schnitt gegen diese Kachelung.
+                local.append(
+                    f"segments[{intent.index}].beats: `beats: {intent.beats:g}` gilt "
+                    f"nur in einer beat-Region; dieses Segment liegt in der "
+                    f"free-Region [{region.start:.3f}, {region.end:.3f}] und steht "
+                    f"die Standardlaenge. Fuer eine feste Standzeit `dur:` in "
+                    f"Sekunden angeben.")
+                end = grid.default_end(cursor)
             elif intent.beats is not None:
-                if not grid.is_beat:
-                    raise SchemaError(
-                        "`beats:` ist nur in einer beat-Region gueltig; dieses "
-                        f"Segment liegt in der free-Region "
-                        f"[{region.start:.3f}, {region.end:.3f}]",
-                        path=f"segments[{intent.index}].beats")
                 k0 = grid.beat_index_at_or_after(cursor)
                 end = grid.beat_time(k0 + float(intent.beats))
             else:

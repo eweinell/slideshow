@@ -393,10 +393,10 @@ def insert_titles(intents: list[Intent], chapters: list[Chapter],
                            motion=kap.motion, kb=kap.kb)
         # ``beats``/``dur`` bleiben hier bewusst **leer**. Welches der beiden
         # gilt, haengt an der Region, in der die Folie landet — und die steht
-        # erst nach dem ersten Planen fest. Gaebe man ``beats`` schon jetzt
-        # mit, scheiterte ``plan_slots`` an einem Titel, der in einer
-        # free-Region beginnt ("`beats:` ist nur in einer beat-Region
-        # gueltig"), bevor die Lagekorrektur ueberhaupt zum Zug kaeme. Der
+        # erst nach dem ersten Planen fest. Gaebe man ``beats`` schon jetzt mit,
+        # warnte der erste ``plan_slots``-Lauf ueber einen Titel, der in einer
+        # free-Region beginnt, bevor die Lagekorrektur ueberhaupt zum Zug kaeme
+        # — eine Meldung ueber einen Zustand, den niemand zu sehen bekommt. Der
         # Wunsch des Kapitels steht in ``seg`` und wird dort abgeholt.
         intents.insert(pos + versatz,
                        Intent(kind="still", src=title_asset(seg, defaults, title_canvas(size)),
@@ -1242,7 +1242,8 @@ def validate_edit(edit: EditList, manifest: Manifest | None = None) -> Plan:
     validate_tiling(regions, duration)
 
     # `beats:` nur in Beat-Regionen — geprueft beim Planen, weil erst dort
-    # feststeht, in welcher Region ein Segment landet.
+    # feststeht, in welcher Region ein Segment landet. Das Ergebnis ist eine
+    # Warnung in ``plan.warnings``, kein Abbruch: siehe ``plan_slots``.
     plan = plan_from_edit(edit, manifest)
     segments = resolve(plan)
     validate_continuity(segments, plan.total_frames)

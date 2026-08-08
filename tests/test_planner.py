@@ -196,16 +196,26 @@ def test_mit_snap_back_liegt_auch_der_override_auf_dem_raster():
     assert abs(cut - round(cut / 0.5) * 0.5) < 1.0 / FPS
 
 
-def test_beats_in_free_region_ist_ein_fehler():
-    """Semantische Validierung mit YAML-Pfad (Kriterium 14)."""
-    from slideshow.errors import SchemaError
+def test_beats_in_einer_free_region_warnt_und_nimmt_die_standardlaenge():
+    """Kein Abbruch — der Fall entsteht auch ohne Zutun.
+
+    ``build`` setzt ``beats:`` in der Lagekorrektur und plant danach neu; wandert
+    das Segment dabei ueber eine Regionsgrenze, waere ein Fehler nicht
+    zuzuordnen. Die Kachelung der free-Region muss dabei unberuehrt bleiben.
+    """
     regions = [Region(type="free", start=0.0, end=12.0, reason="stille")]
+    ohne = plan_slots(regions, _stills(3), Defaults(), fps=FPS,
+                      total_frames=int(12 * FPS))
     intents = _stills(3)
     intents[1].beats = 8
-    with pytest.raises(SchemaError) as exc:
-        plan_slots(regions, intents, Defaults(), fps=FPS, total_frames=int(12 * FPS))
-    assert "beat-Region" in str(exc.value)
-    assert exc.value.path and "segments[1].beats" in exc.value.path
+    plan = plan_slots(regions, intents, Defaults(), fps=FPS, total_frames=int(12 * FPS))
+
+    assert [(s.start_f, s.end_f) for s in plan.slots] == \
+        [(s.start_f, s.end_f) for s in ohne.slots], \
+        "`beats:` darf die driftfreie Kachelung der free-Region nicht verschieben"
+    warnung = " ".join(plan.warnings)
+    assert "beat-Region" in warnung
+    assert "segments[1].beats" in warnung, "die Warnung muss auf die Zeile zeigen"
 
 
 def test_sehr_lange_stille_bekommt_ein_hold_bild():
