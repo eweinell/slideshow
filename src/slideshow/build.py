@@ -28,8 +28,9 @@ from . import EDIT_VERSION
 from .errors import SchemaError, SlideshowError
 from .kenburns import plan_motion
 from .models import (BeatMap, Chapter, ClipSegment, Defaults, EditList, KBSpec,
-                     Manifest, MediaItem, Region, StillSegment, TitleSegment,
-                     XfadeSegment)
+                     Manifest, MediaItem, Overrides, Region, StillSegment,
+                     TitleSegment, XfadeSegment)
+from .overrides import cut_seconds, resolve_media
 from .paths import Project
 from .planner import (Coverage, Intent, Plan, RenderSegment, apply_transitions,
                       coverage, default_transition_seconds, fit_regions_to,
@@ -51,7 +52,8 @@ def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
                     size: tuple[int, int] = (3840, 2160),
                     order: list[str] | None = None,
                     order_notes: list[str] | None = None,
-                    chapters: list[Chapter] | None = None
+                    chapters: list[Chapter] | None = None,
+                    overrides: Overrides | None = None
                     ) -> tuple[EditList, Plan, Coverage]:
     """Erzeugt ``edit.yaml`` aus Manifest und Regionenkarte.
 
@@ -60,6 +62,11 @@ def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
     Meldungen. Beides kommt fertig von aussen, weil nur dort Dateipfad und
     Zeilennummern bekannt sind — hier gaebe es fuer ein `rest: append` keine
     Stelle, auf die die Meldung zeigen koennte.
+
+    ``overrides`` ist der Feinschliff aus ``overrides.yaml``
+    (:mod:`slideshow.overrides`). Er wird zu gewoehnlicher Absicht am Intent —
+    der Planer bekommt dadurch keine Zeile ueber diese Datei, und in
+    ``edit.yaml`` steht das Ergebnis sichtbar wie jeder andere Wert.
     """
     defaults = defaults or Defaults()
     fps = float(fps or manifest.fps_suggestion)
@@ -84,23 +91,49 @@ def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
                 path="order")
         media = [by_id[i] for i in order]
 
+    fein = resolve_media(overrides, manifest) if overrides else {}
+    benutzt: set[str] = set()
+
     intents: list[Intent] = []
     for m in media:
         if not m.cache_path:
             log.warning("%s hat kein Zwischenprodukt — `slideshow preprocess` fehlt?", m.id)
             continue
+        e = fein.get(m.id)
+        if e is not None:
+            benutzt.add(m.id)
         if m.kind == "image":
-            intents.append(Intent(kind="still", src=m.cache_path, index=len(intents)))
+            intents.append(Intent(
+                kind="still", src=m.cache_path, index=len(intents),
+                beats=(e.beats if e else None), dur=(e.dur if e else None),
+                hold=bool(e.hold) if (e and e.hold is not None) else False,
+                snap_back=(e.snap_back if e else None),
+                portrait=(e.portrait if e else None), kb=(e.kb if e else None)))
         else:
             info = m.clip
             available = (info.cache_duration or info.effective_duration) if info else 0.0
+            start = info.cache_offset if info else 0.0
+            clip_in = e.in_ if (e and e.in_ is not None) else start
+            clip_out = e.out if e else None
             intents.append(Intent(kind="clip", src=m.cache_path, index=len(intents),
-                                  clip_in=(info.cache_offset if info else 0.0),
-                                  clip_available=(info.cache_offset if info else 0.0) + available,
-                                  snap="out"))
+                                  clip_in=clip_in,
+                                  clip_available=start + available,
+                                  clip_out=clip_out,
+                                  dur=(clip_out - clip_in) if clip_out is not None else None,
+                                  snap=(e.snap if (e and e.snap) else "out"),
+                                  snap_back=(e.snap_back if e else None)))
     if not intents:
         raise SlideshowError("Keine vorverarbeiteten Medien gefunden. "
                              "`slideshow preprocess` zuerst laufen lassen.")
+
+    # Ein Eintrag, der auf nichts zeigt, ist der stille Ausfall dieser Datei:
+    # das Bild wurde aus der Auswahl genommen oder nie vorverarbeitet, und der
+    # Feinschliff dazu steht wirkungslos herum. Kein Abbruch — die Datei
+    # ueberdauert absichtlich mehrere Auswahlrunden.
+    verwaist = sorted(set(fein) - benutzt)
+    fein_warnungen = ([f"{len(verwaist)} Eintraege aus dem Feinschliff betreffen "
+                       f"Medien, die nicht im Film stehen: "
+                       f"{', '.join(verwaist[:6])}"] if verwaist else [])
 
     kapitel_warnungen = insert_titles(intents, chapters or [], media, defaults, size,
                                       project=project, manifest=manifest)
@@ -125,9 +158,16 @@ def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
     explicit = None if defaults.xfade.auto else {}
     apply_transitions(plan, defaults, explicit=explicit)
     if defaults.xfade.auto:
-        apply_transitions(plan, defaults, explicit=_title_transitions(plan, defaults))
+        explicit = _title_transitions(plan, defaults)
+    schnitte = overrides.cuts if overrides else []
+    if schnitte:
+        explicit = dict(explicit or {})
+        fein_warnungen += _apply_cut_overrides(plan, explicit, schnitte, manifest,
+                                               defaults)
+    if defaults.xfade.auto or schnitte:
+        apply_transitions(plan, defaults, explicit=explicit)
     clamp_transitions_for_handles(plan, manifest)
-    plan.warnings.extend(kapitel_warnungen + lage_warnungen
+    plan.warnings.extend(kapitel_warnungen + lage_warnungen + fein_warnungen
                          + chapter_placement_hints(plan))
     if hinweis:
         plan.warnings.insert(0, hinweis)
@@ -759,6 +799,43 @@ def _title_transitions(plan: Plan, defaults: Defaults) -> dict[int, float]:
     return explicit
 
 
+def _apply_cut_overrides(plan: Plan, explicit: dict[int, float], cuts: list,
+                         manifest: Manifest, defaults: Defaults) -> list[str]:
+    """Einzelne Blenden aus ``overrides.yaml`` setzen.
+
+    Verankert ist eine Blende am **folgenden** Medium; hier wird daraus der
+    Schnittindex, den :func:`apply_transitions` versteht. Weiter reicht die
+    Sonderbehandlung nicht — ``dur: 0`` laesst ``apply_transitions`` den Schnitt
+    hart, und ``_segments_from_plan`` schreibt dann gar kein Uebergangssegment.
+    """
+    pfad_von_id = {m.id: m.cache_path for m in manifest.media if m.cache_path}
+    slot_von_src: dict[str, int] = {}
+    for i, slot in enumerate(plan.slots):
+        slot_von_src.setdefault(slot.intent.src, i)
+
+    warnungen: list[str] = []
+    for cut in cuts:
+        i = slot_von_src.get(pfad_von_id.get(cut.before, ""))
+        if i is None:
+            warnungen.append(
+                f"Feinschliff: vor {cut.before!r} gibt es keinen Schnitt — das "
+                f"Medium steht nicht im Film.")
+            continue
+        if i == 0:
+            warnungen.append(
+                f"Feinschliff: {cut.before!r} ist das erste Segment; davor gibt es "
+                f"nichts, wovon eine Blende ueberblenden koennte.")
+            continue
+        region = plan.regions[plan.slots[i].region_index]
+        beat = region.beat_duration() if (region.type == "beat" and region.bpm) else None
+        sekunden = cut_seconds(cut, beat, defaults)
+        if sekunden is not None:
+            explicit[i] = sekunden
+        if cut.mode:
+            plan.transition_modes[i] = cut.mode
+    return warnungen
+
+
 def _sichtbare_dauer(plan: Plan, i: int) -> float:
     vs, ve = visible_span(plan, i)
     return (ve - vs) / plan.fps
@@ -791,6 +868,15 @@ def _couple_focus_motion(plan: Plan, defaults: Defaults) -> None:
             # nur bequemer geschrieben: eine stillstehende Folie soll nicht
             # nachtraeglich eine gekoppelte Fahrt bekommen. Die laengere
             # Fokusblende bleibt, der Schaerfezug findet ohne Fahrt statt.
+            if slot.intent.kb is None and folge.intent.kb is not None:
+                # Der stille Fall: ein `kb:` am Bild *nach* einer Folie schaltet
+                # die Kopplung ab, und die Folie loest sich danach nicht mehr in
+                # das Bild auf, sondern schneidet darauf. Wer die Fahrt selbst
+                # setzt, soll das wenigstens erfahren.
+                plan.warnings.append(
+                    f"Titel {slot.intent.title.title!r}: das folgende Bild bringt "
+                    f"ein eigenes `kb:` mit — die gekoppelte Fahrt der Fokusblende "
+                    f"entfaellt. Die laengere Blende bleibt.")
             continue
 
         d_titel = _sichtbare_dauer(plan, i)
@@ -959,6 +1045,11 @@ def _segment_from_slot(plan: Plan, i: int, slot, defaults: Defaults):
 
     felder: dict = {"beats": None, "dur": None, "snap_back": None,
                     "hold": bool(slot.hold), "kb": intent.kb}
+    if intent.portrait is not None:
+        # Ohne diese Zeile faende ein `portrait:` aus dem Feinschliff nicht in
+        # die Datei zurueck — die Absicht waere gesetzt, das Erzeugnis wuesste
+        # nichts davon, und `render` zeigte das Bild anders als geplant.
+        felder["portrait"] = intent.portrait
     if intent.dur is not None:
         felder["dur"] = round(intent.dur, 6)
     elif region.type == "beat" and region.bpm:

@@ -117,6 +117,7 @@ manifest.json   was für Material vorliegt (probe)
 beats.yaml      Regionenkarte der Tonspur (beats) — vor dem Bauen ansehen
 chapters.yaml   Kapitel der Reise, Eingabe für build — optional
 order.yaml      Reihenfolge der Medien, Eingabe für build — optional
+overrides.yaml  Feinschliff je Medium, Eingabe für build — optional
 edit.yaml       die Edit-List (build)
 cache/          normalisierte Bilder, Clip-Intermediates, Segment-Cache
 out/            master.mp4, timeline.json, project.kdenlive
@@ -125,9 +126,11 @@ logs/           ein Logfile je Subkommando, mit den exakten ffmpeg-Aufrufen
 
 Sämtliche Schlüssel der Edit-List — Takt, Ken Burns, Übergänge, Präzedenz der
 Dauerangaben und die üblichen Eingriffe von Hand — stehen in
-[`docs/edit-yaml.md`](docs/edit-yaml.md); dort auch die beiden optionalen
-Eingabedateien `chapters.yaml` (Titelfolien) und `order.yaml` (Reihenfolge und
-Auswahl). Fertige Abläufe dazu: [`docs/rezepte.md`](docs/rezepte.md).
+[`docs/edit-yaml.md`](docs/edit-yaml.md); dort auch die drei optionalen
+Eingabedateien `chapters.yaml` (Titelfolien), `order.yaml` (Reihenfolge und
+Auswahl) und `overrides.yaml` (Feinschliff je Medium). Sie alle überleben, was
+`build` mit `edit.yaml` tut: es schreibt sie bei jedem Lauf neu. Fertige Abläufe
+dazu: [`docs/rezepte.md`](docs/rezepte.md).
 
 ## Installation
 

@@ -40,7 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
                "  slideshow order                       # optional: Reihenfolge sortieren\n"
                "  slideshow chapters                    # optional: Titelfolien\n"
                "  slideshow build\n"
-               "  slideshow render edit.yaml -o out/master.mp4\n")
+               "  slideshow render edit.yaml -o out/master.mp4\n"
+               "  slideshow overrides                   # Handarbeit in edit.yaml sichern\n")
     p.add_argument("--version", action="version", version=f"slideshow {__version__}")
     p.add_argument("--project", metavar="DIR", default=None,
                    help="Projektverzeichnis (Default: aktuelles Verzeichnis)")
@@ -259,11 +260,37 @@ def build_parser() -> argparse.ArgumentParser:
                          "chronologisch; die Datei bestimmt ueber `rest:` auch, "
                          "was mit nicht genanntem Material geschieht "
                          "(Default: order.yaml im Projekt, falls vorhanden)")
+    bu.add_argument("--overrides", default=None, metavar="overrides.yaml",
+                    help="Feinschliff je Medium einsetzen: Standzeit, Fahrt, "
+                         "Clipschnitt, einzelne Blenden "
+                         "(Default: overrides.yaml im Projekt, falls vorhanden)")
     bu.add_argument("--xfade-beats", type=float, default=None)
     bu.add_argument("--no-xfade", action="store_true",
                     help="keine automatischen Uebergaenge erzeugen")
     bu.add_argument("--force", action="store_true",
-                    help="trotz Ueber-/Unterdeckung schreiben")
+                    help="trotz Ueber-/Unterdeckung schreiben — und eine von Hand "
+                         "geaenderte edit.yaml ueberschreiben, statt auf "
+                         "`slideshow overrides` zu verweisen")
+
+    ov = sub.add_parser(
+        "overrides", help="Handarbeit aus edit.yaml sichern -> overrides.yaml",
+        description="Vergleicht die vorhandene edit.yaml mit dem, was `build` "
+                    "jetzt erzeugen wuerde, und schreibt die Unterschiede als "
+                    "overrides.yaml: Standzeiten, Kamerafahrten, Clipschnitte "
+                    "und einzelne Blenden, verankert an Medien-IDs. Danach "
+                    "ueberlebt der Feinschliff jeden Neubau — anders als in "
+                    "der Edit-List, die `build` neu schreibt. Reihenfolge und "
+                    "Titel gehoeren weiterhin nach order.yaml bzw. "
+                    "chapters.yaml; was dorthin gehoert, wird gemeldet.")
+    ov.add_argument("-o", "--output", default=None, metavar="overrides.yaml",
+                    help="Zieldatei (Default: overrides.yaml im Projektverzeichnis)")
+    ov.add_argument("--from", dest="quelle", default=None, metavar="edit.yaml",
+                    help="die von Hand geaenderte Fassung (Default: edit.yaml im "
+                         "Projekt)")
+    ov.add_argument("--manifest", default=None)
+    ov.add_argument("--chapters", default=None, metavar="chapters.yaml")
+    ov.add_argument("--order", default=None, metavar="order.yaml")
+    ov.add_argument("--beats", dest="beatmap", default=None)
 
     rd = sub.add_parser("render", help="Edit-List rendern -> master.mp4")
     rd.add_argument("edit", nargs="?", default=None, metavar="edit.yaml")
@@ -657,19 +684,24 @@ def _print_beatmap(bm, out: Path) -> None:
     con.print(f"\n[bold]Bitte pruefen[/bold], dann `slideshow build`. Karte: {out}")
 
 
-def cmd_build(args, project: Project) -> int:
+def _edit_bauen(project: Project, args, manifest, *, overrides=None):
+    """Der Bau, wie ``build`` ihn ausfuehrt — aus Manifest und Eingabedateien.
+
+    Steht fuer sich, weil ``overrides`` genau dagegen vergleicht: was die
+    Extraktion als Handarbeit ausweist, muss der Unterschied zu *diesem* Bau
+    sein und nicht zu einem aehnlichen. Was ``args`` nicht hergibt (das
+    ``overrides``-Kommando kennt die Bau-Schalter nicht), bleibt bei der
+    Vorgabe.
+    """
     import yaml
-    from .build import build_edit_list, validate_edit, write_timeline
-    from .doctor import preflight
-    from .models import BeatMap, Defaults, Manifest, Region
+    from .build import build_edit_list
+    from .models import BeatMap, Defaults, Region
     from .order import anchor_chapters
-    from .planner import coverage_advice, resolve
-    preflight(project, "build")
 
-    manifest = Manifest.load(Path(args.manifest) if args.manifest else project.manifest)
-    _merge_audio_info(project, manifest)
+    def opt(name):
+        return getattr(args, name, None)
 
-    bpath = Path(args.beatmap) if args.beatmap else (project.root / "beats.yaml")
+    bpath = Path(args.beatmap) if opt("beatmap") else (project.root / "beats.yaml")
     if not bpath.exists():
         raise SlideshowError(f"Regionenkarte fehlt: {bpath}. `slideshow beats` zuerst "
                              f"laufen lassen — und die Karte ansehen.")
@@ -677,32 +709,82 @@ def cmd_build(args, project: Project) -> int:
     beatmap = BeatMap(version=raw.get("version", 1), audio=raw.get("audio", {}),
                       regions=[Region.model_validate(r) for r in raw.get("regions", [])])
 
-    defaults = Defaults()
-    if args.beats_per_still is not None:
+    if overrides is None:
+        overrides, ov_pfad = _load_overrides(project, opt("overrides"))
+    else:
+        ov_pfad = None
+    # Reihenfolge der Vorgaben: eingebaut, dann overrides.yaml, dann die
+    # Kommandozeile. Die Datei ueberdauert, das Argument gilt fuer diesen Lauf
+    # — und wer beides setzt, meint das Argument.
+    defaults = overrides.merged_defaults(quelle=str(ov_pfad) if ov_pfad else None) \
+        if overrides else Defaults()
+    if opt("beats_per_still") is not None:
         defaults.beats_per_still = args.beats_per_still
-    if args.still_seconds is not None:
+    if opt("still_seconds") is not None:
         defaults.still_seconds = args.still_seconds
-    if args.portrait:
+    if opt("portrait"):
         defaults.portrait = args.portrait
-    if args.kb_engine:
+    if opt("kb_engine"):
         defaults.kb.engine = args.kb_engine
-    if args.fade_out is not None:
+    if opt("fade_out") is not None:
         defaults.fade_out = args.fade_out
-    if args.xfade_beats is not None:
+    if opt("xfade_beats") is not None:
         defaults.xfade.beats = args.xfade_beats
-    defaults.xfade.auto = not args.no_xfade
+    if opt("no_xfade"):
+        defaults.xfade.auto = False
 
-    chapters = _load_chapters(project, args.chapters, defaults)
-    order, order_notes, olist = _load_order(project, args.order, manifest)
+    chapters = _load_chapters(project, opt("chapters"), defaults)
+    order, order_notes, olist = _load_order(project, opt("order"), manifest)
     # `group:` zeigt auf einen Block in order.yaml; ``build`` kennt nur noch
     # eine Liste. Aufgeloest wird das hier, an der einzigen Stelle, die beide
     # Dateien vor sich hat.
     chapters = anchor_chapters(chapters, olist, order)
 
-    size = _parse_size(args.size) if args.size else (3840, 2160)
+    size = _parse_size(args.size) if opt("size") else (3840, 2160)
     edit, plan, cov = build_edit_list(project, manifest, beatmap, defaults=defaults,
-                                      fps=args.fps, size=size, chapters=chapters,
-                                      order=order, order_notes=order_notes)
+                                      fps=opt("fps"), size=size, chapters=chapters,
+                                      order=order, order_notes=order_notes,
+                                      overrides=overrides)
+    return (edit, plan, cov, defaults)
+
+
+def _load_overrides(project: Project, angabe: str | None):
+    """Feinschliff laden — dieselbe Regel wie bei Kapiteln und Reihenfolge.
+
+    Ein *ausdruecklich* genannter Pfad, den es nicht gibt, ist ein Fehler; die
+    stillschweigend gefundene ``overrides.yaml`` ist eine Bequemlichkeit und
+    darf fehlen.
+    """
+    from .models import Overrides
+    from .overrides import OVERRIDES_NAME
+
+    if angabe:
+        pfad = Path(angabe)
+        if not pfad.exists():
+            raise SlideshowError(f"Feinschliffdatei fehlt: {pfad}")
+    else:
+        pfad = project.root / OVERRIDES_NAME
+        if not pfad.exists():
+            return (None, None)
+
+    ov = Overrides.load(pfad)
+    console().print(f"Feinschliff: {pfad}  ({len(ov.media)} Medien, "
+                    f"{len(ov.cuts)} Blenden"
+                    + (", eigene Vorgaben" if ov.defaults else "") + ")")
+    return (ov, pfad)
+
+
+def cmd_build(args, project: Project) -> int:
+    from .build import validate_edit, write_timeline
+    from .doctor import preflight
+    from .models import Manifest
+    from .planner import coverage_advice, resolve
+    preflight(project, "build")
+
+    manifest = Manifest.load(Path(args.manifest) if args.manifest else project.manifest)
+    _merge_audio_info(project, manifest)
+
+    edit, plan, cov, defaults = _edit_bauen(project, args, manifest)
     _print_coverage(cov, defaults, plan)
 
     tips = coverage_advice(cov, defaults)
@@ -721,6 +803,7 @@ def cmd_build(args, project: Project) -> int:
         console().print(dump_edit_yaml(edit))
         return 0
 
+    _pruefe_handarbeit(out, force=args.force)
     edit.save(out)
     plan2 = validate_edit(edit, manifest)
     segments = resolve(plan2)
@@ -729,6 +812,104 @@ def cmd_build(args, project: Project) -> int:
                     f"davon {sum(1 for s in edit.segments if s.type == 'xfade')} Uebergaenge)")
     console().print(f"Aufgeloeste Timeline: {tpath}")
     return 0
+
+
+def _pruefe_handarbeit(out: Path, *, force: bool) -> None:
+    """Nicht ueber eine von Hand geaenderte Edit-List schreiben.
+
+    Dieselbe Vorsicht, die ``chapters`` und ``order`` seit je walten lassen —
+    nur ist sie hier nicht am blossen *Vorhandensein* der Datei festzumachen:
+    ``build`` schreibt sie ja bei jedem Lauf, und ein Abbruch beim zweiten Bauen
+    waere unbrauchbar. Erkannt wird die Handarbeit an der Pruefsumme, die
+    ``dump_edit_yaml`` in die Kopfzeile schreibt.
+    """
+    from .models import hand_edited
+
+    if force or not out.exists():
+        return
+    try:
+        text = out.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if not hand_edited(text):
+        return
+    raise SlideshowError(
+        f"{out} weicht von dem ab, was `build` zuletzt geschrieben hat — die Datei "
+        f"enthaelt Handarbeit, und ein Neubau wuerde sie verwerfen.\n"
+        f"  `slideshow overrides` holt sie nach overrides.yaml; von dort ueberlebt "
+        f"sie jeden Neubau.\n"
+        f"  `--force` schreibt trotzdem.\n"
+        f"  (Auch eine Edit-List aus einer aelteren Fassung gilt als Handarbeit — "
+        f"sie traegt die Pruefsumme im Kopf noch nicht.)")
+
+
+def cmd_overrides(args, project: Project) -> int:
+    from .models import EditList, Manifest, Overrides
+    from .overrides import (OVERRIDES_NAME, diff_edit, dump_overrides_yaml,
+                            merge_overrides)
+
+    con = console()
+    manifest = Manifest.load(Path(args.manifest) if args.manifest else project.manifest)
+    _merge_audio_info(project, manifest)
+
+    hand_pfad = Path(args.quelle) if args.quelle else project.edit
+    if not hand_pfad.exists():
+        raise SlideshowError(
+            f"Edit-List fehlt: {hand_pfad}. Gesichert wird, was *in* ihr von Hand "
+            f"geaendert wurde — ohne sie gibt es nichts zu vergleichen.")
+    hand = EditList.load(hand_pfad)
+
+    out = Path(args.output) if args.output else (project.root / OVERRIDES_NAME)
+    alt = Overrides.load(out) if out.exists() else Overrides()
+
+    # Der Vergleichsbau laeuft *mit* dem bisherigen Feinschliff: was dort schon
+    # steht, ist kein Unterschied mehr und soll nicht zweimal auftauchen.
+    frisch, _plan, _cov, _defaults = _edit_bauen(project, args, manifest, overrides=alt)
+    neu, meldungen = diff_edit(frisch, hand, manifest)
+
+    for m in meldungen:
+        con.print(f"  [yellow]{m}[/yellow]")
+    if neu.leer:
+        con.print(f"Kein Feinschliff zu sichern — {hand_pfad.name} sagt dasselbe wie "
+                  f"ein frischer Bau." + ("" if out.exists() else
+                                          "  (Noch keine overrides.yaml noetig.)"))
+        return 0
+
+    text = dump_overrides_yaml(merge_overrides(alt, neu), manifest)
+    if args.dry_run:
+        con.print(text)
+        return 0
+    out.write_text(text, encoding="utf-8")
+
+    con.print(f"Feinschliff: {out}  ({len(neu.media)} Medien, {len(neu.cuts)} Blenden"
+              + (", eigene Vorgaben" if neu.defaults else "") + " uebernommen)")
+    if meldungen:
+        # Nicht alles ist mitgekommen. Die Edit-List bleibt deshalb geschuetzt:
+        # ein Stempel darauf erklaerte Handarbeit fuer gesichert, die es nicht
+        # ist, und der naechste Bau naehme sie kommentarlos mit.
+        con.print("[yellow]Nicht alles liess sich uebernehmen[/] (siehe oben) — "
+                  "`slideshow build` haelt die Edit-List weiter fest, bis das "
+                  "Uebrige in seiner Datei steht oder `--force` faellt.")
+        return 0
+    _als_gebaut_stempeln(hand_pfad)
+    con.print("Gegenprobe: `slideshow build` — die Edit-List muss danach dieselben "
+              "Werte tragen, und jeder weitere Neubau behaelt sie.")
+    return 0
+
+
+def _als_gebaut_stempeln(pfad: Path) -> None:
+    """Die Edit-List wieder freigeben, nachdem alles gesichert ist.
+
+    Ohne das bliebe ``build`` bei genau der Handarbeit stehen, die eben in die
+    Eingabedatei gewandert ist — und der einzige Ausweg waere ein ``--force``,
+    das nach dem Sichern wie ein Widerspruch aussieht.
+    """
+    from .models import restamp
+
+    try:
+        pfad.write_text(restamp(pfad.read_text(encoding="utf-8")), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def cmd_chapters(args, project: Project) -> int:
@@ -1333,8 +1514,14 @@ def cmd_export_mlt(args, project: Project) -> int:
         if args.dry_run:
             console().print(json.dumps(changes, indent=1))
             return 0
-        edit.save(epath)
+        # Nicht als "gebaut" stempeln: die Zeiten kommen aus Kdenlive, nicht aus
+        # `build`, und ein Neubau wuerde sie verwerfen. So haelt er stattdessen
+        # an — und `slideshow overrides` traegt sie als `dur:` bzw. `in`/`out`
+        # in eine Datei, die den Neubau uebersteht.
+        edit.save(epath, gebaut=False)
         console().print(f"{len(changes)} Zeiten aus Kdenlive uebernommen -> {epath}")
+        console().print("[dim]`slideshow overrides` sichert sie, bevor der naechste "
+                        "`build` sie neu rechnet.[/dim]")
         return 0
 
     _titelassets(project, edit, manifest, dry=DryRun(enabled=args.dry_run))
@@ -1374,7 +1561,7 @@ _COMMANDS = {
     "doctor": cmd_doctor, "probe": cmd_probe, "audio": cmd_audio,
     "preprocess": cmd_preprocess, "beats": cmd_beats, "chapters": cmd_chapters,
     "order": cmd_order, "select": cmd_select, "sheet": cmd_sheet,
-    "build": cmd_build,
+    "build": cmd_build, "overrides": cmd_overrides,
     "render": cmd_render, "export-mlt": cmd_export_mlt, "selftest": cmd_selftest,
 }
 

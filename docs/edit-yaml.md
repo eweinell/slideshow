@@ -14,10 +14,13 @@ derselben deterministischen Funktion, damit `build` und `render` garantiert
 dasselbe sehen. Deshalb steht in der Datei auch nirgends ein Startzeitpunkt
 eines Segments — er ergibt sich aus allen vorhergehenden.
 
-> **`build` überschreibt die Datei.** Von Hand Geändertes geht bei einem
-> erneuten `slideshow build` verloren. Wer die Edit-List anfasst, arbeitet
-> danach direkt mit `slideshow render` weiter — oder legt eine Kopie an und
-> übergibt sie explizit: `slideshow render meine-fassung.yaml`.
+> **`build` schreibt die Datei neu** — und merkt inzwischen, wenn dabei
+> Handarbeit verlorenginge: es bricht ab und verweist auf
+> [`slideshow overrides`](#overridesyaml--der-feinschliff), das den Feinschliff
+> in eine Eingabedatei holt, die den Neubau übersteht. `--force` schreibt
+> trotzdem. Wer nur diesen einen Schnitt sehen will, kommt weiterhin mit einer
+> Kopie und `slideshow render meine-fassung.yaml` aus — sie ist dann aber ein
+> Seitenzweig, in den kein nachgereichtes Bild mehr hineinfindet.
 
 Unbekannte Schlüssel sind ein **Fehler**, kein stiller Ignorierfall: ein
 vertipptes `still_secnods` bricht mit Pfad und Zeile ab, statt später einen
@@ -905,6 +908,124 @@ nicht chronologisch sortiert hat, findet diesen Vorbehalt in ihrem Kopf.
 
 ---
 
+## `overrides.yaml` — der Feinschliff
+
+Reihenfolge und Kapitel überleben den Neubau, weil sie eigene Eingabedateien
+haben. Alles übrige hatte keinen Ort außer dem Erzeugnis: eine längere
+Standzeit, eine abgeschaltete Fahrt, ein getrimmter Clip, ein harter Schnitt.
+Wer ein Bild nachreichte und neu baute, verlor sie — wer nicht neu baute, bekam
+das Bild nicht in den Film. Diese Datei löst genau die Klemme:
+
+```yaml
+# overrides.yaml — der Feinschliff. Wird von `slideshow build` eingelesen.
+version: 1
+
+defaults:                       # gilt für den ganzen Film
+  kb: {engine: scale16}
+
+media:                          # einzelne Medien, nach Medien-ID
+  img_DSC06300: {dur: 8}
+  img_DSC06412: {kb: {z: [1.0, 1.0], c: [0.5, 0.5, 0.5, 0.5]}}
+  clip_MVI_0042: {in: 3.2, out: 11.8, snap: none}
+
+cuts:                           # Blenden, verankert am folgenden Medium
+  - {before: img_DSC06413, dur: 0}
+```
+
+| Schlüssel | Typ | Bedeutung |
+|---|---|---|
+| `version` | int | `1`. Andere Versionen werden abgelehnt, nicht geraten. |
+| `defaults` | Objekt | Teilbaum von [`defaults:`](#defaults). Nur das Genannte weicht ab — `kb: {engine: …}` lässt `zoom_rate` unberührt. Geprüft wird gegen das ganze Schema, ein `still_second: 5` bricht also ab. |
+| `media` | Objekt | [Medien-ID](#medien-ids) → dieselben Schlüssel wie am Segment: `dur`, `beats`, `hold`, `snap_back`, `portrait`, `kb` beim Standbild, `in`, `out`, `snap`, `snap_back` beim Clip. |
+| `cuts` | Liste | `before:` ist die [Medien-ID](#medien-ids) **hinter** dem Schnitt, dazu `dur:`/`beats:` und `mode:`. `dur: 0` ist der harte Schnitt. |
+
+**Verankert wird an Medien-IDs, nie an Segmentindizes.** `segments[41]` zeigt
+nach dem nächsten eingefügten Bild auf ein anderes Segment; eine Kennung hängt
+am Dateinamen und bleibt. Es ist dieselbe Entscheidung, die `chapters.yaml`
+(`before:`) und die [Ken-Burns-Richtung](#woran-die-richtung-hängt) schon
+getroffen haben — und aus demselben Grund gilt ein Eintrag für **beide**
+Vorkommen, wenn ein Bild zweimal im Film steht.
+
+Eine unbekannte ID bricht ab (Tippfehler oder umbenannte Datei). Eine bekannte,
+die gerade nicht im Film steht, ist dagegen nur eine Meldung: die Datei soll
+mehrere Auswahlrunden überdauern.
+
+### Die Datei entstehen lassen
+
+Niemand legt sie von Hand an. Man ändert wie bisher in `edit.yaml`, sieht sich
+das Ergebnis an — und holt die Änderungen danach herüber:
+
+```
+slideshow overrides                     # edit.yaml gegen einen frischen Bau vergleichen
+slideshow --dry-run overrides           # nur anzeigen
+slideshow overrides --from andere.yaml  # eine andere Fassung als Quelle
+```
+
+Verglichen wird die vorhandene `edit.yaml` mit dem, was `build` **jetzt**
+erzeugen würde — mit allen Eingabedateien des Projekts, den bereits gesicherten
+Feinschliff eingeschlossen. Was danach noch abweicht, ist Handarbeit und wird
+zum Eintrag; eine vorhandene `overrides.yaml` wird dabei ergänzt, nicht
+überschrieben. Ein zweiter Lauf findet nichts mehr.
+
+Was sich so **nicht** ausdrücken lässt, wird gemeldet statt geschluckt, mit der
+Datei, in die es gehört:
+
+| Abweichung | gehört nach |
+|---|---|
+| andere Reihenfolge, eingefügtes oder gelöschtes Segment | [`order.yaml`](#orderyaml--die-reihenfolge-von-hand) |
+| geänderte Titelfolie, Blende um eine Folie herum | [`chapters.yaml`](#chaptersyaml--woher-die-titelfolien-kommen), `defaults.title.xfade_*` |
+| `fps:`, `size:` | `build --fps`, `build --size` |
+
+### Wenn `build` sich weigert
+
+`build` schreibt eine Prüfsumme seines Ergebnisses in die Kopfzeile von
+`edit.yaml` und vergleicht sie beim nächsten Lauf. Weicht die Datei ab, bricht
+es ab und nennt beide Wege: `slideshow overrides` sichert die Handarbeit,
+`--force` verwirft sie. Eine Edit-List aus einer älteren Fassung trägt die
+Kopfzeile noch nicht und gilt deshalb einmalig als Handarbeit — der Irrtum in
+diese Richtung kostet ein `--force`, der in die andere die Arbeit eines Abends.
+
+Die Zeile ist ein **Kommentar**, kein Schlüssel: der Renderpfad weiß nichts von
+ihr, und eine zweite Wahrheit im Schema wäre genau das, was
+[`chapters.yaml`](#chaptersyaml--woher-die-titelfolien-kommen) an anderer Stelle
+vermeidet.
+
+Ist danach alles gesichert, setzt `slideshow overrides` den Stempel auf den
+neuen Stand — sonst stünde man nach dem Sichern vor derselben Weigerung. Blieb
+etwas unübertragbar (die Tabelle oben), bleibt auch der Schutz: die Edit-List
+enthält dann weiterhin Handarbeit, die kein Neubau wiederherstellt.
+
+Aus demselben Grund trägt eine Edit-List, in die `export-mlt --reimport` Zeiten
+aus Kdenlive zurückgeschrieben hat, **keinen** Stempel: sie kommt nicht aus
+`build`. Der nächste Bau hält daran an, und `slideshow overrides` trägt die
+Zeiten als `dur:` bzw. `in`/`out` ein.
+
+### Rangfolge
+
+Für die Dauer gilt weiter die [Präzedenz](#präzedenz-der-dauer) — der
+Feinschliff setzt einfach das, was sonst am Segment stünde. Für die Kamerafahrt
+gibt es vier Quellen, und ihre Rangfolge liegt fest:
+
+| Rang | Quelle | Gilt |
+|---|---|---|
+| 1 | `kb:` in `overrides.yaml` | immer |
+| 2 | `motion: none` an Folie oder Kapitel | für Titelfolien |
+| 3 | die Kopplung der [Fokusblende](#fokusblende) | für das Folienpaar |
+| 4 | Zoomrate und Kennungs-Hash | für alles übrige |
+
+Rang 1 hat einen Preis, den `build` seit dieser Datei auch meldet: ein eigenes
+`kb:` am Bild **nach** einer Titelfolie schaltet die gekoppelte Fahrt ab, und
+die Folie löst sich nicht mehr in das Bild auf, sondern schneidet darauf. Die
+längere Blende bleibt.
+
+Und für die globalen Vorgaben: eingebaut, dann `overrides.yaml`, dann die
+Kommandozeile. Die Datei überdauert, das Argument gilt für diesen Lauf — wer
+beides setzt, meint das Argument. Wer eine Vorgabe dauerhaft will, für die es
+kein Argument gibt (`still_tolerance`, `hold_seconds`, `title.size`), hat hier
+den Ort dafür.
+
+---
+
 ## Präzedenz der Dauer
 
 Für ein Standbild gilt, von oben nach unten, die erste zutreffende Regel:
@@ -924,6 +1045,10 @@ dem Takt bringen.
 ---
 
 ## Häufige Eingriffe
+
+Alles Folgende steht so in `edit.yaml` — und `build` schreibt sie neu. Was
+bleiben soll, holt [`slideshow overrides`](#overridesyaml--der-feinschliff)
+danach in die Eingabedatei; dort steht dieselbe Angabe unter der Medien-ID.
 
 **Ein Bild länger stehen lassen**
 
@@ -979,7 +1104,9 @@ umsortiert und die Standardblenden behalten will, hat zwei Wege:
   Übergänge und ihre `from`/`to` erzeugt `build` von selbst.
 - **Von Hand nachziehen.** Bleibt für den Einzelfall — zwei Segmente tauschen,
   ohne eine Datei anzulegen. Bei vielen Segmenten ist es Sisyphusarbeit, weil
-  alle `from`/`to` mitmüssen.
+  alle `from`/`to` mitmüssen. Und der
+  [Feinschliff](#overridesyaml--der-feinschliff) rettet die Reihenfolge
+  ausdrücklich **nicht** — er meldet sie und verweist auf `order.yaml`.
 
 Seit die Ken-Burns-Richtung an der Bildkennung hängt statt an der Position
 (siehe [Woran die Richtung hängt](#woran-die-richtung-hängt)), kostet das
@@ -996,5 +1123,6 @@ die angrenzenden Blenden werden neu berechnet.
 | `beats.yaml` | Regionenkarte der Tonspur (`beats`) — vor dem Bauen ansehen. |
 | `chapters.yaml` | Kapitel der Reise, Eingabe für `build --chapters`. Überlebt das Neubauen der Edit-List. |
 | `order.yaml` | [Reihenfolge der Medien](#orderyaml--die-reihenfolge-von-hand), Eingabe für `build --order`. Überlebt das Neubauen der Edit-List. |
+| `overrides.yaml` | [Der Feinschliff](#overridesyaml--der-feinschliff) je Medium, Eingabe für `build --overrides`. Überlebt das Neubauen der Edit-List. |
 | `edit.yaml` | **Diese Datei** (`build`). |
 | `out/timeline.json` | Die *aufgelöste* Timeline mit absoluten Framenummern. Erzeugnis, kein Eingabeformat — zum Nachrechnen, nicht zum Editieren. |

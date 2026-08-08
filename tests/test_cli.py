@@ -74,6 +74,40 @@ def test_ganze_kette(tmp_path, quelle):
         "probe", "audio", "preprocess", "beats", "build"}
 
 
+def test_handarbeit_haelt_den_neubau_an_und_laesst_sich_sichern(tmp_path, quelle,
+                                                                capsys):
+    """Die Schleife aus Rezept 8: aendern -> `build` haelt an -> sichern -> bauen.
+
+    Der Fall, um den es geht: ohne diese Kette kostet ein nachgereichtes Bild
+    entweder die Handarbeit (Neubau) oder das Bild (kein Neubau).
+    """
+    src, audio = quelle
+    proj = str(tmp_path / "proj")
+    _run("--project", proj, "probe", str(src), "--fps", "60")
+    _run("--project", proj, "audio", str(audio))
+    _run("--project", proj, "preprocess", "--intermediate", "hevc_intra_cpu")
+    _run("--project", proj, "beats")
+    assert _run("--project", proj, "build") == 0
+
+    edit = tmp_path / "proj" / "edit.yaml"
+    text = edit.read_text(encoding="utf-8")
+    assert "beats: 8" in text, "Vorbedingung: ein Standbild mit dem Regeltakt"
+    edit.write_text(text.replace("beats: 8", "beats: 12", 1), encoding="utf-8")
+    capsys.readouterr()
+
+    # Der Neubau haelt an, statt die Aenderung kommentarlos zu verwerfen.
+    assert _run("--project", proj, "build") != 0
+    assert "overrides" in capsys.readouterr().out
+
+    assert _run("--project", proj, "overrides") == 0
+    ov = tmp_path / "proj" / "overrides.yaml"
+    assert ov.exists() and "beats: 12" in ov.read_text(encoding="utf-8")
+
+    # Danach baut es wieder ohne Nachfrage — und traegt denselben Wert.
+    assert _run("--project", proj, "build") == 0
+    assert "beats: 12" in edit.read_text(encoding="utf-8")
+
+
 def test_dry_run_schreibt_nichts(tmp_path, quelle):
     src, _audio = quelle
     proj = tmp_path / "proj"

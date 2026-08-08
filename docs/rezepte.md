@@ -17,7 +17,7 @@ dabei herauskommt** — die Bedeutung der einzelnen Schlüssel steht in
 | Ein Sammelbecken aus über tausend Bildern, davon sollen 200 in den Film | [5b. Aus tausend Bildern auswählen lassen](#5b-aus-tausend-bildern-auswählen-lassen) |
 | Nachträglich sind Fotos dazugekommen | [6. Nachschub einpflegen](#6-nachschub-einpflegen) |
 | Kein Ton, nur Bilder | [7. Stummer Film](#7-stummer-film) |
-| Ein einzelnes Bild soll länger stehen oder stillstehen | [8. Feinschliff ohne Neubau](#8-feinschliff-ohne-neubau) |
+| Ein einzelnes Bild soll länger stehen oder stillstehen — und das bleiben | [8. Feinschliff, der bleibt](#8-feinschliff-der-bleibt) |
 | Den Schnitt in Kdenlive fertig machen | [9. Weiter in Kdenlive](#9-weiter-in-kdenlive) |
 
 **Erst Reihenfolge, dann Kapitel** — wenn du beides brauchst. Der Grund steht
@@ -456,6 +456,7 @@ die Sortierung von gestern soll bleiben.
 slideshow probe /material/urlaub /material/nachschub
 slideshow preprocess
 slideshow order --update
+slideshow overrides        # nur nötig, wenn edit.yaml von Hand geändert wurde
 slideshow build
 ```
 
@@ -477,6 +478,13 @@ Drei Dinge macht `--update` still richtig:
 - Ein zweiter Lauf ändert nichts mehr.
 
 `chapters.yaml` hat kein `--update`; neue Kapitel trägst du von Hand nach.
+
+**Und die Handarbeit in `edit.yaml`?** Die stirbt hier nicht mehr mit. `build`
+merkt, dass die Datei von Hand geändert wurde, und bricht ab, statt sie
+kommentarlos zu überschreiben; `slideshow overrides` holt die Änderungen
+vorher nach `overrides.yaml`, wo sie an Medien-IDs hängen und jeden weiteren
+Neubau überstehen — [Rezept 8](#8-feinschliff-der-bleibt). Ohne Handarbeit in
+`edit.yaml` ist der Schritt überflüssig und meldet genau das.
 
 ---
 
@@ -507,20 +515,18 @@ unverändert.
 
 ---
 
-## 8. Feinschliff ohne Neubau
+## 8. Feinschliff, der bleibt
 
 **Wofür.** Der Schnitt steht, aber ein Bild soll länger stehen bleiben, ein
-anderes stillstehen.
+anderes stillstehen — und beides soll den nächsten `build` überleben.
 
 ```bash
-cp edit.yaml meine-fassung.yaml
-# von Hand ändern
-slideshow render meine-fassung.yaml
+# in edit.yaml ändern, ansehen
+slideshow render --preview
+# und dann sichern:
+slideshow overrides                    # → overrides.yaml
+slideshow build                        # Gegenprobe: dieselben Werte
 ```
-
-**Was herauskommt.** Ein Master mit genau diesen Änderungen — und im
-Renderbericht die Zahl der wirklich neu berechneten Segmente. Ein geändertes
-Bild kostet drei davon, nicht den halben Film.
 
 ```yaml
 - {type: still, src: cache/img_DSC06300.jpg, dur: 8}          # länger stehen
@@ -529,13 +535,38 @@ Bild kostet drei davon, nicht den halben Film.
   kb: {z: [1.0, 1.0], c: [0.5, 0.5, 0.5, 0.5]}
 ```
 
-**Worauf achten.** `slideshow build` **überschreibt `edit.yaml`**. Wer von Hand
-ändert, arbeitet danach mit `render` weiter oder legt wie oben eine Kopie an.
+**Was herauskommt.** Eine `overrides.yaml`, in der dieselben Angaben unter der
+Medien-ID stehen:
 
-Alles, was sich systematisch ergibt — Reihenfolge, Kapitel, Takt —, gehört
-**nicht** hierher, sondern in `order.yaml`, `chapters.yaml` oder die Parameter
-von `build`. Sonst ist es beim nächsten Bau weg. Die vollständige
-Schlüsselreferenz steht in [`edit-yaml.md`](edit-yaml.md).
+```yaml
+media:
+  img_DSC06300: {dur: 8}
+  img_DSC06301: {kb: {z: [1.0, 1.0], c: [0.5, 0.5, 0.5, 0.5]}}
+```
+
+Ab da ist der Feinschliff eine **Eingabe** wie `order.yaml` und
+`chapters.yaml`: `build` liest ihn und schreibt ihn nie. Ein nachgereichtes Bild
+([Rezept 6](#6-nachschub-einpflegen)) kostet ihn nicht mehr — die Angaben hängen
+an Kennungen, nicht an Positionen.
+
+**Worauf achten.**
+
+- **`build` bricht ab**, wenn `edit.yaml` von Hand geändert wurde. Das ist die
+  Reißleine: entweder `slideshow overrides` (sichern) oder `--force`
+  (verwerfen). Eine Edit-List, die noch aus einer älteren Fassung stammt, gilt
+  einmalig als Handarbeit.
+- **`slideshow --dry-run overrides`** zeigt, was gesichert würde, ohne zu
+  schreiben. Eine vorhandene `overrides.yaml` wird ergänzt, nicht
+  überschrieben; ein zweiter Lauf findet nichts mehr.
+- **Reihenfolge und Titel gehen nicht mit.** Sie werden gemeldet und gehören
+  nach `order.yaml` bzw. `chapters.yaml` — dort stehen sie ohnehin besser.
+- **Für den einen Blick** reicht weiter eine Kopie: `cp edit.yaml
+  meine-fassung.yaml`, ändern, `slideshow render meine-fassung.yaml`. Im
+  Renderbericht steht dann, wie viele Segmente wirklich neu gerechnet wurden —
+  ein geändertes Bild kostet drei davon, nicht den halben Film.
+
+Die vollständige Schlüsselreferenz steht in
+[`edit-yaml.md`](edit-yaml.md#overridesyaml--der-feinschliff).
 
 ---
 
@@ -559,6 +590,11 @@ entsteht.
 **Worauf achten.** Braucht `melt`, das meist mit Kdenlive oder Shotcut
 mitkommt. `doctor` sagt, ob es gefunden wurde; liegt es woanders, setzt
 `SLIDESHOW_MELT` es fest.
+
+Die zurückgeholten Zeiten sind Handarbeit wie jede andere: `build` hält danach
+an, statt sie neu zu rechnen. `slideshow overrides` trägt sie als `dur:` bzw.
+`in`/`out` in eine Datei, die den Neubau übersteht —
+[Rezept 8](#8-feinschliff-der-bleibt).
 
 ---
 

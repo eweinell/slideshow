@@ -663,9 +663,17 @@ class EditList(BaseModel):
     def audio_file(self) -> str:
         return str(self.audio.get("file", ""))
 
-    def save(self, path: Path) -> None:
+    def save(self, path: Path, *, gebaut: bool = True) -> None:
+        """Schreiben — und sagen, ob das Ergebnis von ``build`` stammt.
+
+        Nur was ``build`` erzeugt hat, traegt den Stempel aus
+        :func:`dump_edit_yaml`. Eine Fassung, in der Zeiten aus Kdenlive stehen,
+        ist Handarbeit wie jede andere: ``gebaut=False`` laesst sie als solche
+        erkennbar, damit der naechste Bau daran anhaelt statt sie zu verwerfen.
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(dump_edit_yaml(self), encoding="utf-8")
+        text = dump_edit_yaml(self)
+        path.write_text(text if gebaut else unstamp(text), encoding="utf-8")
 
     @classmethod
     def load(cls, path: Path) -> "EditList":
@@ -827,6 +835,168 @@ class OrderList(BaseModel):
         return _load_yaml_model(cls, path, was="Reihenfolgedatei", schluessel="groups")
 
 
+# --------------------------------------------------------------------------
+# overrides.yaml — der Feinschliff, der den Neubau ueberlebt
+# --------------------------------------------------------------------------
+
+class MediaOverride(BaseModel):
+    """Was an *einem* Medium abweichen soll.
+
+    Dieselben Schluessel wie am Segment in ``edit.yaml``: die Datei ist keine
+    zweite Sprache, sondern derselbe Satz Felder an einem stabilen Anker. Was
+    hier fehlt, rechnet ``build`` wie bisher aus.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    #: Standbilder.
+    beats: float | None = None
+    dur: float | None = None
+    hold: bool | None = None
+    portrait: Literal["blur", "black", "crop"] | None = None
+    kb: KBSpec | None = None
+    #: Beide.
+    snap_back: bool | None = None
+    #: Nur Clips — der Schnitt selbst.
+    in_: float | None = Field(None, alias="in")
+    out: float | None = None
+    snap: Literal["out", "none"] | None = None
+
+    @field_validator("dur", "in_", "out", mode="before")
+    @classmethod
+    def _times(cls, v):
+        return None if v is None else parse_time(v)
+
+    @property
+    def leer(self) -> bool:
+        return not self.model_dump(exclude_none=True)
+
+
+class CutOverride(BaseModel):
+    """Eine Blende, verankert am **folgenden** Medium.
+
+    Ein Index waere das Naheliegende und das Falsche: ``segments[41]`` zeigt
+    nach dem naechsten eingefuegten Bild auf ein anderes Segment. Die Medien-ID
+    des Bildes *hinter* dem Schnitt bleibt dieselbe — dieselbe Verankerung, mit
+    der ``chapters.yaml`` seine Folien setzt.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    before: str
+    beats: float | None = None
+    dur: float | None = None
+    mode: str | None = None
+
+    @field_validator("dur", mode="before")
+    @classmethod
+    def _times(cls, v):
+        return None if v is None else parse_time(v)
+
+    @field_validator("mode")
+    @classmethod
+    def _modus_bekannt(cls, v: str | None) -> str | None:
+        return None if v is None else _blendenmodus_pruefen(v)
+
+    @model_validator(mode="after")
+    def _etwas_zu_sagen(self) -> "CutOverride":
+        if self.beats is None and self.dur is None and self.mode is None:
+            raise ValueError("nennt weder `dur:`/`beats:` noch `mode:` und wuerde "
+                             "damit nichts tun — `dur: 0` ist der harte Schnitt")
+        return self
+
+
+class Overrides(BaseModel):
+    """``overrides.yaml`` — der Feinschliff als *Eingabe*.
+
+    ``build`` erzeugt ``edit.yaml`` bei jedem Lauf neu; Reihenfolge und Kapitel
+    ueberleben das seit je in eigenen Dateien. Alles uebrige — eine laengere
+    Standzeit, eine abgeschaltete Fahrt, ein getrimmter Clip, ein harter Schnitt
+    — hatte bis hierher keinen Ort ausser dem Erzeugnis und starb beim naechsten
+    Bauen. Das ist dieser Ort.
+
+    Verankert wird an **Medien-IDs**, aus demselben Grund wie in
+    ``chapters.yaml`` und ``order.yaml``: eine ID haengt am Dateinamen und
+    ueberlebt jedes Einfuegen, Umsortieren und erneute ``probe``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = 1
+    #: Teilbaum von ``defaults:`` aus ``edit.yaml``; nur die genannten Werte
+    #: weichen ab. Geprueft wird er erst beim Verschmelzen — dort steht der
+    #: vollstaendige Baum, gegen den ein Tippfehler auffaellt.
+    defaults: dict[str, Any] = Field(default_factory=dict)
+    media: dict[str, MediaOverride] = Field(default_factory=dict)
+    cuts: list[CutOverride] = Field(default_factory=list)
+
+    @field_validator("version")
+    @classmethod
+    def _check_version(cls, v: int) -> int:
+        if v != 1:
+            raise ValueError(f"overrides.yaml hat Version {v}, unterstuetzt wird 1")
+        return v
+
+    @property
+    def leer(self) -> bool:
+        return not (self.defaults or self.media or self.cuts)
+
+    def merged_defaults(self, basis: "Defaults | None" = None, *,
+                        quelle: str | None = None) -> "Defaults":
+        """Die Vorgaben mit dem Feinschliff darueber.
+
+        Geprueft wird gegen das *ganze* ``Defaults``-Schema und nicht gegen den
+        Teilbaum: ``extra="forbid"`` faellt sonst nie auf, und ein
+        ``still_second: 5`` bliebe wirkungslos, ohne sich zu melden.
+        """
+        if not self.defaults:
+            return basis or Defaults()
+        daten = tief_verschmelzen((basis or Defaults()).model_dump(mode="json"),
+                                  self.defaults)
+        try:
+            return Defaults.model_validate(daten)
+        except ValidationError as exc:
+            raise _to_schema_error(exc, file=quelle, prefix="defaults") from exc
+
+    @classmethod
+    def load(cls, path: Path) -> "Overrides":
+        return _load_yaml_model(cls, path, was="Feinschliffdatei", schluessel="media")
+
+
+def tief_verschmelzen(basis: dict, oben: dict) -> dict:
+    """``oben`` ueber ``basis`` legen, Mappings rekursiv statt als Ganzes.
+
+    Ohne die Rekursion ersetzte ein ``kb: {engine: scale16}`` den kompletten
+    Zweig und nicht nur den einen Wert — jede nicht genannte Ken-Burns-Vorgabe
+    fiele damit auf nichts zurueck.
+    """
+    out = dict(basis)
+    for k, v in oben.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = tief_verschmelzen(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def tiefe_differenz(neu: dict, basis: dict) -> dict:
+    """Die Gegenrichtung: was in ``neu`` anders steht als in ``basis``.
+
+    Liefert genau den Teilbaum, den :func:`tief_verschmelzen` wieder auf
+    ``basis`` legen wuerde, um ``neu`` zu erhalten.
+    """
+    out: dict = {}
+    for k, v in neu.items():
+        alt = basis.get(k)
+        if isinstance(v, dict) and isinstance(alt, dict):
+            tiefer = tiefe_differenz(v, alt)
+            if tiefer:
+                out[k] = tiefer
+        elif v != alt:
+            out[k] = v
+    return out
+
+
 def _load_yaml_model(cls, path: Path, *, was: str, schluessel: str):
     """YAML laden, Zeilennummern behalten, gegen das Modell pruefen.
 
@@ -967,6 +1137,56 @@ def _flow_list(dumper, data):
 _Dumper.add_representer(tuple, _flow_list)
 
 
+#: Kopfzeile, an der ``build`` erkennt, ob jemand die Datei angefasst hat.
+#: Ein Kommentar und kein Schluessel: der Renderpfad darf davon nichts wissen,
+#: und eine zweite Wahrheit im Schema waere genau das.
+_STEMPEL = "# gebaut:"
+
+
+def _pruefsumme(rumpf: str) -> str:
+    import hashlib
+    return hashlib.blake2b(rumpf.encode("utf-8"), digest_size=8).hexdigest()
+
+
+def _stempelzeile(rumpf: str) -> str:
+    return (f"{_STEMPEL} {_pruefsumme(rumpf)}  — daran erkennt `slideshow build`, "
+            f"ob von Hand geaendert wurde.\n")
+
+
+def restamp(text: str) -> str:
+    """Den Stempel auf den *jetzigen* Inhalt setzen.
+
+    Nach ``slideshow overrides``: die Aenderungen stehen dann in einer
+    Eingabedatei, ein Neubau holt sie wieder ein, und die Edit-List muss nicht
+    laenger vor sich selbst geschuetzt werden. Nur aufzurufen, wenn wirklich
+    *alles* uebernommen wurde — sonst erklaert der Stempel Handarbeit fuer
+    gesichert, die es nicht ist.
+    """
+    rumpf = unstamp(text)
+    return _stempelzeile(rumpf) + rumpf
+
+
+def unstamp(text: str) -> str:
+    """Den Stempel entfernen — die Datei gilt danach als Handarbeit."""
+    kopf, trenner, rumpf = text.partition("\n")
+    return rumpf if (trenner and kopf.startswith(_STEMPEL)) else text
+
+
+def hand_edited(text: str) -> bool:
+    """Weicht die Datei von dem ab, was ``build`` zuletzt geschrieben hat?
+
+    Fehlt der Stempel — eine Datei aus einer aelteren Fassung, oder jemand hat
+    die Kopfzeile geloescht —, gilt sie als von Hand bearbeitet. Der Irrtum in
+    diese Richtung kostet einen ``--force``; der in die andere kostet die
+    Handarbeit.
+    """
+    kopf, trenner, rumpf = text.partition("\n")
+    if not trenner or not kopf.startswith(_STEMPEL):
+        return True
+    genannt = kopf[len(_STEMPEL):].split()
+    return not genannt or genannt[0] != _pruefsumme(rumpf)
+
+
 def dump_edit_yaml(edit: EditList) -> str:
     data = edit.model_dump(mode="json", by_alias=True, exclude_none=True)
     head = {k: data.pop(k) for k in ("version", "fps", "size") if k in data}
@@ -998,7 +1218,8 @@ def dump_edit_yaml(edit: EditList) -> str:
     if data:
         out.append(yaml.dump(data, Dumper=_Dumper, sort_keys=False,
                              allow_unicode=True).rstrip())
-    return "\n".join(out) + "\n"
+    rumpf = "\n".join(out) + "\n"
+    return _stempelzeile(rumpf) + rumpf
 
 
 def _compact_regions(audio: dict) -> dict:
