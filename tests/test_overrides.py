@@ -162,6 +162,86 @@ def test_eigene_vorgaben_verschmelzen_nur_das_genannte():
     assert d.still_seconds == Defaults().still_seconds
 
 
+def test_motion_none_im_feinschliff_laesst_ein_bild_stillstehen():
+    """Die bequeme Schreibweise gilt am Standbild wie an der Titelfolie.
+
+    Vorher ging es nur ueber ein von Hand gerechnetes ``kb:`` — sechs Zahlen
+    fuer eine Absicht, die ein Wort ist.
+    """
+    ov = Overrides(media={"img_003": MediaOverride(motion="none")})
+    edit, _plan, _cov = _bauen(_manifest(), overrides=ov)
+    still = _still(edit, "img_003")
+    assert (still.kb.z, still.kb.c) == ((1.0, 1.0), (0.5, 0.5, 0.5, 0.5))
+    # Und die Absicht steht in der Datei, nicht nur ihre Wirkung: sonst waere
+    # beim Lesen nicht zu erkennen, dass der Stillstand gewollt ist.
+    assert still.motion == "none"
+    assert _still(edit, "img_004").kb is None, "nur dieses eine Bild"
+
+
+def test_der_filmweite_schalter_stellt_jede_fahrt_ab():
+    """``defaults.kb.motion`` erwischt auch die Titelfolien.
+
+    Sonst muesste man die Fahrt an zwei Stellen abstellen und faende die
+    vergessene erst im fertigen Film.
+    """
+    ov = Overrides(defaults={"kb": {"motion": "none"}})
+    edit, _plan, _cov = _bauen(_manifest(), overrides=ov,
+                               chapters=[Chapter(before="img_005", title="Malmoe")])
+    bewegt = [s for s in edit.segments
+              if isinstance(s, (StillSegment, TitleSegment))
+              and not (s.kb and s.kb.z == (1.0, 1.0))]
+    assert bewegt == []
+
+
+def test_motion_none_findet_aus_der_edit_list_zurueck():
+    """Der Rueckweg: von Hand in ``edit.yaml`` geschrieben, von ``overrides``
+    eingesammelt. Ohne ihn ueberlebte der Stillstand den naechsten Bau nicht."""
+    manifest = _manifest()
+    frisch, _plan, _cov = _bauen(manifest)
+    hand = copy.deepcopy(frisch)
+    _still(hand, "img_002").motion = "none"
+
+    neu, meldungen = diff_edit(frisch, hand, manifest)
+    assert meldungen == []
+    assert neu.media["img_002"].motion == "none"
+
+
+def test_der_feinschliff_schaltet_die_fahrt_ueber_allen_titelfolien_ab():
+    """``defaults.title.motion`` ist der allgemeine Aus-Schalter fuer Titel.
+
+    Er stand bisher nur in ``edit.yaml``, und die baut ``build`` bei jedem Lauf
+    neu — dauerhaft ist er erst hier. Geprueft wird deshalb der ganze Weg
+    (Datei → ``merged_defaults`` → ``title_kb``) und nicht nur das Verschmelzen:
+    ein Titel ohne eigenes ``motion:`` holt die Vorgabe erst beim Bauen ab.
+    """
+    ov = Overrides(defaults={"title": {"motion": "none"}})
+    edit, _plan, _cov = _bauen(_manifest(), overrides=ov,
+                               chapters=[Chapter(at=0, title="Skandinavien"),
+                                         Chapter(before="img_005", title="Malmoe")])
+    folien = [s for s in edit.segments if isinstance(s, TitleSegment)]
+    assert len(folien) == 2
+    assert all((f.kb.z, f.kb.c) == ((1.0, 1.0), (0.5, 0.5, 0.5, 0.5)) for f in folien)
+    # Nur die Folien stehen still. Waere hier auch ein Bild ohne Fahrt, haette
+    # der Schalter den ganzen Film erwischt statt der Titel.
+    assert all(s.kb is None for s in edit.segments if isinstance(s, StillSegment))
+
+
+def test_eine_einzelne_folie_darf_gegen_die_vorgabe_fahren():
+    """Rang 2 vor Rang 3: ``motion:`` am Kapitel gewinnt gegen die Vorgabe.
+
+    Sonst waere der allgemeine Schalter ein Zwang, und die eine Folie, die
+    fahren soll, brauchte ein von Hand gerechnetes ``kb:``.
+    """
+    ov = Overrides(defaults={"title": {"motion": "none"}})
+    edit, _plan, _cov = _bauen(_manifest(), overrides=ov,
+                               chapters=[Chapter(before="img_005", title="Malmoe",
+                                                 motion="kenburns")])
+    folie = next(s for s in edit.segments if isinstance(s, TitleSegment))
+    # Sie traegt trotzdem ein ``kb:`` — aber das der gekoppelten Fokusblende,
+    # die es nur gibt, weil die Folie faehrt. Der Stillstand waere z: [1.0, 1.0].
+    assert folie.kb.z[0] != folie.kb.z[1]
+
+
 def test_ein_tippfehler_in_den_vorgaben_faellt_auf():
     ov = Overrides(defaults={"still_second": 5.0})
     with pytest.raises(SchemaError) as exc:

@@ -47,7 +47,7 @@ OVERRIDES_NAME = "overrides.yaml"
 #: Welche Felder an welchem Segmenttyp verglichen und uebertragen werden.
 #: ``portrait`` steht nur beim Standbild, ``in``/``out``/``snap`` nur beim
 #: Clip; die Zuordnung hier ist die einzige Stelle, die das weiss.
-FELDER_STILL = ("beats", "dur", "hold", "snap_back", "portrait", "kb")
+FELDER_STILL = ("beats", "dur", "hold", "snap_back", "portrait", "motion", "kb")
 FELDER_CLIP = ("in_", "out", "snap", "snap_back")
 
 _EPS = 1e-6
@@ -410,8 +410,9 @@ def dump_overrides_yaml(ov: Overrides, manifest: Manifest | None = None) -> str:
     if ov.media:
         zeilen += ["",
                    "# Einzelne Medien. Dieselben Schluessel wie am Segment in edit.yaml:",
-                   "# `dur:`/`beats:` (Standzeit), `kb:` (Kamerafahrt), `hold:`,",
-                   "# `snap_back:`, `portrait:` — beim Clip `in:`/`out:`/`snap:`.",
+                   "# `dur:`/`beats:` (Standzeit), `motion: none` (Bild steht still),",
+                   "# `kb:` (Kamerafahrt im Einzelnen), `hold:`, `snap_back:`,",
+                   "# `portrait:` — beim Clip `in:`/`out:`/`snap:`.",
                    "media:"]
         for mid in sorted(ov.media):
             daten = ov.media[mid].model_dump(by_alias=True, exclude_none=True)

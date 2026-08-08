@@ -19,8 +19,9 @@ from pathlib import Path
 
 import pytest
 
-from slideshow.kenburns import (KBMotion, frames_arg, kb_filter, motion_key,
-                                plan_motion, still_input_args, zoom_from_duration)
+from slideshow.kenburns import (KBMotion, frames_arg, kb_filter, motion_kb,
+                                motion_key, plan_motion, still_input_args,
+                                zoom_from_duration)
 from slideshow.models import Defaults, KBDefaults, KBSpec, Region
 from slideshow.planner import Intent, apply_transitions, plan_slots, resolve
 
@@ -42,6 +43,98 @@ def test_zoom_ergibt_sich_aus_der_dauer():
     assert kurz < lang, "ein laengeres Bild braucht mehr Zoomweg"
     assert zoom_from_duration(0.5, d) == pytest.approx(1.08), "untere Klemmung"
     assert zoom_from_duration(60.0, d) == pytest.approx(1.30), "obere Klemmung"
+
+
+# --------------------------------------------------------------------------
+# ``motion:`` — die Fahrt abschalten, ohne sie auszurechnen
+#
+# Der Stillstand ist ein gewoehnliches ``kb:``. Uebersetzt wird er an genau
+# einer Stelle, damit weder ``planner.py`` noch ``render.py`` von dem Schalter
+# wissen muessen — und damit Standbild und Titelfolie ihn gleich verstehen.
+# --------------------------------------------------------------------------
+
+#: Der Block aus ``docs/edit-yaml.md``, "Bewegung fuer ein Bild abschalten".
+STILLSTAND = ((1.0, 1.0), (0.5, 0.5, 0.5, 0.5))
+
+
+def test_motion_none_wird_zum_stillstehenden_kb():
+    kb = motion_kb(None, "none")
+    assert (kb.z, kb.c) == STILLSTAND
+
+
+def test_motion_kenburns_laesst_die_fahrt_rechnen():
+    assert motion_kb(None, "kenburns") is None, "kein kb: heisst: aus der Dauer"
+
+
+def test_ein_eigenes_kb_gewinnt_gegen_motion_none():
+    """``motion`` ist die bequeme Schreibweise, nicht die staerkere."""
+    eigen = KBSpec(z=(1.0, 1.2))
+    assert motion_kb(eigen, "none") is eigen
+
+
+def test_jeder_stillstand_ist_eine_eigene_instanz():
+    """Der Wert haengt sich an einen Intent und landet in der Edit-List. Eine
+    geteilte Instanz waere dieselbe fuer alle Bilder — ein Eingriff an einem
+    truebe dann alle."""
+    assert motion_kb(None, "none") is not motion_kb(None, "none")
+
+
+def test_ein_stillstehendes_bild_bewegt_sich_auch_geplant_nicht():
+    """Die Probe aufs Exempel: der Stillstand muss durch ``plan_motion``
+    hindurch halten, sonst rechnet der Renderer ihn wieder weg."""
+    m = plan_motion("img_007", 6.0, KBDefaults(), motion_kb(None, "none"))
+    assert (m.z0, m.z1) == (1.0, 1.0)
+    assert m.c0 == m.c1 == (0.5, 0.5)
+
+
+def _edit_yaml(tmp_path: Path, defaults: str, segment: str) -> Path:
+    p = tmp_path / "edit.yaml"
+    p.write_text(
+        "version: 2\nfps: 60.0\nsize: [1280, 720]\n"
+        "audio: {file: '', duration: 20.0, regions: "
+        "[{type: beat, start: 0.0, end: 20.0, bpm: 120.0, offset: 0.0}]}\n"
+        f"defaults: {defaults}\n"
+        f"segments:\n  - {segment}\n", encoding="utf-8")
+    return p
+
+
+def test_motion_am_standbild_gilt_auch_ohne_kb_in_der_datei(tmp_path):
+    """Der Fall, an dem eine zweite Wahrheit entstuende.
+
+    Kennte nur ``build`` die Regel, fuehre ein von Hand geschriebenes
+    ``motion: none`` beim Rendern trotzdem: die Datei saehe richtig aus und der
+    Film waere es nicht. ``plan_from_edit`` ist der gemeinsame Weg von ``build``,
+    ``render`` und ``export-mlt`` — deshalb loest sie es dort auf.
+    """
+    from slideshow.build import plan_from_edit
+    from slideshow.models import EditList
+
+    p = _edit_yaml(tmp_path, "{}",
+                   "{type: still, src: cache/img_001.jpg, motion: none, beats: 8}")
+    slot, = plan_from_edit(EditList.load(p)).slots
+    assert (slot.intent.kb.z, slot.intent.kb.c) == STILLSTAND
+
+
+def test_der_filmweite_schalter_gilt_auch_ohne_kb_in_der_datei(tmp_path):
+    """Dasselbe fuer ``defaults.kb.motion`` — sonst waere die Vorgabe eine
+    Angabe, die nur beim Bauen wirkt und beim Rendern verschwindet."""
+    from slideshow.build import plan_from_edit
+    from slideshow.models import EditList
+
+    p = _edit_yaml(tmp_path, "{kb: {motion: none}}",
+                   "{type: still, src: cache/img_001.jpg, beats: 8}")
+    slot, = plan_from_edit(EditList.load(p)).slots
+    assert (slot.intent.kb.z, slot.intent.kb.c) == STILLSTAND
+
+
+def test_ein_einzelnes_bild_darf_gegen_den_filmweiten_schalter_fahren(tmp_path):
+    from slideshow.build import plan_from_edit
+    from slideshow.models import EditList
+
+    p = _edit_yaml(tmp_path, "{kb: {motion: none}}",
+                   "{type: still, src: cache/img_001.jpg, motion: kenburns, beats: 8}")
+    slot, = plan_from_edit(EditList.load(p)).slots
+    assert slot.intent.kb is None, "die Fahrt wird wieder aus der Dauer gerechnet"
 
 
 # --------------------------------------------------------------------------

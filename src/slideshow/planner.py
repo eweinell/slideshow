@@ -179,6 +179,11 @@ class Intent:
     snap: str = "out"
     snap_back: bool | None = None
     kb: KBSpec | None = None
+    #: Nur Standbilder: das ``motion:`` aus der Datei bzw. dem Feinschliff.
+    #: Der Planer liest es nicht — es steht schon als ``kb:`` daneben. Getragen
+    #: wird es, damit ``build`` es beim Rueckschreiben wiederfindet und die
+    #: Zeile in ``edit.yaml`` erklaert, warum das Bild stillsteht.
+    motion: str | None = None
     portrait: str | None = None
     #: Titelfolien: die Absicht aus ``edit.yaml``. Der Planer behandelt sie wie
     #: jedes andere Standbild — ``kind`` bleibt ``"still"``, ``src`` zeigt auf

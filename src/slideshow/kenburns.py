@@ -71,6 +71,29 @@ class KBMotion:
         return {**self.as_spec(), "ease": self.ease, "engine": self.engine}
 
 
+def motion_kb(kb: KBSpec | None, modus: str) -> KBSpec | None:
+    """Ein ``motion:`` in **gewoehnliche Absicht** uebersetzen.
+
+    ``none`` wird zu genau dem ``kb:``, das ``docs/edit-yaml.md`` unter
+    "Bewegung fuer ein Bild abschalten" nennt. Damit muss keine Zeile in
+    ``planner.py`` oder ``render.py`` von dem Schalter wissen, und in
+    ``edit.yaml`` steht sichtbar, warum dieses Bild stillsteht — derselbe Weg,
+    den die Titelfolien seit je gehen (:func:`slideshow.titles.title_kb` ruft
+    hier durch).
+
+    Ein von Hand gesetztes ``kb:`` gewinnt. Wer beides schreibt, meint das
+    ``kb:``; ``motion`` ist die bequeme Schreibweise, nicht die staerkere.
+
+    Frische Instanz je Aufruf: der Wert haengt sich an einen Intent und landet
+    von dort in der Edit-List. Eine geteilte waere dieselbe fuer alle Bilder.
+    """
+    if kb is not None:
+        return kb
+    if modus != "none":
+        return None
+    return KBSpec(z=(1.0, 1.0), c=(0.5, 0.5, 0.5, 0.5))
+
+
 def motion_key(key: str | int) -> int:
     """Deterministische Zahl aus der Kennung eines Bildes.
 

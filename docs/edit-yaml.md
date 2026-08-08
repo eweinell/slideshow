@@ -121,6 +121,7 @@ Gelten für jedes Segment, das nichts Eigenes sagt.
 | `ease` | enum | `smoothstep` | `smoothstep` (weich an- und abbremsend) oder `linear`. |
 | `alternate` | bool | `true` | Zoomrichtung wechseln lassen. Hundertmal hineinzoomen ermüdet. Der Wechsel ist **statistisch, nicht streng abwechselnd** — siehe unten. `false` zoomt immer hinein. |
 | `engine` | enum | `zoompan` | `zoompan` ist schnell, rechnet aber **8-bittig** — ffmpeg schiebt eine Konvertierung davor. `scale16` rechnet durchgehend in 16 Bit, kostet mehr CPU. Bei sichtbarem Banding in Himmelsverläufen umstellen. |
+| `motion` | enum | `kenburns` | Kamerafahrt überhaupt. `none` lässt **jedes** Bild stillstehen, Titelfolien eingeschlossen — der filmweite Schalter. Über die Raten ließe sich dasselbe ausdrücken, aber nur mit vier Werten, von denen zwei Klemmungen sind: `zoom_total: [0.08, …]` schaltete die Fahrt still wieder ein. |
 
 #### Rate und Klemmung — wo die Rate wirklich gilt
 
@@ -276,7 +277,7 @@ gerechnet, nicht geraten — die Begründungen stehen in
 |---|---|---|---|
 | `beats` | float | `12.0` | Standzeit in einer Beat-Region. In einer `free`-Region gilt stattdessen `still_seconds` — dort steht eine Folie so lange wie die Bilder um sie herum, ohne Sonderregel. |
 | `phrase_beats` | int | `8` | Länge einer musikalischen Phrase. Titel beginnen auf einem Vielfachen davon; `build` dehnt oder staucht dafür das **vorangehende** Bild. Muss ≥ 1 sein. |
-| `motion` | enum | `kenburns` | `kenburns` fährt über die Folie wie über jedes Standbild, `none` lässt sie stillstehen. Der Text ist in die Pixel eingebrannt und fährt sonst mit — er flimmert dabei bei dünnen Schriften und liest sich stehend ruhiger. Aufgelöst wird das als gewöhnliches `kb:` am Segment, nicht im Renderer. |
+| `motion` | enum | von `defaults.kb.motion` | `kenburns` fährt über die Folie wie über jedes Standbild, `none` lässt sie stillstehen. Der Text ist in die Pixel eingebrannt und fährt sonst mit — er flimmert dabei bei dünnen Schriften und liest sich stehend ruhiger. Aufgelöst wird das als gewöhnliches `kb:` am Segment, nicht im Renderer. Der Schlüssel ist für den häufigen Fall da: **Folien still, Bilder in Fahrt**. Für den umgekehrten reicht `defaults.kb.motion`. |
 | `font` | string | `auto` | Pfad zur Schriftdatei. `auto` sucht plattformabhängig (Windows: Segoe UI, Arial; Linux: DejaVu Sans, Noto Sans; macOS: Helvetica). Die Umgebungsvariable **`SLIDESHOW_FONT` gewinnt immer** — dieselbe Regel wie bei `SLIDESHOW_MELT`. |
 | `size` | float | `0.075` | Versalhöhe der Überschrift als Anteil der Bildhöhe. 162 px bei 2160 — auf einem 55″-Fernseher aus 3 m so groß wie eine Zeitungsschlagzeile. |
 | `subtitle_scale` | float | `0.42` | Größe der zweiten Zeile, Anteil der Überschrift. |
@@ -328,6 +329,7 @@ Die Abfolge. Vier Typen, unterschieden über `type`.
 | `hold` | bool | `false` | Ruhiges Bild über eine lange Stille. Wird von `build` gesetzt, lässt sich aber erzwingen. |
 | `snap_back` | bool | von `defaults` | Nur für dieses Segment. |
 | `portrait` | enum | von `defaults` | Nur für dieses Bild. |
+| `motion` | enum | von `defaults.kb.motion` | `none` lässt **dieses** Bild stillstehen — die kurze Schreibweise für das `kb:` darunter. Ein von Hand gesetztes `kb:` gewinnt. |
 | `kb` | Objekt | von `defaults.kb` | Siehe unten. |
 
 ### `title` — Titel- und Zwischenfolie
@@ -492,7 +494,25 @@ flimmern in der Bewegung. `motion: none` lässt die Folie stillstehen:
    kb: {z: [1.0, 1.0], c: [0.5, 0.5, 0.5, 0.5]}}   # von build materialisiert
 ```
 
-Für alle Folien auf einmal: `defaults.title.motion: none`.
+Für alle Folien auf einmal: `defaults.title.motion: none`; für den ganzen Film
+einschließlich der Bilder `defaults.kb.motion: none`. In `edit.yaml` überlebt
+beides den nächsten Bau nicht — dauerhaft steht es im
+[Feinschliff](#overridesyaml--der-feinschliff), der die globalen Vorgaben trägt:
+
+```yaml
+# overrides.yaml
+defaults:
+  title: {motion: none}         # nur die Folien; die Bilder fahren weiter
+```
+
+Ein `motion:` an der einzelnen Folie (in `chapters.yaml`) gewinnt darüber
+weiterhin — es steht in `TitleSegment.motion`, die Vorgabe nur dahinter.
+
+Dasselbe Wort steht am [Standbild](#still--standbild) und tut dort dasselbe.
+`defaults.title.motion` gibt es trotzdem, weil „Folien still, Bilder in Fahrt"
+der häufigere Wunsch ist als sein Gegenteil; ohne Angabe fällt es auf
+`defaults.kb.motion` zurück, damit der filmweite Schalter die Folien mit
+erwischt.
 
 Aufgelöst wird das nicht im Renderer, sondern als **gewöhnliches `kb:`** am
 Segment — genau der Block aus [Bewegung für ein Bild
@@ -572,6 +592,10 @@ ausgeschrieben haben.
 | `c` | [float, float, float, float] | Start- und Ziel-Bildmitte als `[x0, y0, x1, y1]`, normalisiert auf `[0, 1]`. `[0.5, 0.5, 0.5, 0.5]` steht still. |
 | `ease` | enum | `smoothstep` oder `linear`. |
 | `engine` | enum | `zoompan` oder `scale16`, nur für dieses Bild. |
+
+Soll das Bild einfach stillstehen, reicht `motion: none` am Segment — `build`
+schreibt daraus genau den Block `kb: {z: [1.0, 1.0], c: [0.5, 0.5, 0.5, 0.5]}`.
+Umgekehrt gilt: wer beides schreibt, meint das `kb:`.
 
 Die Bewegung ist über die **volle sichtbare Spanne** definiert — exklusiver
 Anteil plus die angrenzenden Übergangshälften. Das xfade-Segment wertet
@@ -922,10 +946,11 @@ version: 1
 
 defaults:                       # gilt für den ganzen Film
   kb: {engine: scale16}
+  title: {motion: none}         # keine Kamerafahrt über Titelfolien
 
 media:                          # einzelne Medien, nach Medien-ID
   img_DSC06300: {dur: 8}
-  img_DSC06412: {kb: {z: [1.0, 1.0], c: [0.5, 0.5, 0.5, 0.5]}}
+  img_DSC06412: {motion: none}  # dieses Bild steht still
   clip_MVI_0042: {in: 3.2, out: 11.8, snap: none}
 
 cuts:                           # Blenden, verankert am folgenden Medium
@@ -936,7 +961,7 @@ cuts:                           # Blenden, verankert am folgenden Medium
 |---|---|---|
 | `version` | int | `1`. Andere Versionen werden abgelehnt, nicht geraten. |
 | `defaults` | Objekt | Teilbaum von [`defaults:`](#defaults). Nur das Genannte weicht ab — `kb: {engine: …}` lässt `zoom_rate` unberührt. Geprüft wird gegen das ganze Schema, ein `still_second: 5` bricht also ab. |
-| `media` | Objekt | [Medien-ID](#medien-ids) → dieselben Schlüssel wie am Segment: `dur`, `beats`, `hold`, `snap_back`, `portrait`, `kb` beim Standbild, `in`, `out`, `snap`, `snap_back` beim Clip. |
+| `media` | Objekt | [Medien-ID](#medien-ids) → dieselben Schlüssel wie am Segment: `dur`, `beats`, `hold`, `snap_back`, `portrait`, `motion`, `kb` beim Standbild, `in`, `out`, `snap`, `snap_back` beim Clip. |
 | `cuts` | Liste | `before:` ist die [Medien-ID](#medien-ids) **hinter** dem Schnitt, dazu `dur:`/`beats:` und `mode:`. `dur: 0` ist der harte Schnitt. |
 
 **Verankert wird an Medien-IDs, nie an Segmentindizes.** `segments[41]` zeigt
@@ -1004,19 +1029,27 @@ Zeiten als `dur:` bzw. `in`/`out` ein.
 
 Für die Dauer gilt weiter die [Präzedenz](#präzedenz-der-dauer) — der
 Feinschliff setzt einfach das, was sonst am Segment stünde. Für die Kamerafahrt
-gibt es vier Quellen, und ihre Rangfolge liegt fest:
+gibt es fünf Quellen, und ihre Rangfolge liegt fest:
 
 | Rang | Quelle | Gilt |
 |---|---|---|
-| 1 | `kb:` in `overrides.yaml` | immer |
-| 2 | `motion: none` an Folie oder Kapitel | für Titelfolien |
-| 3 | die Kopplung der [Fokusblende](#fokusblende) | für das Folienpaar |
-| 4 | Zoomrate und Kennungs-Hash | für alles übrige |
+| 1 | `kb:` am Segment oder in `overrides.yaml` | immer |
+| 2 | `motion:` am Segment, an der Folie oder am Kapitel | für dieses eine Medium |
+| 3 | `defaults.title.motion` | für alle Titelfolien |
+| 4 | `defaults.kb.motion` | für den ganzen Film |
+| 5 | die Kopplung der [Fokusblende](#fokusblende) | für das Folienpaar |
+| 6 | Zoomrate und Kennungs-Hash | für alles übrige |
 
-Rang 1 hat einen Preis, den `build` seit dieser Datei auch meldet: ein eigenes
-`kb:` am Bild **nach** einer Titelfolie schaltet die gekoppelte Fahrt ab, und
-die Folie löst sich nicht mehr in das Bild auf, sondern schneidet darauf. Die
-längere Blende bleibt.
+Die Ränge 2 bis 4 sind **eine** Sache: `build` übersetzt sie in genau das `kb:`
+aus Rang 1 und schreibt es sichtbar in die Edit-List. Weder `planner.py` noch
+`render.py` bekommen dadurch eine Zeile über den Schalter, und beim Lesen der
+Datei ist zu erkennen, dass der Stillstand gewollt und nicht gerechnet ist.
+
+Rang 1 hat einen Preis, den `build` auch meldet: ein eigenes `kb:` am Bild
+**nach** einer Titelfolie schaltet die gekoppelte Fahrt ab, und die Folie löst
+sich nicht mehr in das Bild auf, sondern schneidet darauf. Die längere Blende
+bleibt. Für ein `motion: none` an dieser Stelle gilt dasselbe — es *ist* ein
+`kb:`, nur kürzer geschrieben.
 
 Und für die globalen Vorgaben: eingebaut, dann `overrides.yaml`, dann die
 Kommandozeile. Die Datei überdauert, das Argument gilt für diesen Lauf — wer
@@ -1059,10 +1092,16 @@ danach in die Eingabedatei; dort steht dieselbe Angabe unter der Medien-ID.
 **Bewegung für ein Bild abschalten**
 
 ```yaml
-- type: still
-  src: cache/img_DSC06300.jpg
-  kb: {z: [1.0, 1.0], c: [0.5, 0.5, 0.5, 0.5]}
+- {type: still, src: cache/img_DSC06300.jpg, motion: none}
 ```
+
+`build` schreibt daraus `kb: {z: [1.0, 1.0], c: [0.5, 0.5, 0.5, 0.5]}` — den
+Block kann man auch selbst hinschreiben, er gewinnt dann.
+
+**Gar keine Kamerafahrt im ganzen Film**
+
+`defaults.kb.motion: none`. Erwischt Bilder und Titelfolien; einzelne Bilder
+dürfen mit `motion: kenburns` wieder ausscheren.
 
 **Titelfolien ohne Kamerafahrt**
 

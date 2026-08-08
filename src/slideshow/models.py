@@ -346,6 +346,14 @@ class KBDefaults(BaseModel):
     #: geplante Schwenk sie zurueckholt. Der Schluessel bleibt, damit bestehende
     #: Projekte bitgleich weiterrendern.
     pan_anchor: Literal["center", "through"] = "center"
+    #: Kamerafahrt ueberhaupt: ``kenburns`` oder ``none``.
+    #:
+    #: Der filmweite Schalter, und der einzige Ort, an dem der Stillstand
+    #: *nicht* als ``kb:`` dasteht. Ueber die Raten liesse er sich auch
+    #: ausdruecken (``zoom_rate: 0`` und ``pan_rate: 0``), aber nur mit vier
+    #: Werten, von denen zwei Klemmungen sind — und ``zoom_total: [0.08, …]``
+    #: haette die Absicht still wieder eingeschaltet.
+    motion: Literal["kenburns", "none"] = "kenburns"
 
     @model_validator(mode="before")
     @classmethod
@@ -432,7 +440,13 @@ class TitleDefaults(BaseModel):
     #: Schriften flimmert er dabei, und lesen laesst sich ein stehender Satz
     #: ohnehin ruhiger. Aufgeloest wird das nicht im Renderer, sondern als
     #: gewoehnliches ``kb:`` am Segment (:func:`slideshow.titles.title_kb`).
-    motion: Literal["kenburns", "none"] = "kenburns"
+    #:
+    #: **Ohne Angabe gilt** ``defaults.kb.motion``, nicht ``kenburns``: sonst
+    #: haette der filmweite Schalter die Folien nicht erwischt, und wer die
+    #: Fahrt ueberall abstellt, musste sie an zwei Stellen abstellen. Der
+    #: Schluessel bleibt fuer den umgekehrten Fall — Folien still, Bilder in
+    #: Fahrt (der haeufigere Wunsch).
+    motion: Literal["kenburns", "none"] | None = None
     #: Versalhoehe der Ueberschrift als Anteil der Bildhoehe.
     size: float = 0.075
     subtitle_scale: float = 0.42
@@ -530,6 +544,10 @@ class StillSegment(BaseModel):
     #: Nach einem Override auf den naechsten Beat aufrunden.
     snap_back: bool | None = None
     portrait: Literal["blur", "black", "crop"] | None = None
+    #: Bewegung nur fuer dieses Bild; ohne Angabe gilt ``defaults.kb.motion``.
+    #: Dieselbe bequeme Schreibweise wie an der Titelfolie — ``none`` wird beim
+    #: Bauen zu dem ``kb:``, das man sonst von Hand hinschreiben muesste.
+    motion: Literal["kenburns", "none"] | None = None
     kb: KBSpec | None = None
 
 
@@ -854,6 +872,7 @@ class MediaOverride(BaseModel):
     dur: float | None = None
     hold: bool | None = None
     portrait: Literal["blur", "black", "crop"] | None = None
+    motion: Literal["kenburns", "none"] | None = None
     kb: KBSpec | None = None
     #: Beide.
     snap_back: bool | None = None

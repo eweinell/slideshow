@@ -26,7 +26,7 @@ from pathlib import Path
 
 from . import EDIT_VERSION
 from .errors import SchemaError, SlideshowError
-from .kenburns import plan_motion
+from .kenburns import motion_kb, plan_motion
 from .models import (BeatMap, Chapter, ClipSegment, Defaults, EditList, KBSpec,
                      Manifest, MediaItem, Overrides, Region, StillSegment,
                      TitleSegment, XfadeSegment)
@@ -103,12 +103,15 @@ def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
         if e is not None:
             benutzt.add(m.id)
         if m.kind == "image":
+            bewegung = e.motion if e else None
             intents.append(Intent(
                 kind="still", src=m.cache_path, index=len(intents),
                 beats=(e.beats if e else None), dur=(e.dur if e else None),
                 hold=bool(e.hold) if (e and e.hold is not None) else False,
                 snap_back=(e.snap_back if e else None),
-                portrait=(e.portrait if e else None), kb=(e.kb if e else None)))
+                portrait=(e.portrait if e else None), motion=bewegung,
+                kb=motion_kb(e.kb if e else None,
+                             bewegung or defaults.kb.motion)))
         else:
             info = m.clip
             available = (info.cache_duration or info.effective_duration) if info else 0.0
@@ -1050,6 +1053,12 @@ def _segment_from_slot(plan: Plan, i: int, slot, defaults: Defaults):
         # die Datei zurueck — die Absicht waere gesetzt, das Erzeugnis wuesste
         # nichts davon, und `render` zeigte das Bild anders als geplant.
         felder["portrait"] = intent.portrait
+    if intent.motion is not None:
+        # Dasselbe fuer die Fahrt. Die Wirkung stuende zwar ohnehin als `kb:`
+        # daneben, aber dann waere aus der Datei nicht mehr zu erkennen, dass
+        # der Stillstand gewollt und nicht gerechnet ist. Eine Titelfolie
+        # traegt ihr `motion:` in `intent.title` und kommt hier nie an.
+        felder["motion"] = intent.motion
     if intent.dur is not None:
         felder["dur"] = round(intent.dur, 6)
     elif region.type == "beat" and region.bpm:
@@ -1110,9 +1119,15 @@ def plan_from_edit(edit: EditList, manifest: Manifest | None = None) -> Plan:
                 snap_back=seg.snap_back, kb=title_kb(titel, edit.defaults),
                 title=titel))
         elif isinstance(seg, StillSegment):
+            # ``motion:`` wird auch hier aufgeloest und nicht nur in
+            # ``build_edit_list``. Sonst faehre ein von Hand geschriebenes
+            # ``motion: none`` beim Rendern trotzdem: die Datei saehe richtig
+            # aus und der Film waere es nicht — dieselbe zweite Wahrheit, die
+            # bei den Titelfolien schon einmal vermieden wurde.
             intents.append(Intent(
                 kind="still", src=seg.src, index=idx, beats=seg.beats, dur=seg.dur,
-                hold=seg.hold, snap_back=seg.snap_back, kb=seg.kb,
+                hold=seg.hold, snap_back=seg.snap_back, motion=seg.motion,
+                kb=motion_kb(seg.kb, seg.motion or edit.defaults.kb.motion),
                 portrait=seg.portrait))
         else:
             available, offset = _clip_bounds(seg, manifest)

@@ -43,6 +43,7 @@ from pathlib import Path
 
 from .cache import cache_key, param_hash
 from .errors import SlideshowError
+from .kenburns import motion_kb
 from .models import Defaults, KBSpec, TitleDefaults, TitleSegment
 
 #: Version des Layouts. Muss bei **jeder** Aenderung an Satz, Groessen oder
@@ -194,30 +195,23 @@ _HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 # --------------------------------------------------------------------------
 
 def motion_mode(seg: TitleSegment, defaults: Defaults) -> str:
-    """``kenburns`` | ``none`` — was fuer *diese* Folie gilt."""
-    return seg.motion or defaults.title.motion
+    """``kenburns`` | ``none`` — was fuer *diese* Folie gilt.
+
+    Drei Stufen: die Folie, die Vorgabe fuer Folien, die Vorgabe fuer den Film.
+    ``defaults.title.motion`` steht dazwischen, weil "Folien still, Bilder in
+    Fahrt" der haeufigere Wunsch ist als sein Gegenteil.
+    """
+    return seg.motion or defaults.title.motion or defaults.kb.motion
 
 
 def title_kb(seg: TitleSegment, defaults: Defaults) -> KBSpec | None:
     """Die Ken-Burns-Vorgabe einer Folie — oder der Stillstand.
 
-    ``motion: none`` wird hier in **gewoehnliche Absicht** uebersetzt: in genau
-    das ``kb:``, das ``docs/edit-yaml.md`` unter "Bewegung fuer ein Bild
-    abschalten" nennt. Damit muss keine Zeile in ``planner.py`` oder
-    ``render.py`` von Titeln wissen, und in ``edit.yaml`` steht sichtbar, warum
-    diese eine Folie stillsteht — derselbe Weg wie bei Phrasenlage und
-    Fokusblende.
-
-    Ein von Hand gesetztes ``kb:`` gewinnt. Wer beides schreibt, meint das
-    ``kb:``; ``motion`` ist die bequeme Schreibweise, nicht die staerkere.
+    Die Uebersetzung selbst steht in :func:`slideshow.kenburns.motion_kb` und
+    gilt fuer Standbilder genauso; hier steht nur, welche Vorgabe fuer eine
+    Folie zaehlt.
     """
-    if seg.kb is not None:
-        return seg.kb
-    if motion_mode(seg, defaults) != "none":
-        return None
-    # Frische Instanz je Aufruf: der Wert haengt sich an einen Intent und landet
-    # von dort in der Edit-List. Eine geteilte waere dieselbe fuer alle Folien.
-    return KBSpec(z=(1.0, 1.0), c=(0.5, 0.5, 0.5, 0.5))
+    return motion_kb(seg.kb, motion_mode(seg, defaults))
 
 
 # --------------------------------------------------------------------------
