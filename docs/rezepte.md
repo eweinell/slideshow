@@ -18,6 +18,7 @@ dabei herauskommt** — die Bedeutung der einzelnen Schlüssel steht in
 | Nachträglich sind Fotos dazugekommen | [6. Nachschub einpflegen](#6-nachschub-einpflegen) |
 | Kein Ton, nur Bilder | [7. Stummer Film](#7-stummer-film) |
 | Ein einzelnes Bild soll länger stehen oder stillstehen — und das bleiben | [8. Feinschliff, der bleibt](#8-feinschliff-der-bleibt) |
+| Die Kamera soll ins Motiv fahren statt daran vorbei | [8b. Die Kamera aufs Motiv richten](#8b-die-kamera-aufs-motiv-richten) |
 | Den Schnitt in Kdenlive fertig machen | [9. Weiter in Kdenlive](#9-weiter-in-kdenlive) |
 
 **Erst Reihenfolge, dann Kapitel** — wenn du beides brauchst. Der Grund steht
@@ -567,6 +568,61 @@ an Kennungen, nicht an Positionen.
 
 Die vollständige Schlüsselreferenz steht in
 [`edit-yaml.md`](edit-yaml.md#overridesyaml--der-feinschliff).
+
+---
+
+## 8b. Die Kamera aufs Motiv richten
+
+**Wofür.** Der Schnitt sitzt, aber die Kamerafahrten passen nicht zu den
+Bildern: in ein Gruppenfoto wird auf den Bildrand zugeschwenkt, ein Makro wird
+vergrößert, bis es weich wird, ein Panorama bekommt einen vertikalen Schwenk
+quer zur Bildachse. Der Grund ist einfach — bis hierher weiß das Werkzeug
+nichts über den Bildinhalt, die Richtung kommt aus einem Hash über den
+Dateinamen.
+
+```bash
+slideshow analyze                      # → vision.yaml   ← ansehen!
+slideshow build
+slideshow render --preview --range 0:12
+```
+
+**Was herauskommt.** Eine `vision.yaml` mit einem Eintrag je Bild — Szene,
+Bildachse, Zielpunkt, Schutzboxen, Detaildichte — und eine `edit.yaml`, in der
+jedes Standbild sein eigenes `kb:` trägt.
+
+**Was das kostet.** Rund 1 bis 2 Dollar für ein Projekt mit 100 gewählten
+Fotos, einmalig. Wiederholungsläufe fragen nichts mehr: solange Bild-Hash,
+Prompt-Version und Modell gleich bleiben, wird aus der Datei bedient.
+
+**Erst ansehen, dann bauen.** Genau wie bei `beats.yaml`. Der häufigste Fehler
+ist eine erfundene Schutzbox — sie deckelt den Zoom, und das Bild steht dann
+ohne erkennbaren Grund still. Vier Zahlen korrigieren, und der nächste
+`analyze`-Lauf lässt die Korrektur in Ruhe.
+
+**Worauf achten.**
+
+- **Die Fotos gehen an einen externen Dienst.** Deshalb ist es ein eigenes
+  Kommando und keine Zeile in `preprocess`; der erste Lauf fragt nach. Was
+  dabei zugesagt wird und was nicht, steht in der
+  [README](../README.md#bildanalyse-und-datenschutz).
+- **Erst auswählen, dann analysieren.** Nach `select` normalisiert
+  `preprocess` nur noch die gewählten Bilder, und `analyze` sieht genau die —
+  187 statt 1240.
+- **Ein Modell- oder Prompt-Wechsel analysiert alles neu** und ändert damit
+  jede Bewegung. Jede geänderte Bewegung ändert einen Segment-Hash, und der
+  nächste `render` baut diese Segmente neu. `analyze` warnt davor, bevor es
+  losläuft.
+- **Kürzt der Planer viele Schwenks**, ist der Hebel `defaults.kb.zoom_total`
+  und nicht die Analyse: Zoomweite und Schwenkweite sind ein gemeinsames
+  Budget. Die Zahl steht im Bericht.
+- **`--no-vision`** baut ohne die Datei weiter, ohne sie zu löschen.
+
+```bash
+slideshow analyze --count-tokens       # vorher nachmessen, was ein Bild kostet
+slideshow analyze --model claude-sonnet-5   # günstiger, für Prompt-Runden
+slideshow analyze --bedrock eu-central-1    # die Bilder bleiben in der EU
+slideshow build --variety 1            # reine Passung statt Abwechslung
+```
 
 ---
 

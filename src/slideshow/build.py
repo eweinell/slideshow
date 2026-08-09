@@ -54,7 +54,8 @@ def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
                     order: list[str] | None = None,
                     order_notes: list[str] | None = None,
                     chapters: list[Chapter] | None = None,
-                    overrides: Overrides | None = None
+                    overrides: Overrides | None = None,
+                    vision=None, variety: int | None = None
                     ) -> tuple[EditList, Plan, Coverage]:
     """Erzeugt ``edit.yaml`` aus Manifest und Regionenkarte.
 
@@ -68,6 +69,10 @@ def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
     (:mod:`slideshow.overrides`). Er wird zu gewoehnlicher Absicht am Intent —
     der Planer bekommt dadurch keine Zeile ueber diese Datei, und in
     ``edit.yaml`` steht das Ergebnis sichtbar wie jeder andere Wert.
+
+    ``vision`` ist die Bildanalyse aus ``vision.yaml``
+    (:class:`slideshow.models.VisionDoc`). Ohne sie baut alles wie bisher —
+    die Kamerafahrt kommt dann aus der Kennungs-Rotation.
     """
     defaults = defaults or Defaults()
     fps = float(fps or manifest.fps_suggestion)
@@ -179,6 +184,20 @@ def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
         # Ganz nach oben: dass Material hinten angehaengt wurde oder fehlt,
         # erklaert die Zahlen der Deckungsrechnung darunter.
         plan.warnings.insert(0, meldung)
+    if vision is not None and vision.images:
+        # Hier und nicht spaeter: ``_segments_from_plan`` ruft die Kopplung der
+        # Fokusblende auf, und die muss den Planer schon hinter sich haben
+        # (6.4). Und nicht frueher: die Bewegung ist ueber die volle sichtbare
+        # Spanne definiert, und die schliesst die halben Blenden ein — die
+        # stehen erst nach ``clamp_transitions_for_handles`` fest.
+        from .kbplan import VARIETY
+        hochkant = {m.cache_path for m in manifest.media
+                    if m.cache_path and m.kind == "image" and m.image
+                    and m.image.portrait}
+        plan.warnings.extend(apply_vision_motion(
+            plan, defaults, vision, hochkant=hochkant,
+            variety=VARIETY if variety is None else variety))
+
     cov = coverage(plan, defaults)
     cov.audio_seconds = audio_seconds
 
@@ -847,6 +866,82 @@ def _apply_cut_overrides(plan: Plan, explicit: dict[int, float], cuts: list,
 def _sichtbare_dauer(plan: Plan, i: int) -> float:
     vs, ve = visible_span(plan, i)
     return (ve - vs) / plan.fps
+
+
+def apply_vision_motion(plan: Plan, defaults: Defaults, vision, *,
+                        hochkant: set[str], variety: int) -> list[str]:
+    """Die Kamerafahrt aus den Bildfakten setzen (Briefing 6.4).
+
+    **Rangfolge, und sie muss festliegen** — sonst gewinnt die zufaellige
+    Reihenfolge im Code:
+
+    1. ein ``kb:`` von Hand (aus ``edit.yaml`` oder ``overrides.yaml``) — immer;
+    2. ``titles.title_kb`` fuer Titelfolien;
+    3. :func:`_couple_focus_motion` fuer das Folienpaar einer Fokusblende;
+    4. dieser Planer fuer alle uebrigen Standbilder.
+
+    Daraus folgt der Zeitpunkt: **vor** :func:`_couple_focus_motion`, und unter
+    Auslassung des Folgebildes einer Fokusblende. Die Kopplung schreibt ``kb:``
+    auf *beide* Slots und tut das nur, wenn dort noch nichts steht — ein Planer,
+    der stumpf jedes Standbild versieht, schaltet damit den Schaerfezug jedes
+    Kapitelanfangs ab. Der Fehler waere still: der Film rendert, er sieht nur
+    schlechter aus.
+
+    Der Bildinhalt geht dort trotzdem ein, nur nachgelagert: ``_couple_focus_motion``
+    darf die Schutzboxen des Folgebildes auswerten, weil sein Endpunkt frei
+    genug dafuer ist. Das ist eine Verbesserung und kein Muss — hier steht sie
+    nicht.
+
+    Ein Bild, das der Planer auslaesst oder fuer das die Analyse fehlt, bekommt
+    **kein** ``kb:`` und laeuft ueber den heutigen Pfad. Das ist der Ausfallpfad
+    aus Abschnitt 8, und er kostet keine Sonderbehandlung.
+    """
+    from .kbplan import bericht as kb_bericht
+    from .kbplan import plan_kb
+
+    ergebnisse = []
+    ohne_analyse = 0
+    fuer_bilder = 0
+    for i, slot in enumerate(plan.slots):
+        intent = slot.intent
+        if intent.kind != "still" or intent.title is not None:
+            # Titelfolien zaehlen **nicht** als Ausfall: ihr ``src`` ist ein
+            # erzeugtes Asset und steht in keinem Manifest. Ohne diese Zeile
+            # meldete jeder Lauf mit Kapiteln einen Ausfall, den es nicht gibt.
+            continue
+        fuer_bilder += 1
+        if intent.kb is not None:
+            continue                      # Rang 1 und 2 gewinnen
+        if i > 0 and _ist_fokusblende(plan, i - 1):
+            continue                      # Rang 3 gewinnt — der Schaerfezug
+        eintrag = vision.images.get(intent.src)
+        if eintrag is None:
+            ohne_analyse += 1
+            continue
+
+        modus = intent.portrait or defaults.portrait
+        ergebnis = plan_kb(
+            eintrag, key=intent.src, duration=_sichtbare_dauer(plan, i),
+            defaults=defaults.kb,
+            # Massgeblich ist der **wirksame** Modus am Segment, nicht die
+            # Vorgabe: ``StillSegment.portrait`` ueberschreibt sie je Bild. Bei
+            # ``crop`` ist das Komposit ein normales Vollbild, und die Regel
+            # gegen horizontale Schwenks gilt dort nicht.
+            portrait_komposit=(intent.src in hochkant and modus != "crop"),
+            variety=variety)
+        if ergebnis is None:
+            continue                      # zulaessige Rotation — nichts zu tun
+        intent.kb = ergebnis.spec
+        ergebnisse.append(ergebnis)
+
+    if not fuer_bilder:
+        return []
+    warnungen = [f"Bildanalyse: {len(ergebnisse)} von {fuer_bilder} Standbildern "
+                 f"mit eigener Kamerafahrt"
+                 + (f", {ohne_analyse} ohne Analyse auf die Rotation "
+                    f"zurueckgefallen" if ohne_analyse else "")
+                 + "."]
+    return warnungen + kb_bericht(ergebnisse)
 
 
 def _couple_focus_motion(plan: Plan, defaults: Defaults) -> None:

@@ -152,6 +152,39 @@ als `dur:` in die Edit-List zurück — explizite Sekunden gewinnen immer (6.3).
 
 ---
 
+## 6b. Fährt die Kamera ins Bild? (Bildanalyse, A11)
+
+> Fährt die Kamera in die Bilder hinein statt an ihnen vorbei?
+
+**Warum manuell:** Alles Rechenbare ist automatisiert — dass keine Schutzbox
+angeschnitten wird (A1), dass das geplante Fenster auch das sichtbare ist
+(A1b), dass sich die Bewegungen über einen Lauf verteilen (A2). Ob die Fahrt
+zum Bild *passt*, entscheidet das Auge. Es ist trotzdem das wichtigste
+Kriterium: die anderen sagen nur, dass nichts kaputt ist.
+
+**Vorgehen:**
+
+1. `slideshow analyze` und die `vision.yaml` durchsehen — falsche Boxen fallen
+   dort schneller auf als im gerenderten Film.
+2. `slideshow build && slideshow render --preview --range 0:20`
+3. Ansehen, mit diesen Fragen:
+
+- [ ] Läuft der Schwenk bei Panoramen **entlang** der Bildachse, nicht quer?
+- [ ] Bleiben Gesichter über die ganze Fahrt im Bild?
+- [ ] Steht ein Makro nahezu still, statt weich gezoomt zu werden?
+- [ ] Wirkt die Abwechslung natürlich, oder häuft sich eine Richtung? Bei
+      Monotonie ist `--variety` der Hebel, bei zu viel Beliebigkeit
+      `--variety 1`.
+- [ ] Wie viele Schwenks meldet der Bericht als gekürzt? Ist die Zahl groß,
+      ist die Antwort ein größeres `defaults.kb.zoom_total` und nicht der
+      Planer — Zoomweite und Schwenkweite sind ein gemeinsames Budget.
+
+**Gegenprobe.** `slideshow build --no-vision` baut dasselbe Projekt mit der
+alten Rotation. Wer beide Fassungen nebeneinander rendert, sieht den
+Unterschied in dreißig Sekunden — und ob er das Geld wert war.
+
+---
+
 ## 7. Nach dem ersten echten Durchlauf prüfen
 
 - [ ] Liegt Bild 63 aufrecht? (EXIF-Orientation wird im Preprocessing hart

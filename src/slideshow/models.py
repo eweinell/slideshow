@@ -1001,6 +1001,260 @@ class Overrides(BaseModel):
         return _load_yaml_model(cls, path, was="Feinschliffdatei", schluessel="media")
 
 
+# --------------------------------------------------------------------------
+# vision.yaml — was auf den Bildern zu sehen ist
+# (docs/briefing-kenburns-inhaltsabhaengig.md, Abschnitt 4)
+# --------------------------------------------------------------------------
+
+#: Szenenklassen. Bewusst klein gehalten: jede Klasse muss eine *andere*
+#: Bewegungsregel nach sich ziehen (:data:`slideshow.kbplan.REGELN`), sonst
+#: gehoert sie nicht ins Enum.
+SzeneT = Literal["landscape_wide", "portrait_person", "group", "architecture",
+                 "detail_macro", "action", "interior", "document", "other"]
+
+#: Motivarten. ``face`` und ``text`` tragen ueber die Kamerafahrt hinaus:
+#: kein Titel ueber einem Gesicht, keine angeschnittene Schrift (14.1).
+MotivT = Literal["person", "face", "text", "animal", "object"]
+
+
+def _box_geprueft(v, feld: str):
+    """Eine Box ``[x0, y0, x1, y1]`` auf Plausibilitaet pruefen.
+
+    Das JSON-Schema der strukturierten Ausgabe kann **keine** numerischen
+    Schranken ausdruecken (weder ``minimum`` noch ``maxLength``) — eine Box mit
+    ``-0.3`` ist schemakonform. Die Pruefung hier ist deshalb Pflicht und nicht
+    Vorsicht (Abschnitt 5 und 12). Sie greift an zwei Stellen zugleich: beim
+    Laden einer von Hand korrigierten Datei meldet sie Pfad und Zeile, und beim
+    Parsen einer Modellantwort faellt genau das eine Bild aus, statt den Lauf
+    mitzunehmen.
+    """
+    if v is None:
+        return v
+    x0, y0, x1, y1 = (float(x) for x in v)
+    if any(not 0.0 <= x <= 1.0 for x in (x0, y0, x1, y1)):
+        raise ValueError(f"{feld} liegt ausserhalb von [0, 1] — Koordinaten sind auf "
+                         f"das Cache-Bild normalisiert")
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError(f"{feld} ist leer oder verdreht (erwartet [x0, y0, x1, y1] "
+                         f"mit x0 < x1 und y0 < y1)")
+    return v
+
+
+class VisionSubject(BaseModel):
+    """Ein erkanntes Motiv. ``weight`` ist die Wichtigkeit im Bild, nicht die
+    Konfidenz der Erkennung — die steht je Bild in ``conf``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    box: tuple[float, float, float, float]
+    kind: MotivT = "object"
+    weight: float = 0.5
+
+    @field_validator("box")
+    @classmethod
+    def _box(cls, v):
+        return _box_geprueft(v, "subjects[].box")
+
+
+class VisionEntry(BaseModel):
+    """Die Bildfakten zu **einem** Cache-Bild.
+
+    Koordinaten sind auf das *normalisierte* Cache-Bild bezogen, nicht auf das
+    Original (Entscheidung E2). Damit gelten sie unveraendert im
+    Koordinatensystem des Ken-Burns-Filters — keine Ruecktransformation, kein
+    Versatz, und kein Weg, an dem eine Schutzbox unbemerkt verrutscht.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Inhaltshash des Cache-Bildes. Aendert er sich, ist der Eintrag veraltet
+    #: und ``analyze`` fragt neu.
+    hash: str = ""
+    #: Welche Faktenmenge dieser Eintrag traegt (14.2). ``geometry`` sind die
+    #: koordinatengebundenen Fakten vom Cache-Bild — nur die taugen fuer die
+    #: Kamerafahrt. ``labels`` waeren koordinatenfreie Etiketten von einem
+    #: Thumbnail; das Feld steht hier, damit eine spaetere Auswahlanalyse die
+    #: Datei nicht umbauen muss.
+    stage: Literal["geometry", "labels"] = "geometry"
+    scene: SzeneT = "other"
+    #: Bildachse, entlang derer ein Schwenk laeuft.
+    axis: Literal["horizontal", "vertical", "none"] = "none"
+    horizon: float | None = None
+    #: Wohin gezoomt werden darf — der Zielpunkt einer Fahrt.
+    focus: tuple[float, float] | None = None
+    subjects: list[VisionSubject] = Field(default_factory=list)
+    #: Was zu **keinem** Zeitpunkt angeschnitten werden darf.
+    protect: list[tuple[float, float, float, float]] = Field(default_factory=list)
+    #: Detaildichte 0..1 — Obergrenze fuer den Zoom (6.3, Schritt 2).
+    detail: float = 0.5
+    depth: Literal["into", "out", "flat"] = "flat"
+    #: Groesste ruhige Flaeche ohne Motiv. Traegt Text (14.1) und ist ein guter
+    #: Zielbereich, wenn ``focus`` fehlt.
+    quiet: tuple[float, float, float, float] | None = None
+    #: Unverbindlich. Der Planer nimmt ihn nur als Stichentscheid bei
+    #: gleichwertigen Kandidaten (E1).
+    suggest: str = ""
+    conf: float = 1.0
+    note: str = ""
+
+    @field_validator("subjects")
+    @classmethod
+    def _hoechstens_vier_motive(cls, v):
+        if len(v) > 8:
+            raise ValueError(f"{len(v)} Motive an einem Bild — mehr als acht sind "
+                             f"kein Bildinhalt mehr, sondern eine Halluzination")
+        return v
+
+    @field_validator("protect")
+    @classmethod
+    def _schutzboxen(cls, v):
+        # Vier ist die Grenze aus Abschnitt 12. Eine erfundene fuenfte Box
+        # klemmt den Zoom auf 1,05 und laesst das Bild stehen — der Ausfall
+        # sieht dann nach einem Fehler im Planer aus und ist keiner.
+        if len(v) > 4:
+            raise ValueError(f"{len(v)} Schutzboxen — hoechstens vier sind plausibel")
+        for box in v:
+            _box_geprueft(box, "protect[]")
+            flaeche = (box[2] - box[0]) * (box[3] - box[1])
+            # Die Flaechengrenzen gelten nur hier, nicht fuer ``quiet`` oder
+            # ``subjects``: eine Schutzbox ueber 80 % des Bildes klemmt den
+            # Zoom auf Stillstand und macht den Planer wirkungslos, waehrend
+            # eine grosse ruhige Flaeche eine gute Nachricht ist.
+            if not 0.01 <= flaeche <= 0.80:
+                raise ValueError(
+                    f"Schutzbox bedeckt {flaeche * 100:.1f} % des Bildes — "
+                    f"plausibel sind 1 % bis 80 %")
+        return v
+
+    @field_validator("focus", "quiet")
+    @classmethod
+    def _im_bild(cls, v, info):
+        if v is None:
+            return v
+        if len(v) == 4:
+            return _box_geprueft(v, info.field_name)
+        if any(not 0.0 <= float(x) <= 1.0 for x in v):
+            raise ValueError(f"{info.field_name} liegt ausserhalb von [0, 1]")
+        return v
+
+    @field_validator("detail", "conf")
+    @classmethod
+    def _einheitsintervall(cls, v, info):
+        if not 0.0 <= float(v) <= 1.0:
+            raise ValueError(f"{info.field_name} muss zwischen 0 und 1 liegen, "
+                             f"nicht {v}")
+        return v
+
+    @field_validator("horizon")
+    @classmethod
+    def _horizont(cls, v):
+        if v is not None and not 0.0 <= float(v) <= 1.0:
+            raise ValueError(f"horizon muss zwischen 0 und 1 liegen, nicht {v}")
+        return v
+
+    @property
+    def sicher(self) -> bool:
+        """Traegt die Klassifikation eine Passungsentscheidung? (E9)
+
+        Unterhalb der Schwelle wird das Bild wie ``scene: other`` behandelt —
+        die Schutzboxen gelten trotzdem weiter. Eine unsichere Klassifikation
+        ist ein schwaches Signal fuer die Passung und immer noch besser als
+        nichts fuer den Schutz.
+        """
+        return self.conf >= CONF_MIN
+
+
+#: Unterhalb dieser Konfidenz zaehlt nur noch der Schutz, nicht mehr die
+#: Passung (Entscheidung E9).
+CONF_MIN = 0.5
+
+
+class VisionDoc(BaseModel):
+    """``vision.yaml`` — die Faktenbasis.
+
+    Eigene Datei und nicht ein Zweig im Manifest (E3): sie entsteht in einem
+    eigenen Kommando, zu einem eigenen Zeitpunkt, und ist wie ``beats.yaml``
+    zur **Sichtpruefung** gedacht. Wer eine falsche Box sieht, korrigiert sie;
+    ein erneutes ``analyze`` ueberschreibt sie nicht, solange Bild-Hash,
+    Prompt-Version und Modell gleich bleiben.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = 1
+    #: Welches Modell die Eintraege erzeugt hat. Geht in den Analyse-Cache-Key
+    #: ein: ein Modellwechsel ist eine bewusste Entscheidung mit Renderkosten.
+    model: str = ""
+    #: Prompt-Version, ebenfalls im Cache-Key. Ein bewusst gepflegtes Feld —
+    #: wer den Prompt aendert, zaehlt sie hoch, sonst bleiben alte Antworten
+    #: fuer neue Fragen stehen.
+    prompt: int = 0
+    images: dict[str, VisionEntry] = Field(default_factory=dict)
+
+    @field_validator("version")
+    @classmethod
+    def _check_version(cls, v: int) -> int:
+        if v != 1:
+            raise ValueError(f"vision.yaml hat Version {v}, unterstuetzt wird 1")
+        return v
+
+    @classmethod
+    def load(cls, path: Path) -> "VisionDoc":
+        return _load_yaml_model(cls, path, was="Bildanalyse", schluessel="images")
+
+
+def dump_vision_yaml(doc: VisionDoc) -> str:
+    """``vision.yaml`` schreiben — eine Zeile je Objekt, wie ``beats.yaml``.
+
+    Das Format ist zum Ansehen und Korrigieren da, nicht zum Wiedereinlesen
+    allein. Boxen und Punkte stehen deshalb als Flow-Mappings in einer Zeile:
+    eine Schutzbox ueber fuenf Zeilen laesst sich mit dem Bild daneben nicht
+    vergleichen.
+    """
+    def rund(werte) -> tuple:
+        # Tupel, nicht Liste: der Dumper gibt Tupel als Flow aus, und eine
+        # Schutzbox ueber fuenf Zeilen laesst sich mit dem Bild daneben nicht
+        # vergleichen.
+        return tuple(round(float(v), 4) for v in werte)
+
+    kopf = {"version": doc.version, "model": doc.model, "prompt": doc.prompt}
+    text = yaml.dump(kopf, Dumper=_Dumper, sort_keys=False, allow_unicode=True)
+    text += "images:\n"
+
+    for pfad, e in doc.images.items():
+        eintrag: dict[str, Any] = {"hash": e.hash}
+        if e.stage != "geometry":
+            eintrag["stage"] = e.stage
+        eintrag["scene"] = e.scene
+        if e.axis != "none":
+            eintrag["axis"] = e.axis
+        if e.horizon is not None:
+            eintrag["horizon"] = round(e.horizon, 4)
+        if e.focus is not None:
+            eintrag["focus"] = rund(e.focus)
+        if e.subjects:
+            eintrag["subjects"] = [_Flow({"box": list(rund(s.box)), "kind": s.kind,
+                                          "weight": round(s.weight, 2)})
+                                   for s in e.subjects]
+        if e.protect:
+            eintrag["protect"] = [rund(b) for b in e.protect]
+        eintrag["detail"] = round(e.detail, 3)
+        if e.depth != "flat":
+            eintrag["depth"] = e.depth
+        if e.quiet is not None:
+            eintrag["quiet"] = rund(e.quiet)
+        if e.suggest:
+            eintrag["suggest"] = e.suggest
+        eintrag["conf"] = round(e.conf, 3)
+        if e.note:
+            eintrag["note"] = e.note
+
+        gerendert = yaml.dump({pfad: eintrag}, Dumper=_Dumper, sort_keys=False,
+                              allow_unicode=True, width=10_000)
+        text += "".join(f"  {zeile}\n" for zeile in gerendert.rstrip("\n").split("\n"))
+    return text
+
+
 def tief_verschmelzen(basis: dict, oben: dict) -> dict:
     """``oben`` ueber ``basis`` legen, Mappings rekursiv statt als Ganzes.
 

@@ -12,6 +12,7 @@ slideshow beats                               # → beats.yaml  ← ansehen!
 slideshow order                               # → order.yaml  ← optional, zum Sortieren
 slideshow select                              # → order.yaml  ← statt dessen, bei sehr viel Material
 slideshow sheet                               # → contact.html ← die Auswahl ansehen
+slideshow analyze                             # → vision.yaml ← optional, Kamera aufs Motiv
 slideshow build                               # → edit.yaml
 slideshow render edit.yaml -o out/master.mp4
 ```
@@ -118,6 +119,7 @@ beats.yaml      Regionenkarte der Tonspur (beats) — vor dem Bauen ansehen
 chapters.yaml   Kapitel der Reise, Eingabe für build — optional
 order.yaml      Reihenfolge der Medien, Eingabe für build — optional
 overrides.yaml  Feinschliff je Medium, Eingabe für build — optional
+vision.yaml     was auf den Bildern ist (analyze) — optional, vor dem Bauen ansehen
 edit.yaml       die Edit-List (build)
 cache/          normalisierte Bilder, Clip-Intermediates, Segment-Cache
 out/            master.mp4, timeline.json, project.kdenlive
@@ -146,7 +148,42 @@ durch, statt mit einem Traceback abzustürzen.
 Benötigt: ffmpeg ≥ 6.0, Python ≥ 3.11. Optional: exiftool (EXIF/ICC — ohne das
 können Hochformat-Fotos quer liegen), ImageMagick, `melt` für den MLT-Pfad,
 `librosa` für etwas bessere Onset-Erkennung (es gibt einen gleichwertigen
-numpy-Fallback für perkussisches Material).
+numpy-Fallback für perkussisches Material), `anthropic` für `slideshow analyze`
+(`pip install -e '.[vision]'`) — ohne das laufen `build` und `render`
+unverändert, nur eben mit der bisherigen Kamerafahrt.
+
+## Bildanalyse und Datenschutz
+
+`slideshow analyze` schickt die vorverarbeiteten Bilder an die Claude-API und
+fragt, **was darauf zu sehen ist**: Szene, Bildachse, Zielpunkt, was nicht
+angeschnitten werden darf. Aus diesen Fakten rechnet `build` die Kamerafahrt —
+gefragt wird nie nach der Bewegung selbst, denn eine gelieferte Bounding-Box
+lässt sich mit einem Blick aufs Bild prüfen und eine gelieferte Fahrt nicht.
+Das Format steht in [`docs/edit-yaml.md`](docs/edit-yaml.md#visionyaml--was-auf-den-bildern-ist),
+der Ablauf in [Rezept 8b](docs/rezepte.md#8b-die-kamera-aufs-motiv-richten).
+
+**Das sind private Fotos mit erkennbaren Personen.** Deshalb ist es ein eigenes,
+ausdrücklich aufzurufendes Kommando und kein stiller Schritt in `preprocess`;
+der erste Lauf in einem Projekt fragt nach. Was zugesagt wird (Stand 08/2026):
+
+| Punkt | Zusage |
+|---|---|
+| Training | Aufbewahrte Daten werden ohne ausdrückliche Erlaubnis nicht zum Training verwendet. Gilt für die API, **nicht** für die Consumer-Produkte. |
+| Aufbewahrung | Regelfall: Inhalte werden nicht dauerhaft vorgehalten und innerhalb von 30 Tagen gelöscht. |
+| **Auffälligkeiten** | **Unabhängig von jeder Vereinbarung** können von den automatischen Trust-&-Safety-Systemen markierte Inhalte bis zu **zwei Jahre** aufbewahrt werden. Das ist der Punkt, den man nicht erwartet. |
+| Zero Data Retention | Vertraglich über den Vertrieb — für ein privates Projekt praktisch nicht erreichbar. |
+
+Drei technische Festlegungen folgen daraus: Bilder gehen als base64 im
+Messages-Request und **nie** über die Files-API (die hält Dateien bis zur
+ausdrücklichen Löschung); die Batch-API ist nicht die Vorgabe, weil sie die
+Aufträge 29 Tage speichert (`--batch` wählt sie bewusst); und das JSON-Schema
+enthält keine Bilddaten.
+
+Wer die Fotos nicht aus der EU herauslassen will, nimmt `--bedrock
+eu-central-1`: dieselbe API, 10 % Aufpreis, Inferenz auf AWS-verwalteter
+Infrastruktur ohne Zugriff von Anthropic-Personal. Dann gelten allerdings die
+AWS-Bedingungen und nicht die Tabelle oben — sie sind eigenständig zu lesen.
+Policies ändern sich; vor einem großen Lauf neu prüfen.
 
 Werkzeuge werden nicht nur im `PATH` gesucht. `melt` etwa wird praktisch nie
 einzeln installiert, sondern kommt mit Kdenlive oder Shotcut mit — und beide
