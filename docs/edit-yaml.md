@@ -603,6 +603,112 @@ Anteil plus die angrenzenden Übergangshälften. Das xfade-Segment wertet
 dieselben Ausdrücke beider Nachbarn mit passendem Frame-Offset aus, damit die
 Bewegung durch die Blende hindurch weiterläuft.
 
+### Woher `kb:` kommt
+
+Vier Stellen schreiben eine Kamerafahrt. Ihre Rangfolge liegt fest — sonst
+gewönne die zufällige Reihenfolge im Code, und der häufigste Schaden wäre eine
+still abgeschaltete Fokusblende:
+
+| Rang | Quelle | Gilt für |
+|---|---|---|
+| 1 | **`kb:` von Hand** in `edit.yaml` oder `overrides.yaml` (auch `motion: none`) | immer |
+| 2 | **Titelfolien** — `defaults.title.motion` bzw. `motion:` an der Folie | Folien |
+| 3 | **Die Fokusblende** — die gekoppelte Fahrt aus Folie und Folgebild | das Folienpaar |
+| 4 | **Der Vision-Planer** aus [`vision.yaml`](#visionyaml--was-auf-den-bildern-ist) | alle übrigen Standbilder |
+| — | *keine davon* | dann die Rotation aus der Bildkennung |
+
+Der Planer läuft **vor** der Fokusblende und lässt deren Folgebild in Ruhe. Ein
+`kb:` an dieser Stelle schaltet den Schärfezug ab, mit dem sich eine Titelfolie
+in das Foto auflöst — der Film rendert dann trotzdem, er sieht nur schlechter
+aus. Wer dort selbst eingreift, bekommt eine Meldung.
+
+---
+
+## `vision.yaml` — was auf den Bildern ist
+
+Ohne diese Datei hängt die Kamerafahrt allein an der Bildkennung: Zoomrichtung
+aus einem Bit des Hashes, Schwenkrichtung aus den nächsten dreien. Das Bild
+selbst geht nicht ein, und darum wird in ein Gruppenfoto schon mal auf den
+Bildrand zugeschwenkt.
+
+`slideshow analyze` fragt die Claude-API, **was auf dem Bild zu sehen ist** —
+nicht, wie sich die Kamera bewegen soll. Aus den Fakten rechnet `build` die
+Fahrt (`slideshow/kbplan.py`). Der Unterschied ist der ganze Entwurf: eine
+gelieferte Bewegung wäre nicht prüfbar, eine gelieferte Bounding-Box ist es.
+
+```yaml
+version: 1
+model: claude-opus-5
+prompt: 1
+images:
+  cache/img_0042.jpg:
+    hash: 9e2b7d4055f31c8a          # blake2b des Cache-Bildes
+    scene: landscape_wide           # steuert die Bewegungsregel
+    axis: horizontal                # Achse, entlang derer geschwenkt wird
+    horizon: 0.61
+    focus: [0.38, 0.47]             # wohin gefahren werden darf
+    subjects:
+      - {box: [0.3, 0.34, 0.46, 0.72], kind: person, weight: 0.9}
+    protect:                        # darf zu keinem Zeitpunkt angeschnitten werden
+      - [0.3, 0.3, 0.48, 0.74]
+    detail: 0.35                    # Detaildichte → Obergrenze für den Zoom
+    depth: into
+    quiet: [0.05, 0.62, 0.55, 0.95] # ruhige Fläche
+    suggest: pan_right              # unverbindlich
+    conf: 0.88
+    note: Fjord im Weitwinkel, Wanderer links im Vordergrund
+```
+
+**Alle Koordinaten sind auf das Cache-Bild normalisiert**, nicht auf das
+Original. Nur so gelten sie unverändert im Koordinatensystem des
+Ken-Burns-Filters — sonst müsste jede Box durch Beschnitt und
+Hochformat-Komposit zurückgerechnet werden, und ein Fehler dort verschöbe genau
+die Boxen, die schützen sollen.
+
+| Schlüssel | Bedeutung |
+|---|---|
+| `hash` | Inhaltshash des Cache-Bildes. Ändert er sich, fragt `analyze` neu. |
+| `stage` | `geometry` (Vorgabe) — Fakten mit Koordinaten vom Cache-Bild. `labels` ist für eine spätere, koordinatenfreie Auswahlanalyse reserviert. |
+| `scene` | `landscape_wide` · `portrait_person` · `group` · `architecture` · `detail_macro` · `action` · `interior` · `document` · `other` |
+| `axis` | `horizontal` · `vertical` · `none` |
+| `focus` | Zielpunkt einer Fahrt, `[x, y]`. |
+| `protect` | Höchstens vier Boxen, jede zwischen 1 % und 80 % der Fläche. Jede Box **deckelt den Zoom**. |
+| `detail` | 0..1. Ein glatter Himmel verträgt Zoom, ein Makro nicht. |
+| `conf` | Unter 0.5 gilt das Bild wie `scene: other` — die Schutzboxen bleiben trotzdem gültig. |
+
+### Die Datei ist zum Ansehen da
+
+Wie `beats.yaml`: eine Zeile je Objekt, von Hand korrigierbar. Wer eine falsche
+Schutzbox sieht, ändert vier Zahlen; ein erneutes `analyze` überschreibt sie
+nicht, solange Bild-Hash, Prompt-Version und Modell gleich bleiben. Eine
+erfundene Box ist auch der wahrscheinlichste Fehler — sie klemmt den Zoom auf
+1,05, und das Bild steht dann ohne erkennbaren Grund still.
+
+### Was die Geometrie nicht hergibt
+
+Zoomweite und Schwenkweite sind **ein Budget, kein Parameterpaar**. Der Filter
+klemmt das sichtbare Fenster an den Bildrand; unbeschnitten bleibt eine
+Bildmitte nur, solange
+
+```
+|c − 0,5| ≤ 0,5 − 1/(2·z)
+```
+
+gilt. Umgekehrt: eine Auslenkung von 0,12 verlangt `z ≥ 1,316`, und
+`zoom_total` gibt mit den Vorgaben 1,30 her. Der Planer kürzt deshalb
+regelmäßig und **meldet es**. Steht im Bericht eine große Zahl, ist der Hebel
+`defaults.kb.zoom_total` und nicht der Planer.
+
+### Ohne die Datei
+
+`build` läuft in jedem Fall durch. Fehlt sie, fehlt ein Eintrag, oder ist eine
+Analyse ausgefallen, bekommt das betroffene Bild kein `kb:` und läuft über die
+heutige Rotation. `--no-vision` schaltet sie ab, auch wenn sie daliegt.
+
+> **Ein Analyselauf schickt private Fotos an einen externen Dienst.** Das ist
+> kein stiller Schritt: `analyze` ist ein eigenes Kommando und fragt vor dem
+> ersten Senden nach. Siehe [README](../README.md#bildanalyse-und-datenschutz).
+
 ---
 
 ## `chapters.yaml` — woher die Titelfolien kommen
@@ -1212,5 +1318,6 @@ die angrenzenden Blenden werden neu berechnet.
 | `chapters.yaml` | Kapitel der Reise, Eingabe für `build --chapters`. Überlebt das Neubauen der Edit-List. |
 | `order.yaml` | [Reihenfolge der Medien](#orderyaml--die-reihenfolge-von-hand), Eingabe für `build --order`. Überlebt das Neubauen der Edit-List. |
 | `overrides.yaml` | [Der Feinschliff](#overridesyaml--der-feinschliff) je Medium, Eingabe für `build --overrides`. Überlebt das Neubauen der Edit-List. |
+| `vision.yaml` | [Was auf den Bildern ist](#visionyaml--was-auf-den-bildern-ist) (`analyze`) — Bildfakten, aus denen `build` die Kamerafahrt rechnet. Vor dem Bauen ansehen. |
 | `edit.yaml` | **Diese Datei** (`build`). |
 | `out/timeline.json` | Die *aufgelöste* Timeline mit absoluten Framenummern. Erzeugnis, kein Eingabeformat — zum Nachrechnen, nicht zum Editieren. |

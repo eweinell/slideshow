@@ -15,9 +15,12 @@ from .paths import Project, is_wsl
 from .proc import DryRun
 # Nur Konstanten — die Vorgaben stehen dort, wo sie wirken, und nicht ein
 # zweites Mal in den `--help`-Texten.
+from .kbplan import VARIETY
 from .select import (BURST_GAP, BY_CHOICES, DAY_ALPHA, MAX_PORTRAIT, MAX_SHARE,
                      MIN_LONG_EDGE, MIN_PER_DAY)
 from .sheet import THUMB_SIZE
+from .vision import DEFAULT_MODEL as VISION_MODEL
+from .vision import VISION_NAME
 
 log = logging.getLogger("slideshow.cli")
 
@@ -39,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
                "  slideshow beats cache/mix.flac        # Regionenkarte pruefen!\n"
                "  slideshow order                       # optional: Reihenfolge sortieren\n"
                "  slideshow chapters                    # optional: Titelfolien\n"
+               "  slideshow analyze                     # optional: Kamera aufs Motiv\n"
                "  slideshow build\n"
                "  slideshow render edit.yaml -o out/master.mp4\n"
                "  slideshow overrides                   # Handarbeit in edit.yaml sichern\n")
@@ -111,6 +115,43 @@ def build_parser() -> argparse.ArgumentParser:
     bu.add_argument("--kb-engine", choices=("zoompan", "scale16"), default=None)
     bu.add_argument("--fade-out", type=float, default=None, metavar="S",
                     help="Ausblende am Filmende in Sekunden (0 = keine)")
+    bu.add_argument("--vision", default=None, metavar="vision.yaml",
+                    help="Bildanalyse fuer die Kamerafahrt (Default: vision.yaml "
+                         "im Projekt, falls vorhanden)")
+    bu.add_argument("--no-vision", action="store_true",
+                    help="ohne Bildanalyse bauen — die Kamerafahrt kommt dann "
+                         "wie bisher aus der Kennung des Bildes")
+    bu.add_argument("--variety", type=int, default=None, metavar="N",
+                    help=f"wie viele der bestpassenden Bewegungen zur Auswahl "
+                         f"stehen (Default {VARIETY}; 1 = reine Passung)")
+
+    an = sub.add_parser(
+        "analyze", help="Bildinhalte analysieren -> vision.yaml",
+        description="Fragt die Claude-API, WAS auf den Bildern zu sehen ist — "
+                    "nicht, wie sich die Kamera bewegen soll. Aus den Fakten "
+                    "rechnet `build` die Fahrt. Schickt private Fotos an einen "
+                    "externen Dienst; der erste Lauf fragt nach.")
+    an.add_argument("-o", "--output", default=None, metavar="vision.yaml")
+    an.add_argument("--manifest", default=None)
+    an.add_argument("--model", default=None,
+                    help=f"Default {VISION_MODEL}. Steht in vision.yaml und geht "
+                         f"in den Analyse-Cache ein — ein Wechsel analysiert alles "
+                         f"neu und rendert damit alles neu")
+    an.add_argument("--jobs", type=int, default=None,
+                    help="parallele Anfragen (Default 8)")
+    an.add_argument("--bedrock", nargs="?", const="eu-central-1", default=None,
+                    metavar="REGION",
+                    help="ueber Amazon Bedrock statt die Erstanbieter-API; ohne "
+                         "Angabe eu-central-1. Die Bilder verlassen die Region "
+                         "nicht, kosten dafuer 10 %% Aufpreis")
+    an.add_argument("--batch", action="store_true",
+                    help="ueber die Message-Batches-API — halber Preis, aber die "
+                         "Auftraege liegen dort 29 Tage")
+    an.add_argument("--count-tokens", action="store_true",
+                    help="nur nachmessen, was ein Bild wirklich kostet, und "
+                         "nichts analysieren")
+    an.add_argument("-y", "--yes", action="store_true",
+                    help="die Datenschutz-Rueckfrage ueberspringen (fuer Skripte)")
     ch = sub.add_parser("chapters", help="Kapitelgrenzen vorschlagen -> chapters.yaml")
     ch.add_argument("-o", "--output", default=None, metavar="chapters.yaml")
     ch.add_argument("--manifest", default=None)
@@ -740,12 +781,41 @@ def _edit_bauen(project: Project, args, manifest, *, overrides=None):
     # Dateien vor sich hat.
     chapters = anchor_chapters(chapters, olist, order)
 
+    vision = _load_vision(project, opt("vision"), abgeschaltet=bool(opt("no_vision")))
+
     size = _parse_size(args.size) if opt("size") else (3840, 2160)
     edit, plan, cov = build_edit_list(project, manifest, beatmap, defaults=defaults,
                                       fps=opt("fps"), size=size, chapters=chapters,
                                       order=order, order_notes=order_notes,
-                                      overrides=overrides)
+                                      overrides=overrides, vision=vision,
+                                      variety=opt("variety"))
     return (edit, plan, cov, defaults)
+
+
+def _load_vision(project: Project, angabe: str | None, *, abgeschaltet: bool):
+    """Bildanalyse laden — dieselbe Regel wie bei den anderen Eingabedateien.
+
+    Ein *ausdruecklich* genannter Pfad, den es nicht gibt, ist ein Fehler; die
+    stillschweigend gefundene ``vision.yaml`` ist eine Bequemlichkeit und darf
+    fehlen. ``--no-vision`` schaltet sie ab, auch wenn sie daliegt.
+    """
+    from .models import VisionDoc
+
+    if abgeschaltet:
+        return None
+    if angabe:
+        pfad = Path(angabe)
+        if not pfad.exists():
+            raise SlideshowError(f"Bildanalyse fehlt: {pfad}")
+    else:
+        pfad = project.root / VISION_NAME
+        if not pfad.exists():
+            return None
+
+    doc = VisionDoc.load(pfad)
+    console().print(f"Bildanalyse: {pfad}  ({len(doc.images)} Bilder, "
+                    f"{doc.model or 'ohne Modellangabe'})")
+    return doc
 
 
 def _load_overrides(project: Project, angabe: str | None):
@@ -841,6 +911,168 @@ def _pruefe_handarbeit(out: Path, *, force: bool) -> None:
         f"  `--force` schreibt trotzdem.\n"
         f"  (Auch eine Edit-List aus einer aelteren Fassung gilt als Handarbeit — "
         f"sie traegt die Pruefsumme im Kopf noch nicht.)")
+
+
+def cmd_analyze(args, project: Project) -> int:
+    from . import vision as v
+    from .models import Manifest
+
+    con = console()
+    manifest = Manifest.load(Path(args.manifest) if args.manifest else project.manifest)
+    modell = args.model or v.DEFAULT_MODEL
+    bedrock = args.bedrock
+
+    # Analysiert wird, was auch im Film landet: ``preprocess`` normalisiert seit
+    # der Auswahl nur noch die gewaehlten Medien, und das ist hier ein Geschenk
+    # — es werden 187 Bilder analysiert und nicht 1240.
+    pfade: dict[str, Path] = {}
+    fehlend: list[str] = []
+    for m in manifest.media:
+        if m.kind != "image" or not m.cache_path:
+            continue
+        datei = project.abs(m.cache_path)
+        if datei.exists():
+            pfade[m.cache_path] = datei
+        else:
+            fehlend.append(m.cache_path)
+    if not pfade:
+        raise SlideshowError(
+            "Keine vorverarbeiteten Bilder gefunden. `slideshow preprocess` "
+            "zuerst laufen lassen — analysiert wird das normalisierte "
+            "Cache-Bild, damit die Koordinaten ohne Umrechnung fuer die "
+            "Kamerafahrt gelten.")
+    if fehlend:
+        con.print(f"[yellow]{len(fehlend)} Cache-Bilder aus dem Manifest fehlen "
+                  f"auf der Platte und werden uebersprungen.[/yellow]")
+
+    out = Path(args.output) if args.output else (project.root / v.VISION_NAME)
+    alt = v.laden(out) or v.VisionDoc()
+    offen, behalten = v.offene_bilder(pfade, alt, modell=modell,
+                                      prompt=v.PROMPT_VERSION)
+
+    if args.count_tokens:
+        n, je = v.tokens_zaehlen(pfade, modell=modell)
+        con.print(f"{n} Bilder nachgemessen: [bold]{je} Eingabetokens je "
+                  f"Anfrage[/bold] (Annahme in der Rechnung: "
+                  f"{v.TOKENS_BILD + v.TOKENS_TEXT + v.TOKENS_PRAEFIX}).")
+        return 0
+
+    con.print(f"Bilder: {len(pfade)}  |  aus {out.name} uebernommen: "
+              f"{len(behalten)}  |  zu analysieren: [bold]{len(offen)}[/bold]")
+    if not offen:
+        # A4: ein zweiter Lauf ohne geaenderte Bilder macht null Requests.
+        con.print("Nichts zu tun — Bild-Hash, Prompt-Version und Modell sind "
+                  "unveraendert. Von Hand korrigierte Boxen bleiben stehen.")
+        return 0
+
+    if behalten and len(offen) > len(behalten):
+        # Abschnitt 8: eine Neuanalyse aller Bilder invalidiert den kompletten
+        # Renderlauf. Das gehoert **vor** den Lauf und nicht in die Nachschau.
+        con.print(f"[yellow]Das ist mehr als eine Ergaenzung: {len(offen)} Bilder "
+                  f"werden neu analysiert. Jede geaenderte Bewegung aendert den "
+                  f"Segment-Hash — der naechste `render` baut diese Segmente und "
+                  f"ihre Nachbarblenden neu.[/yellow]")
+
+    schaetzung = v.kosten_schaetzung(len(offen), modell,
+                                     bedrock_regional=bool(bedrock))
+    if not _datenschutz_bestaetigt(con, modell=modell, anzahl=len(offen),
+                                   bedrock=bedrock, schaetzung=schaetzung,
+                                   ja=args.yes or args.dry_run):
+        con.print("Abgebrochen — nichts gesendet, nichts geschrieben.")
+        return 0
+    if args.dry_run:
+        con.print(f"[dim]--dry-run: {len(offen)} Anfragen an {modell} "
+                  f"unterblieben.[/dim]")
+        return 0
+
+    def fortschritt(fertig: int, gesamt: int, rel: str) -> None:
+        con.print(f"  [{fertig:>4}/{gesamt}] {Path(rel).name}")
+
+    if args.batch:
+        con.print("[yellow]Batch-API: halber Preis, aber die Auftraege liegen "
+                  "dort 29 Tage und sind nicht ZDR-faehig.[/yellow]")
+        doc, bericht = v.analysiere_batch(pfade, vorhanden=alt, modell=modell,
+                                          warten=lambda sid: _batch_warten(con, sid))
+    else:
+        doc, bericht = v.analysiere(pfade, vorhanden=alt, modell=modell,
+                                    bedrock_region=bedrock,
+                                    jobs=args.jobs or 8, fortschritt=fortschritt)
+
+    v.speichern(doc, out)
+    for w in bericht.warnungen[:12]:
+        con.print(f"  [yellow]{w}[/yellow]")
+    if len(bericht.warnungen) > 12:
+        con.print(f"  [dim](+{len(bericht.warnungen) - 12} weitere im Log)[/dim]")
+        for w in bericht.warnungen[12:]:
+            log.warning("analyze: %s", w)
+
+    ist = bericht.verbrauch.kosten(modell, bedrock_regional=bool(bedrock))
+    con.print(f"\nBildanalyse: {out}  ({len(doc.images)} Bilder, "
+              f"{bericht.uebernommen} neu"
+              + (f", {bericht.ausgefallen} ausgefallen" if bericht.ausgefallen else "")
+              + ")")
+    if bericht.gefragt:
+        vb = bericht.verbrauch
+        con.print(f"Verbrauch: {vb.requests} Anfragen, {vb.eingabe} Eingabe- / "
+                  f"{vb.ausgabe} Ausgabetokens, {vb.cache_gelesen} aus dem "
+                  f"Prompt-Cache"
+                  + (f"  |  [bold]{ist:.2f} USD[/bold]" if ist is not None else
+                     "  |  Kosten unbekannt (Preis dieses Modells nicht hinterlegt)"))
+    if bericht.ausgefallen:
+        con.print("[dim]Ausgefallene Bilder bekommen kein `kb:` und laufen ueber "
+                  "die heutige Rotation — `build` laeuft in jedem Fall durch.[/dim]")
+    con.print("[dim]Die Datei ist zur Sichtpruefung da: eine falsche Schutzbox "
+              "klemmt den Zoom, und man sieht sie im Bild sofort.[/dim]")
+    return 0
+
+
+def _datenschutz_bestaetigt(con, *, modell: str, anzahl: int, bedrock: str | None,
+                            schaetzung: float | None, ja: bool) -> bool:
+    """Die einmalige Rueckfrage vor dem ersten Senden (Entscheidung E6).
+
+    Kein stiller Schritt in einer anderen Phase: dass private Urlaubsfotos mit
+    erkennbaren Personen an einen externen Dienst gehen, muss dastehen, bevor
+    es passiert. Und es muss die **richtige** Tabelle sein — auf Bedrock gelten
+    andere Zusagen als bei Anthropic, im Guten wie im Ungewissen.
+    """
+    ziel = f"Amazon Bedrock ({bedrock})" if bedrock else "die Claude-API"
+    con.print(f"\n[bold]{anzahl} Bilder gehen an {ziel}[/bold], Modell {modell}"
+              + (f", geschaetzt {schaetzung:.2f} USD." if schaetzung is not None
+                 else "."))
+    for zeile in (v_datenschutz(bedrock)):
+        con.print(f"  • {zeile}")
+    if ja:
+        return True
+    try:
+        antwort = input("Fortfahren? [j/N] ").strip().lower()
+    except EOFError:
+        # Ohne Terminal ist "keine Antwort" ein Nein. Alles andere hiesse,
+        # dass ein Cronjob die Fotos verschickt, weil niemand widersprochen hat.
+        return False
+    return antwort in ("j", "ja", "y", "yes")
+
+
+def v_datenschutz(bedrock: str | None) -> list[str]:
+    from .vision import DATENSCHUTZ, DATENSCHUTZ_BEDROCK
+    return DATENSCHUTZ_BEDROCK if bedrock else DATENSCHUTZ
+
+
+def _batch_warten(con, batch_id: str) -> None:
+    """Auf das Ende eines Stapels warten. Die meisten sind binnen einer Stunde
+    durch; das Maximum sind 24."""
+    import time
+
+    from .vision import client_bauen
+
+    client = client_bauen()
+    con.print(f"Stapel {batch_id} laeuft — die meisten sind binnen einer Stunde "
+              f"durch.")
+    while True:
+        stand = client.messages.batches.retrieve(batch_id)
+        if stand.processing_status == "ended":
+            return
+        con.print(f"  [dim]{stand.processing_status} …[/dim]")
+        time.sleep(60)
 
 
 def cmd_overrides(args, project: Project) -> int:
@@ -1569,7 +1801,7 @@ _COMMANDS = {
     "doctor": cmd_doctor, "probe": cmd_probe, "audio": cmd_audio,
     "preprocess": cmd_preprocess, "beats": cmd_beats, "chapters": cmd_chapters,
     "order": cmd_order, "select": cmd_select, "sheet": cmd_sheet,
-    "build": cmd_build, "overrides": cmd_overrides,
+    "analyze": cmd_analyze, "build": cmd_build, "overrides": cmd_overrides,
     "render": cmd_render, "export-mlt": cmd_export_mlt, "selftest": cmd_selftest,
 }
 
@@ -1682,6 +1914,14 @@ def _naechster_schritt(project: Project, args) -> list[str]:
         if not (project.root / "chapters.yaml").exists():
             schritte.append(f"[dim]oder vorher Kapitel vorschlagen lassen: "
                             f"{ruf} chapters[/dim]")
+        # Die Bildanalyse steht bewusst als *Hinweis* und nicht als naechster
+        # Schritt: sie schickt private Fotos an einen externen Dienst und
+        # kostet Geld. So etwas gehoert nicht in eine Zeile, die man
+        # gedankenlos kopiert.
+        if not (project.root / VISION_NAME).exists():
+            schritte.append(f"[dim]oder die Kamera aufs Motiv richten lassen: "
+                            f"{ruf} analyze  (fragt die Claude-API, was auf den "
+                            f"Bildern ist)[/dim]")
         return schritte
 
     if not (project.out / "master.mp4").exists():

@@ -23,6 +23,9 @@ dependencies = [
 # den Resolver stattdessen dazu, numpy passend zu waehlen (numba braucht <2.5).
 librosa = ["librosa>=0.11", "numba>=0.62"]
 aubio = ["aubio"]
+# Nur fuer `slideshow analyze`. Bewusst optional: `build` und `render` laufen
+# ohne das SDK, und die Testsuite laeuft ohne Netzzugriff (Abnahmekriterium A5).
+vision = ["anthropic>=0.60"]
 dev = ["pytest"]
 
 [project.scripts]
