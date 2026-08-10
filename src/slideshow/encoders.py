@@ -86,9 +86,43 @@ class EncoderChoice:
     h264_nvenc: bool = False
     av1_nvenc: bool = False
     nvenc_10bit: bool = False
+    #: ``-multipass`` und ``-temporal-aq`` gibt es erst ab Turing (RTX 20xx).
+    #: Auf aelteren Karten bricht der Encode ab, statt sie zu ignorieren —
+    #: deshalb ein Praxistest in ``doctor``, kein Modellnamen-Vergleich.
+    nvenc_advanced_rc: bool = False
     libx265: bool = False
     libx264: bool = False
     notes: list[str] = field(default_factory=list)
+
+
+def _nvenc_rc(choice: EncoderChoice, *, cq: str, maxrate: str,
+              bufsize: str) -> tuple[str, ...]:
+    """Ratensteuerung fuer die NVENC-Profile.
+
+    Vorher stand hier ``-rc constqp -qp 16``. Das gab jedem Frame denselben
+    Quantisierer — der ruhige Himmel bekam so viele Bits wie der Schwenk durchs
+    Laub —, und QP 16 liegt bei HEVC weit jenseits der Transparenzschwelle. Bei
+    4K60 kam der Master so auf ~100 Mbit/s, ohne dass man den Unterschied zu
+    ``cq 24`` sieht. ``vbr`` mit ``-cq`` haelt dieselbe *Qualitaetsvorgabe*,
+    verteilt die Bits aber dorthin, wo sie zaehlen.
+
+    ``-b:v 0`` ist dabei zwingend: eine stehengebliebene Bitratenvorgabe
+    schaltet ``-cq`` still ab, und die Ausgabe faellt auf die Zielbitrate
+    zurueck.
+
+    Die *Bildstruktur* bleibt bewusst unberuehrt (kein ``-bf``, kein
+    ``-b_ref_mode``): die Segmente werden mit ``-c copy`` aneinandergehaengt,
+    und B-Frames sind genau das, was an einer Segmentgrenze Umsortierung und
+    Zeitstempel durcheinanderbringen kann. Alles hier Gesetzte wirkt nur auf
+    die Quantisierung.
+    """
+    args = ["-preset", "p7", "-tune", "hq",
+            "-rc", "vbr", "-cq", cq, "-b:v", "0",
+            "-maxrate", maxrate, "-bufsize", bufsize,
+            "-rc-lookahead", "32", "-spatial-aq", "1", "-aq-strength", "8"]
+    if choice.nvenc_advanced_rc:
+        args += ["-multipass", "fullres", "-temporal-aq", "1"]
+    return tuple(args)
 
 
 def master_profile(choice: EncoderChoice, *, width: int, height: int, fps: float,
@@ -115,25 +149,27 @@ def master_profile(choice: EncoderChoice, *, width: int, height: int, fps: float
         return EncoderProfile(
             name="hevc-nvenc", codec="hevc_nvenc", pix_fmt=pix,
             width=width, height=height, fps=fps, gpu=True,
-            rc_args=("-preset", "p7", "-tune", "hq", "-rc", "constqp", "-qp", "16"),
+            rc_args=_nvenc_rc(choice, cq="24", maxrate="60M", bufsize="120M"),
         )
     if codec == "av1_nvenc":
+        # AV1 quantisiert auf einer 0..63-Skala statt 0..51 — ``cq 28`` liegt
+        # hier ungefaehr dort, wo ``cq 24`` bei HEVC liegt, nicht darunter.
         return EncoderProfile(
             name="av1-nvenc", codec="av1_nvenc", pix_fmt="p010le",
             width=width, height=height, fps=fps, gpu=True,
-            rc_args=("-preset", "p7", "-rc", "constqp", "-qp", "24"),
+            rc_args=_nvenc_rc(choice, cq="28", maxrate="45M", bufsize="90M"),
         )
     if codec == "libx265":
         return EncoderProfile(
             name="libx265", codec="libx265", pix_fmt="yuv420p10le",
             width=width, height=height, fps=fps,
-            rc_args=("-preset", "medium", "-crf", "16"),
+            rc_args=("-preset", "medium", "-crf", "20"),
         )
     if codec == "libx264":
         return EncoderProfile(
             name="libx264", codec="libx264", pix_fmt="yuv420p",
             width=width, height=height, fps=fps,
-            rc_args=("-preset", "medium", "-crf", "16"),
+            rc_args=("-preset", "medium", "-crf", "20"),
         )
     raise ValueError(f"Unbekannter Ausgabecodec: {codec}")
 
