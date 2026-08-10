@@ -132,6 +132,119 @@ Auswahl) und `overrides.yaml` (Feinschliff je Medium). Sie alle überleben, was
 `build` mit `edit.yaml` tut: es schreibt sie bei jedem Lauf neu. Fertige Abläufe
 dazu: [`docs/rezepte.md`](docs/rezepte.md).
 
+## Zweitfassungen: herunterskalieren, fürs Netz konvertieren
+
+Der Master aus `render` ist die Archiv- und Fernsehfassung: 4K, HEVC, BT.709 SDR,
+`hvc1`-getaggt und mit `-movflags +faststart` geschrieben. Kleinere Fassungen —
+FHD fürs Netz, eine Datei zum Verschicken — entstehen **nicht** durch einen
+zweiten Render, sondern durch einen einzelnen ffmpeg-Lauf über den fertigen
+Master. Ein Render mit anderem `size:` würde den kompletten Segment-Cache
+verwerfen (die Auflösung steckt im Cache-Key, `EncoderProfile.fingerprint`) und
+noch einmal 45–90 Minuten kosten.
+
+### Der entscheidende Schalter steht vorne
+
+```bash
+ffmpeg -hwaccel cuda -hwaccel_output_format cuda -i out/master.mp4 \
+  -vf "scale_cuda=1920:1080:interp_algo=lanczos:format=p010le" \
+  -c:v hevc_nvenc -preset p7 -tune hq -rc vbr -cq 24 -b:v 0 \
+  -maxrate 25M -bufsize 50M -multipass fullres -rc-lookahead 32 \
+  -spatial-aq 1 -aq-strength 8 -temporal-aq 1 -bf 3 -b_ref_mode middle \
+  -g 120 -tag:v hvc1 -c:a copy -movflags +faststart out/master_fhd.mp4
+```
+
+Der Gewinn steckt in `-hwaccel_output_format cuda`, nicht in den
+Encoder-Schaltern: damit bleiben die Frames durchgehend im VRAM — NVDEC
+dekodiert, `scale_cuda` skaliert, NVENC encodiert. Ohne diese Option lädt ffmpeg
+jeden 4K-Frame in den Hauptspeicher, skaliert in Software und lädt ihn zurück;
+der PCIe-Transfer kostet dann mehr Zeit als das Encodieren selbst.
+
+Drei Werte darf man nicht aus einem Beispiel abschreiben:
+
+- **`interp_algo=lanczos`.** Die Vorgabe von `scale_cuda` ist `nearest` — bei
+  4K → FHD sichtbar matschig. Der Software-Scaler entspricht `flags=lanczos`.
+- **`-g` ist das Doppelte der Projekt-`fps`**, für die üblichen 60 fps also 120.
+  Das sind zwei Sekunden Keyframe-Abstand; NVENCs Vorgabe von 250 Frames macht
+  das Scrubben im Browser grob.
+- **`-tag:v hvc1` und `-movflags +faststart` überleben das Transcodieren
+  nicht** und müssen erneut gesetzt werden. Ohne `hvc1` spielt HEVC-in-MP4 auf
+  Apple-Geräten nicht, ohne faststart lädt der Browser die ganze Datei, bevor er
+  das erste Bild zeigt.
+
+Auf Ada-Karten mit zwei NVENC-Engines (RTX 4080/4090) teilt `-split_encode_mode`
+jedes Bild automatisch auf beide Chips auf — Vorgabe ist `auto`, es ist nichts zu
+tun. Wichtig ist nur: **den Transcode nicht parallel zu einem laufenden
+Master-Render starten.** Die Zahl gleichzeitiger NVENC-Sessions ist begrenzt,
+einer von beiden scheitert sonst mit `OpenEncodeSessionEx failed`. Aus demselben
+Grund encodiert `render --preview` mit libx264.
+
+### Für Browser gelten andere Codecs
+
+HEVC ist im Netz die schlechteste der drei Optionen: Safari spielt es, Chrome und
+Edge nur mit passendem Hardware-Decoder, Firefox erst neuerdings. Sinnvoll sind
+**zwei Dateien** — AV1 für alles Moderne, H.264 als Auffanglinie:
+
+| Ziel | Codec | Bittiefe | Deckt ab |
+|---|---|---|---|
+| Fernseher, Archiv | `hevc_nvenc`, `-cq 24` | 10 Bit (`p010le`) | die Master-Fassung, keine Kompatibilitätsfragen |
+| Netz, primär | `av1_nvenc`, `-cq 30` | 10 Bit | Chrome, Edge, Firefox; Safari ab 17 nur auf Apple Silicon M3+ |
+| Netz, Auffanglinie | `h264_nvenc -profile:v high`, `-cq 23` | **8 Bit (`yuv420p`)** | ausnahmslos alles |
+
+Die 8 Bit bei H.264 sind keine Feinheit, sondern Bedingung: **Browser
+dekodieren kein High-10-Profil.** Ein 10-Bit-H.264 spielt nirgends. Bei AV1 ist
+10 Bit dagegen unbedenklich und hilft gegen Banding.
+
+Ausgeliefert wird über zwei `<source>` — der Browser nimmt die erste Quelle, die
+er abspielen kann, die Reihenfolge entscheidet also:
+
+```html
+<video controls preload="metadata" playsinline poster="poster.jpg">
+  <source src="fhd_av1.mp4"  type='video/mp4; codecs="av01.0.08M.10"'>
+  <source src="fhd_h264.mp4" type='video/mp4; codecs="avc1.640028"'>
+</video>
+```
+
+Die `codecs`-Strings hängen an Level und Bittiefe und gehören aus den *fertigen*
+Dateien abgelesen, nicht abgeschrieben — sonst überspringt ein Browser eine
+Quelle, die er eigentlich könnte.
+
+### Zwei Dinge, die man nachmessen muss
+
+**Die Farbtags.** Sie stammen hier aus dem Master und werden über Decoder →
+Filter → Encoder durchgereicht, das übliche `setparams` ist also vermutlich
+entbehrlich. Verlassen sollte man sich nicht darauf — ffmpeg 8 übernimmt
+`-color_trc`/`-color_primaries` als *Ausgabe*optionen nicht mehr in die Datei
+([`docs/briefing-hlg-ffmpeg8.md`](docs/briefing-hlg-ffmpeg8.md)), und der Fehler
+ist still:
+
+```bash
+ffprobe -v error -select_streams v:0 -of default=nw=1 \
+  -show_entries stream=width,height,pix_fmt,profile,level,codec_tag_string,color_primaries,color_transfer,color_space \
+  out/master_fhd.mp4
+```
+
+**Das Dithering beim Weg von 10 auf 8 Bit.** `scale_cuda:format=yuv420p`
+konvertiert auf der GPU *ohne* Dither, während swscale in Software
+Fehlerdiffusion anwendet. Bei den abgedunkelten Titelhintergründen und großen
+Himmelsflächen kann das den Unterschied zwischen sauber und gestuft ausmachen.
+Zeigt sich Banding, für die 8-Bit-Fassung den Hybrid nehmen — GPU-Decode,
+Software-Scale, GPU-Encode:
+
+```
+-vf "hwdownload,format=p010le,scale=1920:1080:flags=lanczos,format=yuv420p,hwupload_cuda"
+```
+
+Das kostet den PCIe-Transfer und ist immer noch um ein Vielfaches schneller als
+libx265.
+
+Ein Vorbehalt bleibt: **NVENCs Schwäche liegt bei niedrigen Bitraten** — und
+Web-Auslieferung ist genau dieser Fall. Bei 3–5 Mbit/s liefert `libsvtav1`
+(`-preset 5 -crf 32`) auf der CPU sichtbar mehr als `av1_nvenc`, dauert dafür
+eine halbe Stunde statt Minuten. Für eine Datei, die einmal entsteht und danach
+hundertfach ausgeliefert wird, ist das meist die richtige Seite des Tauschs; für
+die Fernsehfassung, wo die Bitrate keine Rolle spielt, nicht. Beide Fassungen
+einmal nebeneinander ansehen, bevor man sich festlegt.
+
 ## Installation
 
 ```bash

@@ -98,6 +98,9 @@ class Capabilities:
     zoompan_10bit: bool = False
     nvenc_10bit: bool = False
     av1_nvenc: bool = False
+    #: ``-multipass``/``-temporal-aq`` der VBR-Ratensteuerung — erst ab Turing.
+    #: Aeltere Karten brechen damit ab, statt die Schalter zu ignorieren.
+    nvenc_advanced_rc: bool = False
     nvdec_422_10bit: bool = False
     nvenc_sessions: int = 0
     #: ``libplacebo`` steht in der Filterliste, braucht zum Laufen aber ein
@@ -133,6 +136,7 @@ class Capabilities:
             h264_nvenc=self.has_encoder("h264_nvenc"),
             av1_nvenc=self.av1_nvenc,
             nvenc_10bit=self.nvenc_10bit,
+            nvenc_advanced_rc=self.nvenc_advanced_rc,
             libx265=self.has_encoder("libx265"),
             libx264=self.has_encoder("libx264"),
         )
@@ -505,6 +509,14 @@ def probe_capabilities(*, deep: bool = False, project: Project | None = None) ->
                 "ffmpeg", ["-pix_fmt", "p010le", "-c:v", "hevc_nvenc"])
             if caps.nvenc_10bit:
                 caps.nvenc_sessions = _probe_nvenc_sessions("ffmpeg", "hevc_nvenc")
+                # Die VBR-Ratensteuerung des Masters mit genau den Schaltern
+                # proben, die ``_nvenc_rc`` setzt. Faellt der Test aus, laeuft
+                # der Render ohne ``-multipass``/``-temporal-aq`` weiter statt
+                # bei jedem Segment abzubrechen.
+                caps.nvenc_advanced_rc = _test_encode(
+                    "ffmpeg", ["-pix_fmt", "p010le", "-c:v", "hevc_nvenc",
+                               "-rc", "vbr", "-cq", "24", "-b:v", "0",
+                               "-multipass", "fullres", "-temporal-aq", "1"])
         if "av1_nvenc" in caps.encoders:
             caps.av1_nvenc = _test_encode("ffmpeg", ["-pix_fmt", "p010le", "-c:v", "av1_nvenc"])
         if "cuda" in caps.hwaccels and caps.gpu_name:
@@ -615,6 +627,12 @@ def build_report(project: Project | None = None, *, deep: bool = True,
             rep.add("NVENC 10-Bit-HEVC", OK if caps.nvenc_10bit else WARN,
                     "Praxistest bestanden" if caps.nvenc_10bit else
                     "Praxistest fehlgeschlagen — Ausgabe faellt auf 8 Bit zurueck")
+            if caps.nvenc_10bit:
+                rep.add("NVENC-Ratensteuerung",
+                        OK if caps.nvenc_advanced_rc else WARN,
+                        "VBR mit Multipass und Temporal-AQ" if caps.nvenc_advanced_rc
+                        else "VBR ohne Multipass/Temporal-AQ (erst ab Turing/RTX 20xx) "
+                             "— etwas hoehere Bitrate bei gleicher Qualitaet")
             if caps.nvenc_sessions:
                 rep.add("NVENC-Sessions", OK, f"{caps.nvenc_sessions} parallel "
                         f"(begrenzt den Render-Pool)")
@@ -707,13 +725,16 @@ def estimate_space(*, images: int, clip_seconds: float, timeline_seconds: float,
                    intermediate_mbit: float = 700.0) -> dict[str, float]:
     """Schaetzung in Bytes, *bevor* irgendetwas geschrieben wird (3.4).
 
-    Der Segment-Cache kann groesser als der Master werden — bei ``constqp`` ist
-    die Bitrate motivabhaengig, deshalb konservativ mit 150 Mbit/s.
+    Der Segment-Cache kann groesser als der Master werden. Die Bitrate bleibt
+    auch unter ``vbr``/``-cq`` motivabhaengig — ein Schwenk durchs Laub kostet
+    ein Vielfaches eines ruhigen Himmels —, deshalb liegen beide Werte
+    bewusst ueber dem, was ``cq 24`` bei 4K60 typischerweise liefert (~40
+    Mbit/s). Zu knapp geschaetzt hiesse: Abbruch mitten im Render.
     """
     img = images * 15e6
-    seg = timeline_seconds * 150e6 / 8
+    seg = timeline_seconds * 70e6 / 8
     inter = clip_seconds * intermediate_mbit * 1e6 / 8
-    master = timeline_seconds * 100e6 / 8
+    master = timeline_seconds * 50e6 / 8
     total = img + seg + inter + master
     return {"images": img, "segments": seg, "intermediate": inter,
             "master": master, "total": total, "required": total * 1.5}
