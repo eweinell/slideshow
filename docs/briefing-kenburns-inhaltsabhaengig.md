@@ -620,7 +620,10 @@ der Aufpreis:
   Eingabe, Ausgabe, Cache-Schreiben, Cache-Lesen.
 
 Wer Bedrock wegen der Datenresidenz nimmt, zahlt also die 10 % — sie *sind* die
-Datenresidenz. Verfügbare EU-Regionen: Frankfurt (`eu-central-1`), Zürich
+Datenresidenz. **Angefordert wird sie über die Modell-ID**: `eu.anthropic.…` ist
+das regionale Inferenzprofil, `anthropic.…` dagegen das Basismodell einer
+einzelnen Region — die neueren Modelle gibt es dort nicht, und die Anfrage endet
+im 404. Verfügbare EU-Regionen: Frankfurt (`eu-central-1`), Zürich
 (`eu-central-2`), Stockholm (`eu-north-1`), Mailand (`eu-south-1`), Spanien
 (`eu-south-2`), Irland (`eu-west-1`), London (`eu-west-2`), Paris
 (`eu-west-3`) — alle mit EU-Inferenzprofil.
@@ -628,7 +631,7 @@ Datenresidenz. Verfügbare EU-Regionen: Frankfurt (`eu-central-1`), Zürich
 **Kosten je 100 Bilder**, gerechnet mit dem Tokenprofil von oben (786 Bild- +
 40 Texttokens, 1200 Tokens gecachter Präfix, 250 Ausgabetokens):
 
-| Modell (Bedrock-ID `anthropic.…`) | Preis in/out je M | Präfix cached? | Global | **EU (+10 %)** |
+| Modell (Bedrock-ID `eu.anthropic.…`) | Preis in/out je M | Präfix cached? | Global | **EU (+10 %)** |
 |---|---|---|---|---|
 | `claude-fable-5` | 10 / 50 | ja (512) | 2,20 $ | **2,42 $** |
 | `claude-opus-5` | 5 / 25 | ja (512) | 1,10 $ | **1,21 $** |

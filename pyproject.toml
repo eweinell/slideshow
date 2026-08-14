@@ -25,7 +25,9 @@ librosa = ["librosa>=0.11", "numba>=0.62"]
 aubio = ["aubio"]
 # Nur fuer `slideshow analyze`. Bewusst optional: `build` und `render` laufen
 # ohne das SDK, und die Testsuite laeuft ohne Netzzugriff (Abnahmekriterium A5).
-vision = ["anthropic>=0.60"]
+# `[bedrock]` zieht boto3/botocore nach — ohne sie laesst sich `--bedrock` zwar
+# bauen, aber nicht signieren, und das faellt erst beim ersten Request auf.
+vision = ["anthropic[bedrock]>=0.60"]
 dev = ["pytest"]
 
 [project.scripts]

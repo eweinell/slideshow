@@ -42,6 +42,7 @@ import concurrent.futures as _fut
 import io
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -71,6 +72,11 @@ DEFAULT_MODEL = "claude-opus-5"
 #: Schutzbox klemmt den Zoom auf Stillstand.
 ANALYSE_GROESSE = (1024, 576)
 JPEG_QUALITAET = 80
+
+#: Wie viele Bilder ``--count-tokens`` nachmisst. Steht hier und nicht als
+#: Vorgabewert allein, weil der Aufrufer die Zahl **vor** dem Zaehlen kennen
+#: muss: sie steht in der Datenschutz-Rueckfrage.
+PROBEN = 5
 
 #: Modelle ohne ``effort``-Parameter. Ein ``output_config: {"effort": ...}``
 #: gegen eines davon ist ein 400 und kein stiller Rueckfall — deshalb steht die
@@ -426,12 +432,41 @@ class Bericht:
 # Client
 # --------------------------------------------------------------------------
 
-def client_bauen(*, bedrock_region: str | None = None):
+#: Env-Variablen, mit denen Bedrock **ohne** AWS-Signatur auskommt. Ist eine
+#: davon gesetzt, spricht das SDK per Bearer-Token — dann braucht es kein
+#: botocore, und ein AWS-Profil waere wirkungslos.
+BEDROCK_TOKEN_ENV = ("AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_AWS_API_KEY")
+
+
+def sigv4_noetig(aws_profile: str | None) -> bool:
+    """Ob der Bedrock-Client mit AWS-Signatur arbeitet — und damit botocore braucht.
+
+    Dieselbe Weiche wie ``anthropic.lib.aws._credentials.resolve_auth_mode``,
+    hier nachgezogen, weil das Ergebnis am fertigen Client nur privat
+    (``_use_sigv4``) abzulesen waere.
+
+    Das erklaert zugleich, wozu es ``--aws-profile`` ueberhaupt gibt: dort
+    zaehlt nur ein **Konstruktorargument**. Ein blosses ``AWS_PROFILE`` in der
+    Umgebung wird erst in der AWS-Standardkette gesehen und verliert damit
+    still gegen einen gesetzten Bearer-Token.
+    """
+    if aws_profile:
+        return True
+    return not any(os.environ.get(name) for name in BEDROCK_TOKEN_ENV)
+
+
+def client_bauen(*, bedrock_region: str | None = None,
+                 aws_profile: str | None = None):
     """Den API-Client bauen — Erstanbieter oder Bedrock (E11).
 
     Der Unterschied ist eine Client-Weiche und ein Praefix am Modellnamen,
     sonst nichts: beide sprechen dieselbe Messages-API. Wer die Fotos nicht aus
     der EU herauslassen will, soll das ohne Umbau tun koennen.
+
+    Anmeldedaten uebergibt diese Funktion bewusst keine — sie loest das SDK aus
+    der Umgebung auf (``ANTHROPIC_API_KEY`` beziehungsweise die
+    AWS-Standardkette). Einzige Ausnahme ist ``aws_profile``, siehe
+    :func:`sigv4_noetig`.
 
     Der Import steht im Funktionskoerper, damit das SDK eine **optionale**
     Abhaengigkeit bleibt: ``build`` und die gesamte Testsuite laufen ohne es
@@ -447,15 +482,76 @@ def client_bauen(*, bedrock_region: str | None = None):
             "  `slideshow build --no-vision` baut ohne Bildanalyse weiter.") from exc
 
     if bedrock_region:
-        return anthropic.AnthropicBedrockMantle(aws_region=bedrock_region)
+        # Hier und nicht erst beim Signieren: das SDK importiert botocore
+        # **lazy im ersten Request**, und dort faengt :func:`analysiere` je Bild
+        # ab — aus einer fehlenden Abhaengigkeit wuerden 187 gleichlautende
+        # Warnungen und eine leere ``vision.yaml`` statt eines Abbruchs.
+        if sigv4_noetig(aws_profile):
+            try:
+                import botocore.auth  # noqa: F401
+            except ImportError as exc:
+                raise SlideshowError(
+                    "Fuer `--bedrock` fehlt botocore — es signiert die "
+                    "Anfragen (SigV4).\n"
+                    "  pip install 'slideshow[vision]'   (oder: pip install "
+                    "'anthropic[bedrock]')") from exc
+        return anthropic.AnthropicBedrockMantle(aws_region=bedrock_region,
+                                                aws_profile=aws_profile)
     return anthropic.Anthropic()
 
 
-def modellname(modell: str, *, bedrock: bool) -> str:
-    """Auf Bedrock traegt jede Modell-ID ein ``anthropic.``-Praefix."""
-    if bedrock and not modell.startswith("anthropic."):
+#: Region-Praefix -> Inferenzprofil auf Bedrock. Das Profil ist **kein
+#: Schmuck**: ``anthropic.claude-…`` zeigt auf das Basismodell einer einzelnen
+#: Region, und die neueren Modelle gibt es dort nicht (404). Erst
+#: ``eu.anthropic.claude-…`` ist das regionale Inferenzprofil — und damit genau
+#: das, wofuer :data:`BEDROCK_EU_AUFSCHLAG` die 10 % ansetzt. Ohne den Praefix
+#: versprach die Datenschutz-Rueckfrage eine Datenresidenz, die die Modell-ID
+#: gar nicht anforderte.
+INFERENZPROFIL = {"eu": "eu", "us": "us", "ap": "apac"}
+
+
+def modellname(modell: str, *, bedrock: bool, region: str | None = None) -> str:
+    """Die Modell-ID fuer das gewaehlte Ziel.
+
+    Ein Name mit Punkt gilt als vollqualifiziert und bleibt unangetastet — das
+    ist die Ausweichtuer fuer alles, was diese Tabelle nicht kennt
+    (``global.anthropic.…``, ein Fremdmodell, eine neue Region).
+    """
+    if not bedrock or "." in modell:
+        return modell
+    profil = INFERENZPROFIL.get(str(region or "").split("-")[0])
+    if profil is None:
+        # Kein stiller Griff zu einer ID, die es vermutlich nicht gibt: die
+        # Region steht dem Nutzer offen, die Profiltabelle hier auch.
+        log.warning("Kein Inferenzprofil fuer Region %r bekannt — die Anfrage "
+                    "geht an das Basismodell `anthropic.%s`. Notfalls das "
+                    "Profil ausschreiben: --model <profil>.anthropic.%s",
+                    region, modell, modell)
         return f"anthropic.{modell}"
-    return modell
+    return f"{profil}.anthropic.{modell}"
+
+
+#: Was ein Modellname sein muss, um ueberhaupt einer zu sein.
+_KURZNAMEN = ("opus", "sonnet", "haiku", "fable")
+
+
+def modell_pruefen(modell: str) -> None:
+    """Einen Tippfehler melden, **bevor** das erste Bild rausgeht.
+
+    Der Fall aus der Praxis war ``--model sonnet-5``: die Kurzform ist keine
+    Modell-ID, und der 404 kam erst nach dem Hochladen des ersten Bildes — also
+    zu spaet, um noch etwas zu verhindern.
+    """
+    if modell.startswith("claude-") or "." in modell:
+        return
+    kurz = modell.split("-")[0]
+    hinweis = (f" Gemeint ist vermutlich `claude-{modell}`."
+               if kurz in _KURZNAMEN else "")
+    raise SlideshowError(
+        f"`{modell}` sieht nicht wie eine Modell-ID aus.{hinweis}\n"
+        f"  Bekannt sind: {', '.join(sorted(PREISE))}\n"
+        f"  Eine vollqualifizierte Bedrock-ID (mit Punkt, etwa "
+        f"`eu.anthropic.claude-sonnet-5`) wird unveraendert durchgereicht.")
 
 
 def _anfrage_bauen(modell: str, b64: str, name: str) -> dict:
@@ -493,6 +589,42 @@ def _anfrage_bauen(modell: str, b64: str, name: str) -> dict:
     if not any(modell.split("anthropic.")[-1].startswith(m) for m in OHNE_EFFORT):
         args["output_config"]["effort"] = "low"
     return args
+
+
+#: Fehler, die nicht am Bild liegen koennen. Gegen den Klassennamen und nicht
+#: gegen den Typ, weil das SDK hier eine optionale Abhaengigkeit ist (A5) — ein
+#: ``except anthropic.NotFoundError`` waere ein Import auf jedem Pfad.
+KONFIGURATIONSFEHLER = ("NotFoundError", "AuthenticationError",
+                        "PermissionDeniedError")
+
+
+def ist_konfigurationsfehler(exc: BaseException) -> bool:
+    """Ob dieser Fehler sich beim naechsten Bild wortgleich wiederholen wird."""
+    return type(exc).__name__ in KONFIGURATIONSFEHLER
+
+
+def konfigurationshinweis(exc: BaseException, *, modell: str,
+                          region: str | None) -> str:
+    """Aus dem Abbruch den naechsten Schritt machen.
+
+    Ein 404 auf Bedrock nennt nur die ID, die es nicht gibt — welche es gaebe,
+    steht nirgends. Die Antwort darauf ist ein Kommando und keine Vermutung:
+    nicht jedes Modell hat in jeder Region ein Inferenzprofil, und manche gibt
+    es dort nur unter ihrer datierten ID.
+    """
+    text = (f"Der Vorablauf ist gescheitert — es wurde nichts weiter gefragt.\n"
+            f"  Modell: {modell}\n  {type(exc).__name__}: {exc}")
+    if region:
+        text += (
+            f"\n\nWelche IDs es in {region} gibt:\n"
+            f"  aws bedrock list-inference-profiles --region {region} \\\n"
+            f"    --query \"inferenceProfileSummaries[?contains("
+            f"inferenceProfileId,'anthropic')].inferenceProfileId\" "
+            f"--output text\n"
+            f"Eine ausgeschriebene ID (mit Punkt) reicht `--model` unveraendert "
+            f"durch — noetig etwa dort, wo es ein Modell nur unter seiner "
+            f"datierten Kennung gibt.")
+    return text
 
 
 def _antworttext(nachricht) -> str:
@@ -543,6 +675,7 @@ def offene_bilder(pfade: dict[str, Path], vorhanden: VisionDoc, *, modell: str,
 
 def analysiere(pfade: dict[str, Path], *, vorhanden: VisionDoc | None = None,
                modell: str = DEFAULT_MODEL, bedrock_region: str | None = None,
+               aws_profile: str | None = None,
                jobs: int = 8, fortschritt=None) -> tuple[VisionDoc, Bericht]:
     """Alle noch unbekannten Bilder analysieren.
 
@@ -557,8 +690,9 @@ def analysiere(pfade: dict[str, Path], *, vorhanden: VisionDoc | None = None,
     if not zu_fragen:
         return (_doc(eintraege, pfade, modell), bericht)
 
-    client = client_bauen(bedrock_region=bedrock_region)
-    voller_name = modellname(modell, bedrock=bool(bedrock_region))
+    client = client_bauen(bedrock_region=bedrock_region, aws_profile=aws_profile)
+    voller_name = modellname(modell, bedrock=bool(bedrock_region),
+                             region=bedrock_region)
 
     def einer(rel: str, digest: str):
         args = _anfrage_bauen(voller_name, analysebild(pfade[rel]), Path(rel).name)
@@ -590,6 +724,7 @@ def analysiere(pfade: dict[str, Path], *, vorhanden: VisionDoc | None = None,
         eintraege[rel] = eintrag
         bericht.uebernommen += 1
 
+    fataler: Exception | None = None
     for gruppe, parallel in ((erste, 1), (rest, max(1, jobs))):
         if not gruppe:
             continue
@@ -603,8 +738,17 @@ def analysiere(pfade: dict[str, Path], *, vorhanden: VisionDoc | None = None,
                 except Exception as exc:               # noqa: BLE001
                     bericht.ausgefallen += 1
                     bericht.warnungen.append(f"{rel}: {exc}")
+                    if ist_konfigurationsfehler(exc):
+                        fataler = exc
                 if fortschritt is not None:
                     fortschritt(bericht.analysiert, len(zu_fragen), rel)
+        # Die Regel "Ausfall ist immer je Bild" gilt fuer das, was am *Bild*
+        # liegt. Ein falscher Modellname, ein fehlendes Recht, ein abgelaufener
+        # Schluessel liegen am Lauf — und wiederholen sich 186-mal. Genau
+        # dafuer laeuft der erste Request allein voraus.
+        if fataler is not None:
+            raise SlideshowError(konfigurationshinweis(
+                fataler, modell=voller_name, region=bedrock_region))
 
     return (_doc(eintraege, pfade, modell), bericht)
 
@@ -681,20 +825,29 @@ def analysiere_batch(pfade: dict[str, Path], *, vorhanden: VisionDoc | None = No
 
 
 def tokens_zaehlen(pfade: dict[str, Path], *, modell: str = DEFAULT_MODEL,
-                   proben: int = 5) -> tuple[int, int]:
+                   proben: int = PROBEN, bedrock_region: str | None = None,
+                   aws_profile: str | None = None) -> tuple[int, int]:
     """Vorab nachmessen, was ein Bild wirklich kostet (A6).
 
     Die Formel aus Abschnitt 9 (``w * h / 750``) ist eine Naeherung, und die
     Deckel sind modellabhaengig. Vor dem ersten grossen Lauf gehoert das an
     echten Bildern nachgemessen statt einer Preistabelle geglaubt.
 
+    Die Weiche gehoert **auch hierher**: gezaehlt wird, indem die fertige
+    Anfrage samt Bild abgeschickt wird. Ein Client ohne ``bedrock_region``
+    haette die Fotos also an die Erstanbieter-API geschickt, obwohl der Aufrufer
+    Bedrock gewaehlt hat — sichtbar wurde das nur, weil dort kein
+    ``ANTHROPIC_API_KEY`` stand und das SDK deshalb abbrach.
+
     Liefert ``(anzahl_proben, tokens_je_bild)``.
     """
-    client = client_bauen()
+    client = client_bauen(bedrock_region=bedrock_region, aws_profile=aws_profile)
+    voller_name = modellname(modell, bedrock=bool(bedrock_region),
+                             region=bedrock_region)
     stichprobe = list(pfade.values())[:max(1, proben)]
     summe = 0
     for pfad in stichprobe:
-        args = _anfrage_bauen(modell, analysebild(pfad), pfad.name)
+        args = _anfrage_bauen(voller_name, analysebild(pfad), pfad.name)
         antwort = client.messages.count_tokens(
             model=args["model"], system=args["system"], messages=args["messages"])
         summe += int(antwort.input_tokens)

@@ -21,7 +21,8 @@ from PIL import Image
 
 from slideshow import vision
 from slideshow.errors import SchemaError
-from slideshow.models import VisionDoc, VisionEntry, dump_vision_yaml
+from slideshow.models import (MANIFEST_VERSION, VisionDoc, VisionEntry,
+                              dump_vision_yaml)
 
 
 def _antwort(**felder) -> str:
@@ -210,6 +211,189 @@ def test_ohne_das_sdk_gibt_es_eine_anweisung_statt_eines_tracebacks(monkeypatch)
     from slideshow.errors import SlideshowError
     with pytest.raises(SlideshowError, match="anthropic"):
         vision.client_bauen()
+
+
+def test_ohne_botocore_bricht_bedrock_ab_statt_je_bild_zu_warnen(monkeypatch):
+    """Das SDK importiert botocore erst **im Request**, und dort faengt
+    ``analysiere`` je Bild ab. Ohne diese Vorabpruefung waere eine fehlende
+    Abhaengigkeit kein Abbruch, sondern 187 gleichlautende Warnungen und eine
+    leere ``vision.yaml``."""
+    import builtins
+
+    pytest.importorskip("anthropic")
+    echt = builtins.__import__
+
+    def ohne_botocore(name, *a, **kw):
+        if name.startswith("botocore"):
+            raise ImportError("no module named botocore")
+        return echt(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", ohne_botocore)
+    for name in vision.BEDROCK_TOKEN_ENV:
+        monkeypatch.delenv(name, raising=False)
+    from slideshow.errors import SlideshowError
+    with pytest.raises(SlideshowError, match="botocore"):
+        vision.client_bauen(bedrock_region="eu-central-1")
+
+
+def test_ein_bearer_token_macht_botocore_entbehrlich(monkeypatch):
+    """Der Bearer-Token-Modus signiert nicht — dort waere die Forderung nach
+    botocore eine erfundene Huerde."""
+    monkeypatch.delenv("ANTHROPIC_AWS_API_KEY", raising=False)
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "geheim")
+    assert vision.sigv4_noetig(None) is False
+    # Ein ausdruecklich genanntes Profil gewinnt trotzdem — genau dafuer gibt
+    # es `--aws-profile`, denn ein blosses AWS_PROFILE verloere hier still.
+    assert vision.sigv4_noetig("mein-profil") is True
+
+
+def test_ohne_bearer_token_wird_signiert(monkeypatch):
+    for name in vision.BEDROCK_TOKEN_ENV:
+        monkeypatch.delenv(name, raising=False)
+    assert vision.sigv4_noetig(None) is True
+
+
+def test_nachmessen_geht_an_dasselbe_ziel_wie_der_lauf(tmp_path: Path, monkeypatch):
+    """``--count-tokens`` schickt die Bilder wirklich mit. Ging es dabei an die
+    Erstanbieter-API, obwohl der Aufrufer Bedrock gewaehlt hat, war das kein
+    Schoenheitsfehler, sondern ein anderes Ziel fuer dieselben Fotos."""
+    gebaut: dict = {}
+    gefragt: list[str] = []
+
+    class _Antwort:
+        input_tokens = 826
+
+    class _Client:
+        class messages:
+            @staticmethod
+            def count_tokens(*, model, system, messages):
+                gefragt.append(model)
+                return _Antwort()
+
+    monkeypatch.setattr(vision, "client_bauen",
+                        lambda **kw: gebaut.update(kw) or _Client())
+    pfade = _projekt_bilder(tmp_path)
+    n, je = vision.tokens_zaehlen(pfade, modell="claude-opus-5", proben=2,
+                                  bedrock_region="eu-central-1",
+                                  aws_profile="mein-profil")
+
+    assert gebaut == {"bedrock_region": "eu-central-1",
+                      "aws_profile": "mein-profil"}
+    # Und mit dem Ziel wechselt der Modellname mit — sonst misst das Nachmessen
+    # ein Modell, das es unter dem Namen dort nicht gibt.
+    assert gefragt == ["eu.anthropic.claude-opus-5"] * 2
+    assert (n, je) == (2, 826)
+
+
+def test_ein_falsches_modell_stoppt_den_lauf_statt_ihn_zu_wiederholen(
+        tmp_path: Path, monkeypatch):
+    """Der Fall aus der Praxis: ein 404 auf die Modell-ID. Er liegt nicht am
+    Bild und wiederholt sich sonst fuer jedes weitere — genau dafuer laeuft der
+    erste Request allein voraus."""
+    from slideshow.errors import SlideshowError
+
+    class NotFoundError(Exception):
+        pass
+
+    versuche: list[str] = []
+
+    class _Client:
+        class messages:
+            @staticmethod
+            def create(**kw):
+                versuche.append(kw["model"])
+                raise NotFoundError("The model 'x' does not exist")
+
+    monkeypatch.setattr(vision, "client_bauen", lambda **kw: _Client())
+    pfade = _projekt_bilder(tmp_path, n=6)
+    with pytest.raises(SlideshowError) as exc:
+        vision.analysiere(pfade, modell="claude-sonnet-5",
+                          bedrock_region="eu-central-1")
+
+    assert len(versuche) == 1, "nach dem Abbruch wurde weitergefragt"
+    assert "list-inference-profiles" in str(exc.value)
+    assert "eu-central-1" in str(exc.value)
+
+
+def test_ein_ausfall_am_bild_kostet_nur_dieses_bild(tmp_path: Path, monkeypatch):
+    """Die Gegenprobe: die Regel aus Abschnitt 8 bleibt, was sie war."""
+    class _Nachricht:
+        stop_reason = "refusal"
+        stop_details = None
+        content: list = []
+        usage = None
+
+    class _Client:
+        class messages:
+            @staticmethod
+            def create(**kw):
+                return _Nachricht()
+
+    monkeypatch.setattr(vision, "client_bauen", lambda **kw: _Client())
+    pfade = _projekt_bilder(tmp_path, n=4)
+    _doc, bericht = vision.analysiere(pfade)
+    assert bericht.ausgefallen == 4 and bericht.uebernommen == 0
+
+
+def _analyze_projekt(tmp_path: Path) -> tuple[object, dict[str, Path]]:
+    """Ein Projekt, das gerade genug hat, damit ``cmd_analyze`` laeuft."""
+    import json as _json
+
+    from slideshow.paths import Project
+
+    pfade = _projekt_bilder(tmp_path)
+    manifest = {"version": MANIFEST_VERSION, "media": [
+        {"id": f"m{i}", "path": f"src/{Path(rel).name}", "kind": "image",
+         "cache_path": rel}
+        for i, rel in enumerate(pfade)]}
+    (tmp_path / "manifest.json").write_text(_json.dumps(manifest),
+                                            encoding="utf-8")
+    return Project(tmp_path), pfade
+
+
+class _Args:
+    """Die Schalter von ``analyze`` mit ihren Vorgaben."""
+
+    output = manifest = model = jobs = bedrock = aws_profile = None
+    batch = count_tokens = yes = dry_run = False
+
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+def test_nachmessen_fragt_erst_und_misst_dann(tmp_path: Path, monkeypatch, capsys):
+    """E6 gilt auch fuer ``--count-tokens``: gezaehlt wird, indem die fertige
+    Anfrage **samt Bild** abgeschickt wird. Ein "nein" muss deshalb dazwischen
+    passen — vorher lief das Messen ohne jede Rueckfrage los."""
+    from slideshow import cli
+
+    projekt, pfade = _analyze_projekt(tmp_path)
+    gemessen: list[int] = []
+    monkeypatch.setattr(vision, "tokens_zaehlen",
+                        lambda *a, **kw: gemessen.append(1) or (1, 826))
+    monkeypatch.setattr("builtins.input", lambda *_a: "n")
+
+    assert cli.cmd_analyze(_Args(count_tokens=True), projekt) == 0
+    assert not gemessen, "trotz Absage gemessen — und damit Bilder verschickt"
+    assert "Abgebrochen" in capsys.readouterr().out
+
+    monkeypatch.setattr("builtins.input", lambda *_a: "j")
+    assert cli.cmd_analyze(_Args(count_tokens=True), projekt) == 0
+    assert gemessen == [1]
+
+
+def test_nachmessen_misst_hoechstens_die_zahl_aus_der_rueckfrage(
+        tmp_path: Path, monkeypatch):
+    """Die Zahl in der Rueckfrage ist eine Zusage, keine Zierde: es duerfen
+    nicht mehr Bilder rausgehen, als dort standen."""
+    from slideshow import cli
+
+    projekt, pfade = _analyze_projekt(tmp_path)   # drei Bilder, PROBEN ist 5
+    gesehen: dict = {}
+    monkeypatch.setattr(vision, "tokens_zaehlen",
+                        lambda *a, **kw: gesehen.update(kw) or (1, 826))
+    assert cli.cmd_analyze(_Args(count_tokens=True, yes=True), projekt) == 0
+    assert gesehen["proben"] == len(pfade)
 
 
 def test_analysieren_ohne_offene_bilder_baut_keinen_client(tmp_path: Path):
@@ -403,11 +587,43 @@ def test_der_gecachte_praefix_steht_vorn_und_ist_stabil():
     assert a["system"][0]["cache_control"] == {"type": "ephemeral"}
 
 
-def test_bedrock_bekommt_das_praefix_am_modellnamen():
-    assert vision.modellname("claude-opus-5", bedrock=True) == "anthropic.claude-opus-5"
+def test_bedrock_bekommt_das_inferenzprofil_am_modellnamen():
+    """``anthropic.claude-…`` ist das Basismodell **einer** Region, und die
+    neueren Modelle gibt es dort nicht — der Lauf endet im 404. Erst
+    ``eu.anthropic.claude-…`` ist das regionale Profil, und nur das ist auch
+    die Datenresidenz, die die Rueckfrage verspricht."""
+    assert (vision.modellname("claude-opus-5", bedrock=True, region="eu-central-1")
+            == "eu.anthropic.claude-opus-5")
+    assert (vision.modellname("claude-opus-5", bedrock=True, region="us-east-1")
+            == "us.anthropic.claude-opus-5")
+    assert (vision.modellname("claude-opus-5", bedrock=True, region="ap-northeast-1")
+            == "apac.anthropic.claude-opus-5")
     assert vision.modellname("claude-opus-5", bedrock=False) == "claude-opus-5"
-    assert (vision.modellname("anthropic.claude-opus-5", bedrock=True)
-            == "anthropic.claude-opus-5")
+
+
+def test_eine_ausgeschriebene_id_bleibt_unangetastet():
+    """Die Ausweichtuer fuer alles, was die Profiltabelle nicht kennt."""
+    for name in ("global.anthropic.claude-opus-5", "eu.anthropic.claude-opus-5",
+                 "amazon.nova-lite-v1:0"):
+        assert vision.modellname(name, bedrock=True, region="eu-central-1") == name
+
+
+def test_die_preistabelle_findet_das_modell_auch_mit_profil():
+    """Sonst faellt der Bericht bei jedem Bedrock-Lauf auf "Preis unbekannt"."""
+    v = vision.Verbrauch()
+    v.dazu(_Usage(826, 250))
+    assert v.kosten("eu.anthropic.claude-opus-5") == v.kosten("claude-opus-5")
+
+
+def test_eine_kurzform_faellt_vor_dem_ersten_bild_auf():
+    """``--model sonnet-5`` gab es wirklich — der 404 kam erst nach dem
+    Hochladen des ersten Bildes."""
+    from slideshow.errors import SlideshowError
+
+    with pytest.raises(SlideshowError, match="claude-sonnet-5"):
+        vision.modell_pruefen("sonnet-5")
+    vision.modell_pruefen("claude-sonnet-5")
+    vision.modell_pruefen("eu.anthropic.claude-sonnet-5")
 
 
 def test_fuer_bedrock_gilt_die_andere_zusagentabelle():

@@ -604,7 +604,9 @@ ohne erkennbaren Grund still. Vier Zahlen korrigieren, und der nächste
 - **Die Fotos gehen an einen externen Dienst.** Deshalb ist es ein eigenes
   Kommando und keine Zeile in `preprocess`; der erste Lauf fragt nach. Was
   dabei zugesagt wird und was nicht, steht in der
-  [README](../README.md#bildanalyse-und-datenschutz).
+  [README](../README.md#bildanalyse-und-datenschutz). **Auch `--count-tokens`
+  fragt**: gezählt wird, indem die fertige Anfrage samt Bild abgeschickt wird —
+  das kostet zwar nichts, geht aber denselben Weg.
 - **Erst auswählen, dann analysieren.** Nach `select` normalisiert
   `preprocess` nur noch die gewählten Bilder, und `analyze` sieht genau die —
   187 statt 1240.
@@ -623,6 +625,47 @@ slideshow analyze --model claude-sonnet-5   # günstiger, für Prompt-Runden
 slideshow analyze --bedrock eu-central-1    # die Bilder bleiben in der EU
 slideshow build --variety 1            # reine Passung statt Abwechslung
 ```
+
+**Anmeldung.** `analyze` trägt keine Zugangsdaten und fragt auch keine ab — sie
+kommen aus der Umgebung:
+
+```powershell
+$env:ANTHROPIC_API_KEY = "sk-ant-…"          # Erstanbieter-API
+$env:AWS_PROFILE = "mein-profil"             # Bedrock, AWS-Standardkette
+slideshow analyze --bedrock eu-central-1 --aws-profile mein-profil   # oder so
+```
+
+Für Bedrock gilt die gewohnte AWS-Kette samt `~/.aws/config`, SSO-Sitzung und
+`credential_process`; signiert wird mit SigV4, wofür `botocore` installiert sein
+muss (`pip install 'slideshow[vision]'` bringt es mit). Zwei Dinge, die man
+sonst erst am falschen Ergebnis merkt: ein gesetztes
+`AWS_BEARER_TOKEN_BEDROCK` schlägt die Umgebungsvariable `AWS_PROFILE` — deshalb
+gibt es `--aws-profile`, das ausdrücklich gewinnt. Und `--bedrock` setzt die
+Region selbst, `AWS_REGION` bleibt dabei außen vor.
+
+**Der Modellname bleibt derselbe** — `--model claude-sonnet-5`, nicht
+`sonnet-5` und nicht die Bedrock-ID. Aus der Region wird das Inferenzprofil
+abgeleitet (`eu-central-1` → `eu.anthropic.claude-sonnet-5`); genau dieses
+Profil *ist* die Datenresidenz, für die die 10 % gezahlt werden. Wer eine
+andere ID braucht, schreibt sie mit Punkt aus — dann wird sie unverändert
+durchgereicht.
+
+**Nicht jedes Modell gibt es in jeder Region**, und die Fehlermeldung nennt nur
+die ID, die es *nicht* gibt. Auflisten:
+
+```powershell
+aws bedrock list-inference-profiles --region eu-central-1 `
+  --query "inferenceProfileSummaries[?contains(inferenceProfileId,'anthropic')].inferenceProfileId" `
+  --output text
+```
+
+Stand August 2026 in `eu-central-1`: `claude-opus-5`, `claude-sonnet-5`,
+`claude-opus-4-8` und `claude-opus-4-7` passen unverändert. `claude-fable-5`
+gibt es dort **nur global**, `claude-haiku-4-5` **nur datiert** — für die beiden
+also die volle ID angeben, etwa
+`--model eu.anthropic.claude-haiku-4-5-20251001-v1:0`. Der erste Request läuft
+allein voraus; scheitert er, bricht der Lauf ab, statt den Fehler 186-mal zu
+wiederholen.
 
 ---
 

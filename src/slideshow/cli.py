@@ -144,6 +144,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="ueber Amazon Bedrock statt die Erstanbieter-API; ohne "
                          "Angabe eu-central-1. Die Bilder verlassen die Region "
                          "nicht, kosten dafuer 10 %% Aufpreis")
+    an.add_argument("--aws-profile", default=None, metavar="NAME",
+                    help="AWS-Profil fuer --bedrock (aus ~/.aws/config). Ohne "
+                         "Angabe gilt die Standardkette, also AWS_PROFILE — die "
+                         "aber gegen ein gesetztes AWS_BEARER_TOKEN_BEDROCK "
+                         "still verliert; ausdruecklich genannt gewinnt sie")
     an.add_argument("--batch", action="store_true",
                     help="ueber die Message-Batches-API — halber Preis, aber die "
                          "Auftraege liegen dort 29 Tage")
@@ -920,7 +925,24 @@ def cmd_analyze(args, project: Project) -> int:
     con = console()
     manifest = Manifest.load(Path(args.manifest) if args.manifest else project.manifest)
     modell = args.model or v.DEFAULT_MODEL
+    v.modell_pruefen(modell)
     bedrock = args.bedrock
+    profil = args.aws_profile
+    if profil and not bedrock:
+        # Kein stilles Ignorieren: wer ein Profil nennt, will die Fotos zu AWS
+        # schicken — und liefe sonst ahnungslos gegen die Erstanbieter-API.
+        raise SlideshowError(
+            "`--aws-profile` gilt nur zusammen mit `--bedrock`. Ohne Bedrock "
+            "fragt `analyze` die Erstanbieter-API, und die kennt kein "
+            "AWS-Profil (dort zaehlt ANTHROPIC_API_KEY).")
+    if bedrock and args.batch:
+        # Auf Bedrock gibt es die Batches-API nicht. Bisher gewann still
+        # `--batch` — und schickte die Fotos entgegen der eben bestaetigten
+        # Zusagentabelle doch an die Erstanbieter-API.
+        raise SlideshowError(
+            "`--batch` und `--bedrock` schliessen sich aus: die "
+            "Message-Batches-API gibt es auf Bedrock nicht. Entweder halber "
+            "Preis (und 29 Tage Ablage bei Anthropic) oder Datenresidenz.")
 
     # Analysiert wird, was auch im Film landet: ``preprocess`` normalisiert seit
     # der Auswahl nur noch die gewaehlten Medien, und das ist hier ein Geschenk
@@ -951,7 +973,22 @@ def cmd_analyze(args, project: Project) -> int:
                                       prompt=v.PROMPT_VERSION)
 
     if args.count_tokens:
-        n, je = v.tokens_zaehlen(pfade, modell=modell)
+        # E6 gilt auch hier: gezaehlt wird, indem die fertige Anfrage **samt
+        # Bild** abgeschickt wird. Dass das Zaehlen nichts kostet, sagt nichts
+        # darueber, wohin die Fotos dabei gehen — die Frage gehoert davor.
+        proben = min(v.PROBEN, len(pfade))
+        if not _datenschutz_bestaetigt(con, modell=modell, anzahl=proben,
+                                       bedrock=bedrock, profil=profil,
+                                       schaetzung=None, zaehlen=True,
+                                       ja=args.yes or args.dry_run):
+            con.print("Abgebrochen — nichts gesendet.")
+            return 0
+        if args.dry_run:
+            con.print(f"[dim]--dry-run: {proben} Anfragen zum Nachmessen "
+                      f"unterblieben.[/dim]")
+            return 0
+        n, je = v.tokens_zaehlen(pfade, modell=modell, proben=proben,
+                                 bedrock_region=bedrock, aws_profile=profil)
         con.print(f"{n} Bilder nachgemessen: [bold]{je} Eingabetokens je "
                   f"Anfrage[/bold] (Annahme in der Rechnung: "
                   f"{v.TOKENS_BILD + v.TOKENS_TEXT + v.TOKENS_PRAEFIX}).")
@@ -976,7 +1013,8 @@ def cmd_analyze(args, project: Project) -> int:
     schaetzung = v.kosten_schaetzung(len(offen), modell,
                                      bedrock_regional=bool(bedrock))
     if not _datenschutz_bestaetigt(con, modell=modell, anzahl=len(offen),
-                                   bedrock=bedrock, schaetzung=schaetzung,
+                                   bedrock=bedrock, profil=profil,
+                                   schaetzung=schaetzung,
                                    ja=args.yes or args.dry_run):
         con.print("Abgebrochen — nichts gesendet, nichts geschrieben.")
         return 0
@@ -995,7 +1033,7 @@ def cmd_analyze(args, project: Project) -> int:
                                           warten=lambda sid: _batch_warten(con, sid))
     else:
         doc, bericht = v.analysiere(pfade, vorhanden=alt, modell=modell,
-                                    bedrock_region=bedrock,
+                                    bedrock_region=bedrock, aws_profile=profil,
                                     jobs=args.jobs or 8, fortschritt=fortschritt)
 
     v.speichern(doc, out)
@@ -1027,7 +1065,9 @@ def cmd_analyze(args, project: Project) -> int:
 
 
 def _datenschutz_bestaetigt(con, *, modell: str, anzahl: int, bedrock: str | None,
-                            schaetzung: float | None, ja: bool) -> bool:
+                            schaetzung: float | None, ja: bool,
+                            profil: str | None = None,
+                            zaehlen: bool = False) -> bool:
     """Die einmalige Rueckfrage vor dem ersten Senden (Entscheidung E6).
 
     Kein stiller Schritt in einer anderen Phase: dass private Urlaubsfotos mit
@@ -1035,10 +1075,19 @@ def _datenschutz_bestaetigt(con, *, modell: str, anzahl: int, bedrock: str | Non
     es passiert. Und es muss die **richtige** Tabelle sein — auf Bedrock gelten
     andere Zusagen als bei Anthropic, im Guten wie im Ungewissen.
     """
-    ziel = f"Amazon Bedrock ({bedrock})" if bedrock else "die Claude-API"
+    # Das Konto gehoert in die Zeile: bei Bedrock entscheidet es mit, wohin die
+    # Fotos gehen, und ein falsch gesetztes Profil sieht man sonst nirgends.
+    ziel = (f"Amazon Bedrock ({bedrock}"
+            + (f", Profil {profil}" if profil else "") + ")") if bedrock \
+        else "die Claude-API"
     con.print(f"\n[bold]{anzahl} Bilder gehen an {ziel}[/bold], Modell {modell}"
               + (f", geschaetzt {schaetzung:.2f} USD." if schaetzung is not None
                  else "."))
+    if zaehlen:
+        # Ohne diesen Satz sieht die Frage nach einem doppelten Lauf aus: der
+        # Nutzer hat um eine Messung gebeten und wird nach dem Senden gefragt.
+        con.print("  [dim]Nur zum Nachmessen — das Zaehlen selbst kostet "
+                  "nichts, die Bilder gehen trotzdem hin.[/dim]")
     for zeile in (v_datenschutz(bedrock)):
         con.print(f"  • {zeile}")
     if ja:
