@@ -269,6 +269,12 @@ class Intent:
     clip_in: float = 0.0
     clip_available: float = 0.0
     clip_out: float | None = None
+    #: Nur Clips: Originalton uebernehmen. ``None`` = globaler Default.
+    audio: bool | None = None
+    #: Nur Clips: Pegel und Blende dieses Clips. ``None`` = globaler Default.
+    audio_gain: float | None = None
+    audio_music: float | None = None
+    audio_fade: float | None = None
 
 
 @dataclass

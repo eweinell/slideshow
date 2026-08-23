@@ -126,6 +126,45 @@ def test_ein_getrimmter_clip_uebernimmt_in_und_out():
     assert clip.snap == "none"
 
 
+def test_der_originalton_eines_clips_steht_im_feinschliff():
+    """Nachtrag 5.5: *welche* Clips ihren Ton behalten, entscheidet diese Datei.
+
+    Ein Kommandozeilenargument existierte nur fuer den einen Lauf; an der
+    Medien-ID verankert ueberlebt die Entscheidung jeden Neubau — dieselbe
+    Ueberlegung wie bei Standzeit und Clipschnitt.
+    """
+    manifest = _manifest(n=4, mit_clip=True)
+    edit, _plan, _cov = _bauen(manifest, overrides=Overrides(
+        media={"clip_001": MediaOverride.model_validate(
+            {"audio": True, "gain": 0.6, "music": 0.2, "fade": 0.4})}))
+    clip = next(s for s in edit.segments if isinstance(s, ClipSegment))
+    assert clip.audio is True
+    assert (clip.gain, clip.music, clip.fade) == (0.6, 0.2, 0.4)
+
+
+def test_ein_einzelner_clip_darf_gegen_die_filmweite_vorgabe_stumm_bleiben():
+    """Praezedenz wie ueberall: der Eintrag am Medium schlaegt `defaults`."""
+    manifest = _manifest(n=4, mit_clip=True)
+    ov = Overrides(defaults={"clip_audio": {"enabled": True}},
+                   media={"clip_001": MediaOverride.model_validate({"audio": False})})
+    edit, _plan, _cov = _bauen(manifest, overrides=ov)
+    clip = next(s for s in edit.segments if isinstance(s, ClipSegment))
+    assert clip.audio is False
+    assert edit.defaults.clip_audio.enabled is True
+
+
+def test_die_filmweiten_tonvorgaben_kommen_aus_defaults():
+    manifest = _manifest(n=4, mit_clip=True)
+    ov = Overrides(defaults={"clip_audio": {"enabled": True, "music": 0.15,
+                                            "fade": 0.5}})
+    edit, _plan, _cov = _bauen(manifest, overrides=ov)
+    cfg = edit.defaults.clip_audio
+    assert (cfg.enabled, cfg.music, cfg.fade) == (True, 0.15, 0.5)
+    # Der Clip selbst bleibt unbeschrieben — er folgt der Vorgabe.
+    clip = next(s for s in edit.segments if isinstance(s, ClipSegment))
+    assert clip.audio is None and clip.music is None
+
+
 def test_dur_null_macht_aus_einer_blende_einen_harten_schnitt():
     from slideshow.models import CutOverride
 
@@ -333,6 +372,22 @@ def test_ein_getrimmter_clip_wird_gelesen():
     assert neu.media["clip_001"].in_ == 2.0
     assert neu.media["clip_001"].out == 6.0
     assert neu.media["clip_001"].snap == "none"
+
+
+def test_der_originalton_wird_aus_der_handfassung_gelesen():
+    """Wer es in der Edit-List ausprobiert, bekommt es von `overrides` gesichert."""
+    manifest = _manifest(n=4, mit_clip=True)
+    frisch, _plan, _cov = _bauen(manifest)
+    hand = _handfassung(frisch)
+    clip = next(s for s in hand.segments if isinstance(s, ClipSegment))
+    clip.audio, clip.music = True, 0.25
+
+    neu, meldungen = diff_edit(frisch, hand, manifest)
+    assert meldungen == []
+    assert neu.media["clip_001"].audio is True
+    assert neu.media["clip_001"].music == 0.25
+    # Was nicht angefasst wurde, taucht auch nicht auf.
+    assert neu.media["clip_001"].gain is None
 
 
 def test_eine_geloeschte_blende_wird_zur_null():

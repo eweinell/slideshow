@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .cache import HashIndex, cache_key
+from .clipaudio import ClipAudioCue, collect_cues, filtergraph
 from .doctor import Capabilities
 from .encoders import EncoderProfile, master_profile, preview_profile
 from .errors import SchemaError, SlideshowError
@@ -57,6 +58,8 @@ class RenderStats:
     out_bytes: int = 0
     timeline_seconds: float = 0.0
     music_seconds: float = 0.0
+    #: Clips, deren Originalton in den Master gemischt wurde (5.5).
+    clip_audio: int = 0
     failures: list[str] = field(default_factory=list)
 
 
@@ -375,28 +378,59 @@ def write_concat_list(project: Project, jobs: list[SegmentJob]) -> Path:
     return path
 
 
+def mux_cmd_inputs(cmd: list[str]) -> list[str]:
+    """Die bisher gesetzten ``-i``-Eingaenge. Ihr Index adressiert sie im
+    Filtergraph, deshalb wird er gezaehlt statt geraten."""
+    return [cmd[i + 1] for i, tok in enumerate(cmd[:-1]) if tok == "-i"]
+
+
 def concat_and_mux(project: Project, jobs: list[SegmentJob], *, audio: Path | None,
                    out: Path, profile: EncoderProfile, timeline_seconds: float,
                    audio_start: float = 0.0, fade_seconds: float = 0.0,
+                   cues: list[ClipAudioCue] | None = None,
                    dry: DryRun | None = None) -> None:
-    """Segmente verlustfrei aneinanderhaengen und mit der Tonspur muxen."""
+    """Segmente verlustfrei aneinanderhaengen und mit der Tonspur muxen.
+
+    ``cues`` sind die Stuecke Originalton aus den Clips (5.5). Sie werden hier
+    untergemischt und nicht in die Segmente encodiert — deshalb kostet das Ein-
+    und Ausschalten des Originaltons nur diesen Mux-Lauf und keine einzige
+    Neurenderung. Die Ausblende am Filmende gilt fuer den fertigen Mix, nicht
+    nur fuer die Musik: sonst liefe ein Clip mit Originalton am Schluss noch,
+    waehrend das Bild schon in Schwarz steht.
+    """
     listfile = write_concat_list(project, jobs)
     video = project.cache / f"video_concat.{profile.container}"
+    cues = cues or []
 
     concat_cmd = ["ffmpeg", "-hide_banner", "-v", "error", "-y",
                   "-f", "concat", "-safe", "0", "-i", str(listfile),
                   "-c", "copy", "-fflags", "+genpts", str(video)]
 
+    has_music = bool(audio and audio.exists())
     mux_cmd = ["ffmpeg", "-hide_banner", "-v", "error", "-y", "-i", str(video)]
-    if audio and audio.exists():
+    music_input = None
+    if has_music:
         if audio_start > 0:
             mux_cmd += ["-ss", f"{audio_start:.6f}"]
         mux_cmd += ["-i", str(audio)]
+        music_input = 1
+    first_cue_input = len(mux_cmd_inputs(mux_cmd))
+    for cue in cues:
+        mux_cmd += ["-i", str(project.abs(cue.src))]
+
     mux_cmd += ["-c:v", "copy"]
     if profile.codec in ("hevc_nvenc", "libx265"):
         # Ohne dieses Tag spielt HEVC-in-MP4 auf Apple-Geraeten nicht.
         mux_cmd += ["-tag:v", "hvc1"]
-    if audio and audio.exists():
+
+    if cues:
+        fade_out = ((max(0.0, timeline_seconds - fade_seconds), fade_seconds)
+                    if fade_seconds > 0 else None)
+        graph, label = filtergraph(cues, first_input=first_cue_input,
+                                   music_input=music_input, fade_out=fade_out)
+        mux_cmd += ["-filter_complex", graph, "-c:a", "aac", "-b:a", "320k",
+                    "-map", "0:v:0", "-map", label]
+    elif has_music:
         # Kein -shortest: die Ziellaenge steht in der Edit-List. Audio wird
         # exakt darauf getrimmt bzw. mit apad aufgefuellt.
         af = "apad"
@@ -503,6 +537,13 @@ def render(project: Project, edit: EditList, plan: Plan, *, caps: Capabilities,
     start_f, end_f = selected[0].start_f, selected[-1].end_f
     timeline_seconds = to_time(end_f - start_f, plan.fps)
     audio = project.abs(edit.audio_file) if edit.audio_file else None
+    cues, cue_warnings = collect_cues(plan, edit, manifest, start_f=start_f, end_f=end_f)
+    for w in cue_warnings:
+        log.warning("%s", w)
+        console().print(f"  [yellow]WARN[/] {w}")
+    if cues:
+        log.info("Originalton aus %d Clip-Segmenten", len(cues))
+
     # Der Ton blendet genau so lang aus wie das Bild — und nur, wenn das Ende
     # des Films ueberhaupt im gerenderten Bereich liegt (`--range`).
     letzte = selected[-1]
@@ -511,7 +552,8 @@ def render(project: Project, edit: EditList, plan: Plan, *, caps: Capabilities,
     concat_and_mux(project, jobs, audio=audio, out=out, profile=profile,
                    timeline_seconds=timeline_seconds,
                    audio_start=to_time(start_f, plan.fps),
-                   fade_seconds=fade_s, dry=dry)
+                   fade_seconds=fade_s, cues=cues, dry=dry)
+    stats.clip_audio = len(cues)
 
     stats.timeline_seconds = timeline_seconds
     stats.music_seconds = to_time(plan.total_frames, plan.fps)
@@ -535,6 +577,8 @@ def print_report(stats: RenderStats, out: Path) -> None:
     t.add_row("Ausgabegroesse", f"{stats.out_bytes / 1e6:.1f} MB" if stats.out_bytes else "-")
     t.add_row("Laufzeit", f"{stats.timeline_seconds:.2f} s")
     t.add_row("Musiklaenge", f"{stats.music_seconds:.2f} s")
+    if stats.clip_audio:
+        t.add_row("Clips mit Originalton", str(stats.clip_audio))
     t.add_row("Ausgabe", str(out))
     con.print(t)
 

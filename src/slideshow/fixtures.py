@@ -268,6 +268,24 @@ def make_clips(outdir: Path, *, seconds: float = 4.0) -> dict[str, Path]:
     return made
 
 
+def make_audio_clip(path: Path, *, seconds: float = 4.0, fps: float = 30.0,
+                    freq: float = 300.0) -> Path | None:
+    """Clip mit *hoerbarem* Originalton — ein Dauerton bei ``freq`` (5.5).
+
+    Die Frequenz liegt bewusst weit unter den Klicks des Musik-Fixtures
+    (1000/1400 Hz): so laesst sich im fertigen Master pro Zeitfenster
+    getrennt messen, ob der Clipton laeuft und ob die Musik darunter
+    weggegangen ist.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ok = _ffmpeg(["-f", "lavfi", "-i", f"testsrc2=s=640x360:r={fps:g}",
+                  "-f", "lavfi", "-i", f"sine=frequency={freq:g}:sample_rate=48000",
+                  "-t", str(seconds), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                  "-preset", "veryfast", "-c:a", "aac", "-shortest", str(path)],
+                 desc="clip mit Ton")
+    return path if ok else None
+
+
 # --------------------------------------------------------------------------
 # Gesamtes Fixture-Set
 # --------------------------------------------------------------------------
@@ -290,6 +308,10 @@ def make_fixtures(root: Path, *, with_clips: bool = True) -> dict:
 
     images = make_images(root / "images")
     clips = make_clips(root / "clips") if with_clips and have("ffmpeg") else {}
+    if with_clips and have("ffmpeg"):
+        ton = make_audio_clip(root / "clips" / "clip_ton.mp4")
+        if ton is not None:
+            clips["ton"] = ton
 
     expected = {
         "audio": {"two_songs": asdict(main), "short_gap": asdict(short)},
