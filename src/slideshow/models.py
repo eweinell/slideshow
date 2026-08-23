@@ -147,6 +147,10 @@ class MediaItem(BaseModel):
     clip: ClipInfo | None = None
     #: Pfad des normalisierten Zwischenprodukts, relativ zum Projektroot
     cache_path: str = ""
+    #: Nur Clips: Pfad der extrahierten Originaltonspur, relativ zum
+    #: Projektroot. Leer, wenn der Clip keinen Ton hat oder die Extraktion
+    #: abgeschaltet war. Liegt in derselben Zeitbasis wie ``cache_path``.
+    audio_cache_path: str = ""
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -402,6 +406,46 @@ def _blendenmodus_pruefen(v: str) -> str:
     return v
 
 
+class ClipAudioDefaults(BaseModel):
+    """Originalton der Clips (Nachtrag 5.5, ``docs/originalton-clips.md``).
+
+    Der Ton eines Clips ist **kein** Default: eine Slideshow lebt von der
+    Musik, und ein Windgeraeusch mitten im Refrain zerstoert mehr, als der
+    Originalton beitraegt. Wer ihn will, sagt es — global ueber
+    ``enabled`` bzw. ``build --clip-audio``, oder je Segment ueber
+    ``audio: true`` in der Edit-List.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Globaler Default fuer alle Clip-Segmente ohne eigenes ``audio:``.
+    enabled: bool = False
+    #: Pegel des Clip-Tons (linear, 1.0 = unveraendert).
+    gain: float = 1.0
+    #: Pegel der Musik, *waehrend* Clip-Ton laeuft. 0.0 = stumm, 0.2 = leise
+    #: darunter liegen lassen. Ein *Pausieren* der Musik gibt es bewusst nicht
+    #: — die ganze Timeline ist auf die Tonspur gerechnet, Sample 0 ist ihr
+    #: Nullpunkt. Hielte die Musik an, verschoebe sich jeder folgende Beat.
+    music: float = 0.0
+    #: Ein-/Ausblende an den Clipgrenzen in Sekunden — gegen Knackser und
+    #: gegen das harte Aufreissen der Musik.
+    fade: float = 0.25
+
+    @field_validator("gain", "music")
+    @classmethod
+    def _level(cls, v: float) -> float:
+        if not 0.0 <= v <= 4.0:
+            raise ValueError("Pegel sind lineare Faktoren in [0, 4]")
+        return v
+
+    @field_validator("fade")
+    @classmethod
+    def _fade(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("fade darf nicht negativ sein")
+        return v
+
+
 class XfadeDefaults(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -533,6 +577,7 @@ class Defaults(BaseModel):
     kb: KBDefaults = Field(default_factory=KBDefaults)
     xfade: XfadeDefaults = Field(default_factory=XfadeDefaults)
     title: TitleDefaults = Field(default_factory=TitleDefaults)
+    clip_audio: ClipAudioDefaults = Field(default_factory=ClipAudioDefaults)
 
     @field_validator("still_tolerance")
     @classmethod
@@ -630,6 +675,14 @@ class ClipSegment(BaseModel):
     #: ``out`` = Out-Punkt aufs Beat-Raster ziehen, ``none`` = freie Laenge (6.6).
     snap: Literal["out", "none"] = "out"
     snap_back: bool | None = None
+    #: Originalton dieses Clips uebernehmen. ``None`` = ``defaults.clip_audio.enabled``.
+    audio: bool | None = None
+    #: Pegel und Blende *dieses* Clips. ``None`` = der Wert aus
+    #: ``defaults.clip_audio``. Gesetzt wird das ueber ``overrides.yaml``
+    #: (``media: {clip_007: {music: 0.2}}``), nicht von Hand hier (5.5).
+    gain: float | None = None
+    music: float | None = None
+    fade: float | None = None
 
     @field_validator("in_", "out", mode="before")
     @classmethod
@@ -899,6 +952,14 @@ class MediaOverride(BaseModel):
     in_: float | None = Field(None, alias="in")
     out: float | None = None
     snap: Literal["out", "none"] | None = None
+    #: Nur Clips — der Originalton (5.5). ``audio`` schaltet ihn fuer genau
+    #: dieses Medium ein oder aus, die drei Pegel weichen vom globalen
+    #: ``defaults.clip_audio`` ab. Der uebliche Fall ist ein einzelner zu
+    #: lauter Clip, und der ist damit eine Zeile.
+    audio: bool | None = None
+    gain: float | None = None
+    music: float | None = None
+    fade: float | None = None
 
     @field_validator("dur", "in_", "out", mode="before")
     @classmethod

@@ -308,6 +308,30 @@ schon: eine Änderung an `size` oder `darken` erzeugt eine neue Datei.
 
 ---
 
+### `defaults.clip_audio` — Originalton der Clips
+
+Der Ton der Videoclips wird standardmäßig verworfen; das Briefing baut in
+Abschnitt 7 sogar die Framerate-Politik darauf auf. Wer ihn braucht, schaltet
+ihn hier ein — global, und unter `media:` je Clip.
+
+```yaml
+clip_audio: {enabled: false, gain: 1.0, music: 0.0, fade: 0.25}
+```
+
+| Schlüssel | Typ | Vorgabe | Bedeutung |
+|---|---|---|---|
+| `enabled` | bool | `false` | Originalton für alle Clips übernehmen. |
+| `gain` | float | `1.0` | Pegel des Originaltons, linear. |
+| `music` | float | `0.0` | Pegel der Musik, *während* ein Clip mit Ton läuft. `0` = stumm, `0.15` = leise darunter. |
+| `fade` | float | `0.25` | Ein-/Ausblende an den Clipgrenzen, in Sekunden. Nie länger als die halbe Clipdauer. |
+
+Die Musik wird **gedückt, nicht angehalten**: die Timeline rechnet in absoluten
+Framenummern auf der Tonspur, ein Anhalten verschöbe jeden folgenden Beat gegen
+jeden folgenden Schnitt. Mehr dazu in
+[`originalton-clips.md`](originalton-clips.md).
+
+---
+
 ## `segments`
 
 Die Abfolge. Vier Typen, unterschieden über `type`.
@@ -545,10 +569,19 @@ Zwei Folgen sind beabsichtigt:
 | `out` | float\|string | – | Out-Punkt. Ohne Angabe läuft der Clip bis zum Rasterpunkt. |
 | `snap` | enum | `out` | `out` zieht den Out-Punkt auf das Beat-Raster (max. `clip_snap_tol` Beats), `none` lässt die Länge frei. |
 | `snap_back` | bool | von `defaults` | Wie beim Standbild. |
+| `audio` | bool | von `defaults.clip_audio.enabled` | Originalton dieses Clips übernehmen. |
+| `gain` | float | von `defaults.clip_audio.gain` | Pegel des Originaltons. |
+| `music` | float | von `defaults.clip_audio.music` | Musikpegel, solange dieser Clip läuft. `0` = stumm. |
+| `fade` | float | von `defaults.clip_audio.fade` | Ein-/Ausblende an den Grenzen dieses Clips. |
 
 `in` und `out` beziehen sich **immer** auf das (gegebenenfalls retimte)
 Intermediate, nie auf die Originaldatei. Beide akzeptieren Sekunden (`6.5`)
 oder `[[HH:]MM:]SS.mmm` als String (`"00:08.500"`, `"01:02:03.250"`).
+
+Die vier Tonschlüssel schreibt man nicht hierher, sondern nach
+[`overrides.yaml`](#overridesyaml--der-feinschliff) unter `media:` — dort
+überleben sie den Neubau. Sie stehen hier, weil `build` das Ergebnis sichtbar
+in die Edit-List schreibt, wie jeden anderen Wert auch.
 
 ### `xfade` — Übergang
 
@@ -1059,6 +1092,7 @@ media:                          # einzelne Medien, nach Medien-ID
   img_DSC06300: {dur: 8}
   img_DSC06412: {motion: none}  # dieses Bild steht still
   clip_MVI_0042: {in: 3.2, out: 11.8, snap: none}
+  clip_MVI_0043: {audio: true, music: 0.2}   # Originalton, Musik bleibt leise
 
 cuts:                           # Blenden, verankert am folgenden Medium
   - {before: img_DSC06413, dur: 0}
@@ -1068,7 +1102,7 @@ cuts:                           # Blenden, verankert am folgenden Medium
 |---|---|---|
 | `version` | int | `1`. Andere Versionen werden abgelehnt, nicht geraten. |
 | `defaults` | Objekt | Teilbaum von [`defaults:`](#defaults). Nur das Genannte weicht ab — `kb: {engine: …}` lässt `zoom_rate` unberührt. Geprüft wird gegen das ganze Schema, ein `still_second: 5` bricht also ab. |
-| `media` | Objekt | [Medien-ID](#medien-ids) → dieselben Schlüssel wie am Segment: `dur`, `beats`, `hold`, `snap_back`, `portrait`, `motion`, `kb` beim Standbild, `in`, `out`, `snap`, `snap_back` beim Clip. |
+| `media` | Objekt | [Medien-ID](#medien-ids) → dieselben Schlüssel wie am Segment: `dur`, `beats`, `hold`, `snap_back`, `portrait`, `motion`, `kb` beim Standbild, `in`, `out`, `snap`, `snap_back` und der Originalton `audio`, `gain`, `music`, `fade` beim Clip. |
 | `cuts` | Liste | `before:` ist die [Medien-ID](#medien-ids) **hinter** dem Schnitt, dazu `dur:`/`beats:` und `mode:`. `dur: 0` ist der harte Schnitt. |
 
 **Verankert wird an Medien-IDs, nie an Segmentindizes.** `segments[41]` zeigt

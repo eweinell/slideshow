@@ -17,7 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from slideshow.fixtures import TrackSpec, make_click_track, make_clips, make_images
+from slideshow.fixtures import (TrackSpec, make_audio_clip, make_click_track,
+                                make_clips, make_images)
 from slideshow.paths import Project
 from slideshow.proc import have
 
@@ -75,6 +76,14 @@ def clips(fixture_root: Path) -> dict[str, Path]:
     return make_clips(fixture_root / "clips", seconds=3.0)
 
 
+@pytest.fixture(scope="session")
+def clip_with_audio(fixture_root: Path) -> Path | None:
+    """Ein Clip mit Originalton — nur fuer die Tests zu 5.5."""
+    if not have("ffmpeg"):
+        return None
+    return make_audio_clip(fixture_root / "clips" / "clip_ton.mp4", seconds=4.0)
+
+
 # --------------------------------------------------------------------------
 # Projekt
 # --------------------------------------------------------------------------
@@ -94,10 +103,15 @@ def caps():
 
 def build_project(project: Project, *, images: list[Path], audio, caps,
                   clips: dict[str, Path] | None = None, fps: float = 60.0,
-                  size: tuple[int, int] = TEST_SIZE, **build_kwargs):
+                  size: tuple[int, int] = TEST_SIZE, order=None, overrides=None,
+                  **build_kwargs):
     """Faehrt die ganze Pipeline bis zur Edit-List durch.
 
-    Gibt ``(manifest, edit, plan, coverage)`` zurueck.
+    Gibt ``(manifest, edit, plan, coverage)`` zurueck. ``order`` ist die
+    Reihenfolge der Medien-Ids — entweder direkt eine Liste oder eine Funktion,
+    die sie aus dem fertigen Manifest ableitet; ``overrides`` ist der
+    Feinschliff aus ``overrides.yaml``, ebenfalls als Wert oder als Funktion
+    ueber dem fertigen Manifest.
     """
     from slideshow.audio import build_mix
     from slideshow.beats import detect_regions
@@ -124,8 +138,10 @@ def build_project(project: Project, *, images: list[Path], audio, caps,
     beatmap = detect_regions(mix, track_bounds=[(t.start, t.end)
                                                for t in manifest.audio.tracks])
     defaults = Defaults(**build_kwargs) if build_kwargs else Defaults()
-    edit, plan, cov = build_edit_list(project, manifest, beatmap,
-                                      defaults=defaults, fps=fps, size=size)
+    edit, plan, cov = build_edit_list(
+        project, manifest, beatmap, defaults=defaults, fps=fps, size=size,
+        order=order(manifest) if callable(order) else order,
+        overrides=overrides(manifest) if callable(overrides) else overrides)
     edit.save(project.edit)
     return (manifest, edit, plan, cov)
 

@@ -30,6 +30,7 @@ from pathlib import Path
 from xml.dom import minidom
 
 from .build import plan_from_edit
+from .clipaudio import collect_cues
 from .errors import SlideshowError
 from .kenburns import plan_motion
 from .models import EditList, Manifest, StillSegment, TitleSegment, XfadeSegment
@@ -167,6 +168,9 @@ def export_mlt(project: Project, edit: EditList, manifest: Manifest | None = Non
         ET.SubElement(audio_pl, "entry",
                       {"producer": aid, "in": "0", "out": str(plan.total_frames - 1)})
 
+    clip_audio_pl = _clip_audio_playlist(root, project, plan, edit, manifest,
+                                         counter=counter)
+
     tractor = ET.SubElement(root, "tractor", {
         "id": "tractor0", "title": "slideshow",
         "in": "0", "out": str(plan.total_frames - 1)})
@@ -176,6 +180,9 @@ def export_mlt(project: Project, edit: EditList, manifest: Manifest | None = Non
         ET.SubElement(tractor, "track", {"producer": pl.get("id")})
     if audio_pl is not None:
         ET.SubElement(tractor, "track", {"producer": "playlist_audio", "hide": "video"})
+    if clip_audio_pl is not None:
+        ET.SubElement(tractor, "track",
+                      {"producer": "playlist_clipaudio", "hide": "video"})
 
     # Spur 2 ueber Spur 1 blenden. Ohne Ueberlappung ist die Transition ein
     # harter Schnitt, mit Ueberlappung genau unsere Blende.
@@ -194,6 +201,39 @@ def export_mlt(project: Project, edit: EditList, manifest: Manifest | None = Non
     _prop(comp, "mlt_service", "frei0r.cairoblend")
 
     return _pretty(root)
+
+
+def _clip_audio_playlist(root: ET.Element, project: Project, plan, edit: EditList,
+                         manifest: Manifest | None, *, counter) -> ET.Element | None:
+    """Eigene Tonspur mit dem Originalton der Clips (5.5).
+
+    Kdenlive bekommt die Schnipsel an ihrem Platz auf der Timeline; das
+    Herunterziehen der Musik bleibt dort dem Nutzer ueberlassen. Der Renderer
+    macht es selbst (``defaults.clip_audio.music``), aber eine Automation in
+    ein fremdes Schnittprogramm hineinzuschreiben, das der Nutzer gerade
+    deshalb geoeffnet hat, um von Hand zu mischen, waere uebergriffig.
+    """
+    cues, warnings = collect_cues(plan, edit, manifest)
+    for w in warnings:
+        log.warning("%s", w)
+    if not cues:
+        return None
+
+    pl = ET.SubElement(root, "playlist", {"id": "playlist_clipaudio"})
+    cursor = 0
+    for n, cue in enumerate(cues):
+        start = int(round(cue.start * plan.fps))
+        frames = max(1, int(round(cue.duration * plan.fps)))
+        if start > cursor:
+            ET.SubElement(pl, "blank", {"length": str(start - cursor)})
+        pid = counter.next("producer")
+        _producer(root, pid, project.abs(cue.src), kind="audio",
+                  length=plan.total_frames + 600)
+        a = int(round(cue.offset * plan.fps))
+        ET.SubElement(pl, "entry",
+                      {"producer": pid, "in": str(a), "out": str(a + frames - 1)})
+        cursor = start + frames
+    return pl
 
 
 class _Counter:

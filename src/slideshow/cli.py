@@ -29,6 +29,33 @@ log = logging.getLogger("slideshow.cli")
 # Argumente
 # --------------------------------------------------------------------------
 
+def add_clip_audio_args(p: argparse.ArgumentParser) -> None:
+    """Die Schalter fuer den Originalton der Clips (5.5).
+
+    Bewusst nur die vier Werte, die ``defaults.clip_audio`` auch wirklich
+    kennt. *Welche* Clips ihren Ton behalten, entscheidet ``overrides.yaml``
+    (``media: {clip_007: {audio: true}}``): dort ist es an der Medien-ID
+    verankert und ueberlebt jeden Neubau, waehrend ein Kommandozeilenargument
+    nur diesen einen Lauf existiert — Architektur-Invariante 1.
+    """
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--clip-audio", action="store_true",
+                   help="Originalton der Videoclips uebernehmen (Default: aus). "
+                        "Je Clip steuert das overrides.yaml unter `media:`.")
+    g.add_argument("--no-clip-audio", action="store_true",
+                   help="die filmweite Vorgabe abschalten. Ein ausdrueckliches "
+                        "`audio: true` an einem Medium bleibt davon unberuehrt — "
+                        "wie bei jedem anderen Feld schlaegt der Eintrag am "
+                        "Medium die Vorgabe.")
+    p.add_argument("--clip-audio-music", type=float, default=None, metavar="PEGEL",
+                   help="Musikpegel waehrend eines Clips mit Originalton: "
+                        "0 = stumm (Default), 0.15 = leise darunter")
+    p.add_argument("--clip-audio-gain", type=float, default=None, metavar="PEGEL",
+                   help="Pegel des Originaltons (Default: 1.0)")
+    p.add_argument("--clip-audio-fade", type=float, default=None, metavar="S",
+                   help="Ein-/Ausblende an den Clipgrenzen (Default: 0.25 s)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="slideshow",
@@ -83,6 +110,10 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--intermediate", default="dnxhr_hqx",
                     choices=("dnxhr_hqx", "hevc_intra_nvenc", "hevc_intra_cpu", "ffv1"))
     pp.add_argument("--jobs", type=int, default=None)
+    pp.add_argument("--no-audio-extract", action="store_true",
+                    help="Originalton der Clips gar nicht erst extrahieren. "
+                         "Ob er im Film landet, entscheidet spaeter "
+                         "`build`/`render --clip-audio`.")
     pp.add_argument("--ranges-from", default=None, metavar="edit.yaml",
                     help="nur die tatsaechlich verwendeten Clipbereiche extrahieren")
     pp.add_argument("--order", default=None, metavar="order.yaml",
@@ -306,6 +337,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "Clipschnitt, einzelne Blenden "
                          "(Default: overrides.yaml im Projekt, falls vorhanden)")
     bu.add_argument("--xfade-beats", type=float, default=None)
+    add_clip_audio_args(bu)
     bu.add_argument("--no-xfade", action="store_true",
                     help="keine automatischen Uebergaenge erzeugen")
     bu.add_argument("--force", action="store_true",
@@ -363,6 +395,17 @@ def build_parser() -> argparse.ArgumentParser:
 # --------------------------------------------------------------------------
 # Subkommandos
 # --------------------------------------------------------------------------
+
+def _print_commands(text: str) -> None:
+    """Kommandozeilen ausgeben, ohne dass Rich sie umdeutet.
+
+    ffmpeg-Argumente sind voller ``[aout]`` und ``0:v:0`` — das eine liest
+    Rich als Stil-Tag und verschluckt es, das andere als Emoji-Namen. Eine
+    Kommandozeile, die man nicht per Copy-und-Paste ausfuehren kann, ist als
+    Trockenlauf wertlos.
+    """
+    console().print(text, markup=False, emoji=False, highlight=False)
+
 
 def cmd_doctor(args, project: Project) -> int:
     from .doctor import build_report, print_report
@@ -509,7 +552,7 @@ def cmd_audio(args, project: Project) -> int:
     info.file = project.rel(out)
 
     if args.dry_run:
-        console().print(dry.as_text())
+        _print_commands(dry.as_text())
         return 0
 
     (project.cache / "mix.json").write_text(
@@ -576,9 +619,10 @@ def cmd_preprocess(args, project: Project) -> int:
     stats = preprocess(project, manifest, caps=caps, portrait_mode=args.portrait,
                        image_format=args.image_format, size=tuple(_size_of(manifest)),
                        intermediate_codec=args.intermediate, jobs=args.jobs,
-                       dry=dry, spans=spans, only=only)
+                       dry=dry, spans=spans, only=only,
+                       clip_audio=not args.no_audio_extract)
     if args.dry_run:
-        console().print(dry.as_text())
+        _print_commands(dry.as_text())
         return 0
 
     manifest.save(path)
@@ -588,6 +632,11 @@ def cmd_preprocess(args, project: Project) -> int:
         console().print(f"  [dim]{stats.skipped} Medien ausgelassen — sie stehen "
                         f"nicht in der Auswahl. `--all` verarbeitet trotzdem "
                         f"alles.[/dim]")
+    if stats.clip_audio_done or stats.clip_audio_cached:
+        console().print(f"Originalton: {stats.clip_audio_done} neu, "
+                        f"{stats.clip_audio_cached} aus Cache "
+                        f"[dim](verwendet wird er nur, wo overrides.yaml bzw. "
+                        f"`build --clip-audio` ihn anfordert)[/dim]")
     if stats.failures:
         for f in stats.failures:
             console().print(f"  [red]FAIL[/] {f}")
@@ -773,6 +822,14 @@ def _edit_bauen(project: Project, args, manifest, *, overrides=None):
         defaults.xfade.beats = args.xfade_beats
     if opt("no_xfade"):
         defaults.xfade.auto = False
+    if opt("clip_audio"):
+        defaults.clip_audio.enabled = True
+    elif opt("no_clip_audio"):
+        defaults.clip_audio.enabled = False
+    for feld in ("gain", "music", "fade"):
+        wert = opt(f"clip_audio_{feld}")
+        if wert is not None:
+            setattr(defaults.clip_audio, feld, wert)
 
     chapters = _load_chapters(project, opt("chapters"), defaults)
     order, order_notes, olist = _load_order(project, opt("order"), manifest)
@@ -878,6 +935,7 @@ def cmd_build(args, project: Project) -> int:
     plan2 = validate_edit(edit, manifest)
     segments = resolve(plan2)
     tpath = write_timeline(project, plan2, segments)
+    _print_clip_audio(edit, defaults.clip_audio)
     console().print(f"\nEdit-List: {out}  ({len(edit.segments)} Segmente, "
                     f"davon {sum(1 for s in edit.segments if s.type == 'xfade')} Uebergaenge)")
     console().print(f"Aufgeloeste Timeline: {tpath}")
@@ -1681,6 +1739,23 @@ def _print_coverage(cov, defaults, plan) -> None:
         con.print(f"  [yellow]WARN[/] {w}")
 
 
+def _print_clip_audio(edit, cfg) -> None:
+    """Was der Originalton gerade tut — in einer Zeile, ohne die Datei zu oeffnen."""
+    from .clipaudio import wants_audio_flag
+    mit = [s for s in edit.segments
+           if s.type == "clip" and wants_audio_flag(s.audio, cfg)]
+    if not mit:
+        return
+    namen = [Path(s.src).stem for s in mit]
+    gezeigt = ", ".join(namen[:4]) + (f" (+{len(namen) - 4})" if len(namen) > 4 else "")
+    # Der Musikpegel kann je Clip abweichen (overrides.yaml). Genannt wird,
+    # was tatsaechlich vorkommt — eine einzelne Zahl waere hier gelogen.
+    pegel = sorted({cfg.music if s.music is None else s.music for s in mit})
+    text = ", ".join("stumm" if p <= 0 else f"{p * 100:.0f} %" for p in pegel)
+    console().print(f"[dim]Originalton: {len(mit)} Clip-Segmente ({gezeigt}). "
+                    f"Musik geht dort auf {text} zurueck.[/dim]")
+
+
 def _parse_size(spec: str) -> tuple[int, int]:
     try:
         w, h = spec.lower().split("x")
@@ -1719,7 +1794,7 @@ def cmd_render(args, project: Project) -> int:
                    jobs_limit=args.jobs, preview=args.preview, codec=args.codec,
                    range_spec=args.range_spec, dry=dry)
     if args.dry_run:
-        console().print(dry.as_text())
+        _print_commands(dry.as_text())
         return 0
     print_report(stats, out)
     return 0

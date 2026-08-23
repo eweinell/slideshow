@@ -45,10 +45,11 @@ from .models import (CutOverride, EditList, Manifest, MediaOverride, Overrides,
 OVERRIDES_NAME = "overrides.yaml"
 
 #: Welche Felder an welchem Segmenttyp verglichen und uebertragen werden.
-#: ``portrait`` steht nur beim Standbild, ``in``/``out``/``snap`` nur beim
-#: Clip; die Zuordnung hier ist die einzige Stelle, die das weiss.
+#: ``portrait`` steht nur beim Standbild, ``in``/``out``/``snap`` und der
+#: Originalton (``audio``/``gain``/``music``/``fade``, 5.5) nur beim Clip; die
+#: Zuordnung hier ist die einzige Stelle, die das weiss.
 FELDER_STILL = ("beats", "dur", "hold", "snap_back", "portrait", "motion", "kb")
-FELDER_CLIP = ("in_", "out", "snap", "snap_back")
+FELDER_CLIP = ("in_", "out", "snap", "snap_back", "audio", "gain", "music", "fade")
 
 _EPS = 1e-6
 

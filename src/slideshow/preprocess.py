@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .cache import HashIndex, cache_key, hash_file
+from .clipaudio import SAMPLE_RATE as CLIP_AUDIO_RATE, atempo_chain
 from .doctor import Capabilities
 from .encoders import intermediate_args
 from .errors import SlideshowError
@@ -67,6 +68,8 @@ class PreprocessStats:
     clips_cached: int = 0
     #: Medien, die die Auswahl ausgelassen hat (``only``).
     skipped: int = 0
+    clip_audio_done: int = 0
+    clip_audio_cached: int = 0
     failures: list[str] = None
 
     def __post_init__(self):
@@ -390,16 +393,26 @@ def _blur_pad_chain(w: int, h: int, *, mode: str) -> str:
     )
 
 
-def clip_intermediate_cmd(project: Project, item: MediaItem, dst: Path, *,
-                          size: tuple[int, int], fps: float, caps: Capabilities,
-                          codec: str, portrait_mode: str,
-                          span: tuple[float, float] | None = None,
-                          handle: float = 1.0) -> tuple[list[str], float, float]:
-    """Baut das ffmpeg-Kommando fuer ein Clip-Intermediate.
+@dataclass(frozen=True)
+class ClipSpan:
+    """Der Ausschnitt eines Clips in beiden Zeitbasen.
 
-    Gibt zusaetzlich Offset und Dauer des Intermediates *in der retimten
-    Zeitbasis* zurueck — darauf beziehen sich in/out der Edit-List (Prinzip 3).
+    ``out_*`` liegt in der retimten Zeitbasis — darauf beziehen sich in/out
+    der Edit-List (Prinzip 3). ``src_*`` ist dieselbe Stelle im Original und
+    geht an ``-ss``/``-t``. Bild und Ton lesen denselben Ausschnitt, weil sie
+    dieselbe Rechnung benutzen.
     """
+
+    out_start: float
+    out_duration: float
+    src_start: float
+    src_duration: float
+    #: Geschwindigkeit relativ zum Original (> 1 = schneller).
+    speed: float
+
+
+def clip_span(item: MediaItem, *, fps: float, span: tuple[float, float] | None,
+              handle: float = 1.0) -> ClipSpan:
     info = item.clip
     assert info is not None
     rt = plan_retime(info.fps, fps)
@@ -415,6 +428,24 @@ def clip_intermediate_cmd(project: Project, item: MediaItem, dst: Path, *,
     # Quellzeiten: die Zeitbasis vor dem Retiming.
     src_start = out_start / rt.setpts if rt.setpts else out_start
     src_dur = (out_end - out_start) / rt.setpts if rt.setpts else (out_end - out_start)
+    return ClipSpan(out_start=out_start, out_duration=out_end - out_start,
+                    src_start=src_start, src_duration=src_dur, speed=rt.speed)
+
+
+def clip_intermediate_cmd(project: Project, item: MediaItem, dst: Path, *,
+                          size: tuple[int, int], fps: float, caps: Capabilities,
+                          codec: str, portrait_mode: str,
+                          span: tuple[float, float] | None = None,
+                          handle: float = 1.0) -> tuple[list[str], float, float]:
+    """Baut das ffmpeg-Kommando fuer ein Clip-Intermediate.
+
+    Gibt zusaetzlich Offset und Dauer des Intermediates *in der retimten
+    Zeitbasis* zurueck — darauf beziehen sich in/out der Edit-List (Prinzip 3).
+    """
+    info = item.clip
+    assert info is not None
+    cs = clip_span(item, fps=fps, span=span, handle=handle)
+    out_start, src_start, src_dur = cs.out_start, cs.src_start, cs.src_duration
 
     args = ["ffmpeg", "-hide_banner", "-v", "error", "-y"]
     # 4:2:2-10-Bit-HEVC ohne passendes NVDEC: hwaccel gezielt deaktivieren,
@@ -437,7 +468,11 @@ def clip_intermediate_cmd(project: Project, item: MediaItem, dst: Path, *,
     args += [
         "-vf", vf,
         "-fps_mode", "cfr", "-r", f"{fps:g}",
-        "-an",                                      # Originalton wird nie verwendet
+        # Das Bildsegment bleibt stumm. Der Originalton wird — wenn er
+        # ueberhaupt verlangt ist — als eigene Datei extrahiert und erst beim
+        # Muxen untergemischt (5.5), damit das Umschalten kein einziges
+        # gerendertes Segment ungueltig macht.
+        "-an",
         *enc,
         "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
         # Im Output darf kein Rotations-Tag zurueckbleiben; die Rotation ist
@@ -445,7 +480,80 @@ def clip_intermediate_cmd(project: Project, item: MediaItem, dst: Path, *,
         "-metadata:s:v", "rotate=0",
         str(dst),
     ]
-    return (args, out_start, out_end - out_start)
+    return (args, out_start, cs.out_duration)
+
+
+# --------------------------------------------------------------------------
+# 5.5 Originalton der Clips
+# --------------------------------------------------------------------------
+
+def clip_audio_cmd(project: Project, item: MediaItem, dst: Path, *, fps: float,
+                   span: tuple[float, float] | None = None,
+                   handle: float = 1.0) -> list[str]:
+    """Extrahiert den Originalton eines Clips in die Zeitbasis des Intermediates.
+
+    Derselbe Ausschnitt wie beim Bild (:func:`clip_span`) und dieselbe
+    Streckung: wurde das Bild per ``setpts`` konformiert, muss der Ton per
+    ``atempo`` mit — sonst laeuft er dem Clip davon. ``atempo`` aendert dabei
+    das Tempo, nicht die Tonhoehe.
+
+    Die Datei entsteht unabhaengig davon, ob der Ton spaeter verwendet wird.
+    Sie ist klein gegen das Videointermediate, und so kostet das Einschalten
+    von ``audio: true`` an einem Segment keinen zweiten Preprocessing-Lauf.
+    """
+    cs = clip_span(item, fps=fps, span=span, handle=handle)
+    chain = [*atempo_chain(cs.speed), f"aresample={CLIP_AUDIO_RATE}",
+             "aformat=channel_layouts=stereo"]
+
+    args = ["ffmpeg", "-hide_banner", "-v", "error", "-y"]
+    if cs.src_start > 0:
+        args += ["-ss", f"{cs.src_start:.6f}"]
+    args += ["-i", str(project.abs(item.path))]
+    if cs.src_duration > 0:
+        args += ["-t", f"{cs.src_duration:.6f}"]
+    args += ["-vn", "-map", "0:a:0", "-af", ",".join(chain),
+             "-c:a", "flac", str(dst)]
+    return args
+
+
+def _extract_clip_audio(project: Project, item: MediaItem, *, fps: float,
+                        span: tuple[float, float] | None, index: HashIndex,
+                        stats: PreprocessStats, dry: DryRun | None) -> None:
+    """Legt ``cache/<id>.audio.flac`` an, sofern der Clip ueberhaupt Ton hat."""
+    if item.clip is None or not item.clip.has_audio:
+        item.audio_cache_path = ""
+        return
+    dst = project.cache / f"{item.id}.audio.flac"
+    cmd = clip_audio_cmd(project, item, dst, fps=fps, span=span)
+    try:
+        key = cache_key([index.file_hash(project.abs(item.path))],
+                        {"op": "clip-audio", "v": PREPROC_VERSION, "cmd": cmd[3:]})
+    except FileNotFoundError as exc:
+        stats.failures.append(str(exc))
+        return
+
+    item.audio_cache_path = project.rel(dst)
+    if _is_fresh(dst, key):
+        stats.clip_audio_cached += 1
+        return
+    if dry and dry.enabled:
+        dry.record(cmd)
+        return
+    try:
+        run(cmd, timeout=3600)
+        if not dst.exists() or dst.stat().st_size == 0:
+            raise SlideshowError(f"ffmpeg schrieb keine Tonspur: {dst}")
+        _mark_fresh(dst, key)
+        stats.clip_audio_done += 1
+    except SlideshowError as exc:
+        # Eine fehlende Tonspur darf den Clip nicht mitreissen: das Bild ist
+        # das Wesentliche, der Originalton die Zugabe. Gemeldet wird sie
+        # trotzdem, sonst fehlt sie spaeter unerklaerlich.
+        dst.unlink(missing_ok=True)
+        _keyfile(dst).unlink(missing_ok=True)
+        item.audio_cache_path = ""
+        stats.failures.append(f"{item.id} (Originalton): {exc}")
+        log.warning("Originalton von %s nicht extrahierbar: %s", item.id, exc)
 
 
 # --------------------------------------------------------------------------
@@ -458,6 +566,7 @@ def preprocess(project: Project, manifest: Manifest, *, caps: Capabilities,
                intermediate_codec: str = "dnxhr_hqx", jobs: int | None = None,
                dry: DryRun | None = None,
                spans: dict[str, tuple[float, float]] | None = None,
+               clip_audio: bool = True,
                long_edge: int = LONG_EDGE,
                only: set[str] | None = None) -> PreprocessStats:
     """Verarbeitet die Medien des Manifests nach ``cache/``.
@@ -475,6 +584,11 @@ def preprocess(project: Project, manifest: Manifest, *, caps: Capabilities,
 
     ``long_edge`` ist der Subpixel-Vorrat fuer Ken Burns und nur fuer die
     Testsuite gedacht — dort waeren 7680 px reine Wartezeit.
+
+    ``clip_audio`` extrahiert den Originalton der Clips als Beiwerk (5.5).
+    Verwendet wird er nur auf Anforderung; die Extraktion vorab zu erledigen
+    kostet wenig und erspart einen zweiten Lauf, wenn die Entscheidung
+    spaeter faellt.
     """
     project.ensure_dirs()
     stats = PreprocessStats()
@@ -543,6 +657,9 @@ def preprocess(project: Project, manifest: Manifest, *, caps: Capabilities,
         if item.clip:
             item.clip.cache_offset = round(offset, 6)
             item.clip.cache_duration = round(dur, 6)
+        if clip_audio:
+            _extract_clip_audio(project, item, fps=fps, span=span, index=index,
+                                stats=stats, dry=dry)
         if _is_fresh(dst, key):
             stats.clips_cached += 1
             continue

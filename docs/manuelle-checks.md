@@ -185,7 +185,39 @@ Unterschied in dreißig Sekunden — und ob er das Geld wert war.
 
 ---
 
-## 7. Nach dem ersten echten Durchlauf prüfen
+## 7. Originalton der Clips (Nachtrag 5.5)
+
+**Warum manuell:** Die Testsuite misst, *dass* der Clipton im Master steht und
+die Musik dort zurückgeht — ob der Wechsel angenehm klingt, entscheidet das
+Ohr. Synthetische Sinustöne sagen darüber nichts.
+
+**Vorgehen:**
+
+1. In `overrides.yaml` `defaults: {clip_audio: {enabled: true}}` setzen —
+   oder für einen ersten Blick `slideshow build --clip-audio`.
+2. `slideshow render edit.yaml -o out/ton.mp4 --preview`
+3. Mit Kopfhörern gezielt die Clipgrenzen abhören.
+
+**Worauf achten:**
+
+- [ ] Knackst es am Ein- oder Aussetzen? Dann `fade: 0.4` — global unter
+      `defaults.clip_audio` oder für den einen Clip unter `media:`.
+- [ ] Reißt die Musik zu abrupt weg? Dann `music: 0.15` — sie bleibt dann
+      leise stehen, statt ganz zu verschwinden.
+- [ ] Ist der Clipton zu laut oder zu leise gegen die auf −16 LUFS
+      normalisierte Musik? Der Originalton wird bewusst **nicht**
+      loudnorm-behandelt (das würde Raumeindruck und Dynamik plätten);
+      `gain: 0.6` regelt ihn stattdessen, je Clip oder global.
+- [ ] Läuft der Ton synchron zum Bild? Bei konformiertem Material (50p → 60p)
+      läuft er per `atempo` mit; auffällig wäre ein *Auseinanderlaufen* über
+      die Clipdauer, nicht ein konstanter Versatz.
+- [ ] Einzelne Clips, deren Ton stört, in `overrides.yaml` abschalten
+      (`media: {clip_12: {audio: false}}`) und neu bauen. Das kostet keine
+      Neurenderung — die Segmente sind stumm, es läuft nur der Mux erneut.
+
+---
+
+## 8. Nach dem ersten echten Durchlauf prüfen
 
 - [ ] Liegt Bild 63 aufrecht? (EXIF-Orientation wird im Preprocessing hart
       eingebrannt — wenn nicht, fehlt `exiftool`; `doctor` warnt davor.)

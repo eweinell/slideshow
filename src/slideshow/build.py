@@ -130,7 +130,13 @@ def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
                                   clip_out=clip_out,
                                   dur=(clip_out - clip_in) if clip_out is not None else None,
                                   snap=(e.snap if (e and e.snap) else "out"),
-                                  snap_back=(e.snap_back if e else None)))
+                                  snap_back=(e.snap_back if e else None),
+                                  # Originalton (5.5) — derselbe Feinschliff-
+                                  # Eintrag wie Schnitt und Standzeit.
+                                  audio=(e.audio if e else None),
+                                  audio_gain=(e.gain if e else None),
+                                  audio_music=(e.music if e else None),
+                                  audio_fade=(e.fade if e else None)))
     if not intents:
         raise SlideshowError("Keine vorverarbeiteten Medien gefunden. "
                              "`slideshow preprocess` zuerst laufen lassen.")
@@ -1150,7 +1156,9 @@ def _segment_from_slot(plan: Plan, i: int, slot, defaults: Defaults):
     if intent.kind == "clip":
         return ClipSegment(**{
             "src": intent.src, "in": round(slot.clip_in, 6),
-            "out": round(slot.clip_out, 6), "snap": intent.snap})
+            "out": round(slot.clip_out, 6), "snap": intent.snap,
+            "audio": intent.audio, "gain": intent.audio_gain,
+            "music": intent.audio_music, "fade": intent.audio_fade})
 
     felder: dict = {"beats": None, "dur": None, "snap_back": None,
                     "hold": bool(slot.hold), "kb": intent.kb}
@@ -1240,6 +1248,8 @@ def plan_from_edit(edit: EditList, manifest: Manifest | None = None) -> Plan:
             intents.append(Intent(
                 kind="clip", src=seg.src, index=idx, snap=seg.snap,
                 snap_back=seg.snap_back, clip_in=seg.in_, clip_out=seg.out,
+                audio=seg.audio, audio_gain=seg.gain, audio_music=seg.music,
+                audio_fade=seg.fade,
                 clip_available=available if available else (seg.out or 0.0),
                 dur=(seg.out - seg.in_) if seg.out is not None else None))
             if offset is not None and seg.in_ < offset - 1e-4:

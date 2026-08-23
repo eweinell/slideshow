@@ -32,6 +32,19 @@ def quelle(tmp_path, images, click_two_songs):
     return (src, Path(click_two_songs.path))
 
 
+@pytest.fixture
+def quelle_mit_clip(tmp_path, images, click_two_songs, clip_with_audio):
+    """Dasselbe plus einen Clip, der einen Originalton *hat*."""
+    if clip_with_audio is None:
+        pytest.skip("Clip-Fixture mit Ton konnte nicht erzeugt werden")
+    src = tmp_path / "material"
+    src.mkdir()
+    for p in images[:5]:
+        shutil.copy(p, src / p.name)
+    shutil.copy(clip_with_audio, src / clip_with_audio.name)
+    return (src, Path(click_two_songs.path), clip_with_audio.name)
+
+
 def test_hilfe_und_version(capsys):
     with pytest.raises(SystemExit) as exc:
         _run("--version")
@@ -41,6 +54,47 @@ def test_hilfe_und_version(capsys):
 def test_doctor_liefert_exitcode(tmp_path):
     code = _run("--project", str(tmp_path), "doctor", "--quick")
     assert code in (0, 2)
+
+
+def test_clip_audio_wird_ueber_overrides_yaml_gestellt(tmp_path, quelle_mit_clip):
+    """Nachtrag 5.5: ``edit.yaml`` wird nicht von Hand editiert.
+
+    Der Originalton wird deshalb dort angefordert, wo auch Standzeit und
+    Clipschnitt stehen — in ``overrides.yaml``, verankert an der Medien-ID.
+    """
+    src, audio, clipname = quelle_mit_clip
+    proj = tmp_path / "proj"
+    edit = proj / "edit.yaml"
+
+    assert _run("--project", str(proj), "probe", str(src), "--fps", "60") == 0
+    assert _run("--project", str(proj), "audio", str(audio)) == 0
+    assert _run("--project", str(proj), "preprocess",
+                "--intermediate", "hevc_intra_cpu") == 0
+    assert _run("--project", str(proj), "beats") == 0
+
+    # Ohne Eintrag: kein Originalton.
+    assert _run("--project", str(proj), "build", "--force") == 0
+    assert "audio: true" not in edit.read_text(encoding="utf-8")
+
+    from slideshow.models import Manifest
+    clip_id = next(m.id for m in Manifest.load(proj / "manifest.json").media
+                   if m.kind == "clip")
+    (proj / "overrides.yaml").write_text(
+        "version: 1\n"
+        "defaults: {clip_audio: {music: 0.15}}\n"
+        f"media: {{{clip_id}: {{audio: true, gain: 0.6}}}}\n", encoding="utf-8")
+
+    assert _run("--project", str(proj), "build", "--force") == 0
+    text = edit.read_text(encoding="utf-8")
+    assert "audio: true" in text and "gain: 0.6" in text and "music: 0.15" in text
+
+    # Der Schalter am build kippt die *filmweite* Vorgabe fuer diesen Lauf.
+    # Der Eintrag am Medium bleibt stehen und gewinnt weiterhin — dieselbe
+    # Praezedenz wie bei jedem anderen Feld, und der Grund, warum `--clip-audio`
+    # ein `audio: false` an einem einzelnen Clip nicht ueberrennt.
+    assert _run("--project", str(proj), "build", "--force", "--no-clip-audio") == 0
+    text = edit.read_text(encoding="utf-8")
+    assert "enabled: false" in text and "audio: true" in text
 
 
 def test_ganze_kette(tmp_path, quelle):

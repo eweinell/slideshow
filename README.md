@@ -398,6 +398,72 @@ mit einer einzigen Beat-Region über den ganzen Track bleibt gültig:
 slideshow beats --bpm 152 --offset 0.35
 ```
 
+## Originalton der Videoclips
+
+Standardmäßig trägt der Film nur die Musik — eine Slideshow lebt von ihr, und
+ein Windgeräusch mitten im Refrain zerstört mehr, als der Originalton beiträgt.
+Auf Anforderung läuft er trotzdem mit, und die Musik geht darunter weg.
+
+Eingestellt wird das in `overrides.yaml` — global unter `defaults:` und je Clip unter `media:`, verankert an der Medien-ID:
+
+```yaml
+defaults:
+  clip_audio: {enabled: true, music: 0.0, gain: 1.0, fade: 0.25}
+
+media:
+  clip_kinder_lachen: {audio: true, music: 0.2}   # Musik bleibt leise stehen
+  clip_wind_am_kliff: {audio: false}              # dieser eine nicht
+  clip_brandung:      {gain: 0.6, fade: 0.6}      # zu laut, weicher einblenden
+```
+
+| Schlüssel | Bedeutung |
+|---|---|
+| `enabled` / `audio` | Originalton übernehmen — global bzw. für dieses Medium |
+| `music` | Musikpegel *während* eines Clips mit Ton, `0` = stumm |
+| `gain` | Pegel des Originaltons |
+| `fade` | Ein-/Ausblende an den Clipgrenzen |
+
+Die vier globalen Werte haben auch Schalter am `build`, für den schnellen
+Blick: `--clip-audio`, `--no-clip-audio`, `--clip-audio-music`,
+`--clip-audio-gain`, `--clip-audio-fade`. Sie gelten für genau einen Lauf;
+was bleiben soll, gehört in die Datei. *Welche* Clips ihren Ton behalten, gibt
+es bewusst nur dort — an einer Medien-ID verankert überlebt es jeden Neubau,
+ein Kommandozeilenargument nicht.
+
+Die Präzedenz ist dieselbe wie für jedes andere Feld: Eintrag unter `media:`
+schlägt `defaults:` schlägt eingebauten Wert, und das Kommandozeilenargument
+gewinnt gegen `defaults:`, nicht gegen `media:`. `--no-clip-audio` schaltet
+also die filmweite Vorgabe ab; ein ausdrückliches `audio: true` an einem Clip
+bleibt stehen — genau wie `--clip-audio` ein `audio: false` nicht überrennt.
+
+Wer den umgekehrten Weg geht — in `edit.yaml` probieren, dann sichern —,
+bekommt die Einträge von `slideshow overrides` geschrieben; `audio`, `gain`,
+`music` und `fade` gehören zu den Feldern, die dabei erkannt werden.
+
+Drei Eigenschaften, die die Umsetzung trägt:
+
+* **Es kostet keine Neurenderung.** Die Videosegmente bleiben stumm (`-an`);
+  der Ton wird erst beim Muxen untergemischt. Die Cache-Keys ändern sich
+  dadurch nicht — die Entscheidung lässt sich nach einem stundenlangen
+  Renderlauf noch umwerfen, es läuft nur der Mux erneut.
+* **Die Musik wird gedückt, nicht angehalten.** Ein Pausieren würde Prinzip 3
+  brechen: die ganze Timeline rechnet auf der Tonspur, Sample 0 ist ihr
+  Nullpunkt. Hielte die Musik an, verschöbe sich jeder folgende Beat gegen
+  jeden folgenden Schnitt.
+* **Der Ton macht das Retiming mit.** Wird ein Clip per `setpts` konformiert
+  (Abschnitt 7), läuft sein Ton per `atempo` im selben Verhältnis — Tempo
+  angepasst, Tonhöhe unverändert.
+
+Die Entwurfsentscheidungen im Detail stehen in
+[`docs/originalton-clips.md`](docs/originalton-clips.md).
+
+`preprocess` legt den Originalton als `cache/<id>.audio.flac` neben das
+Intermediate, sobald der Clip überhaupt eine Tonspur hat; `--no-audio-extract`
+schaltet das ab. Endet ein Clip vor seinem Slot (der Planer hält dann das
+letzte Bild), endet auch der Ton dort — und die Musik kommt zurück, statt über
+dem Standbild unten zu bleiben. Die Ausblende am Filmende gilt für den fertigen
+Mix, ein Clip am Schluss blendet also mit dem Bild zusammen aus.
+
 ## Übergangs-Mechanik
 
 Der Schnittpunkt `t` liegt auf dem Beat. Ein Übergang der Dauer `T` belegt
