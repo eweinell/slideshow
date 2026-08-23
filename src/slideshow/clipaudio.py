@@ -62,10 +62,15 @@ SAMPLE_RATE = 48000
 #: waeren nur ein Knacksen.
 _MIN_CUE = 0.05
 
-#: ``atempo`` akzeptiert je Instanz nur [0.5, 2.0]; groessere Faktoren werden
-#: gekettet.
+#: Zulaessiger Bereich einer ``atempo``-Instanz. ``ffmpeg -h filter=atempo``
+#: nennt "from 0.5 to 100" und lehnt 0.49 bzw. 101 ab (gemessen an 6.1.1) —
+#: die Obergrenze 2.0 galt bis ffmpeg 3.x und steht seither nur noch in alten
+#: Anleitungen. Praktisch greift deshalb nur die *untere* Kettung: ein Clip mit
+#: 240p auf 60p ergibt speed 0.25 und braucht zwei Instanzen, waehrend nach
+#: oben eine genuegt. Jede zusaetzliche Instanz rechnet den Ton ein weiteres
+#: Mal um, also nimmt man so wenige wie moeglich.
 _ATEMPO_MIN = 0.5
-_ATEMPO_MAX = 2.0
+_ATEMPO_MAX = 100.0
 
 
 def wants_audio_flag(flag: bool | None, defaults: ClipAudioDefaults) -> bool:
@@ -80,7 +85,7 @@ def wants_audio(intent: Intent, defaults: ClipAudioDefaults) -> bool:
 
 
 def atempo_chain(speed: float) -> list[str]:
-    """``atempo``-Kette fuer eine Geschwindigkeit ausserhalb von [0.5, 2.0].
+    """``atempo``-Kette fuer eine Geschwindigkeit ausserhalb von [0.5, 100.0].
 
     Der Ton muss dieselbe Streckung mitmachen wie das Bild (Abschnitt 7),
     sonst laeuft er dem Clip davon. ``atempo`` aendert das Tempo ohne die

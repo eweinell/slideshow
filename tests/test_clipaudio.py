@@ -46,14 +46,35 @@ MUSIK_HZ = 1000.0
 # --------------------------------------------------------------------------
 
 def test_atempo_kette_trifft_die_geschwindigkeit():
-    """Der Ton muss dieselbe Streckung mitmachen wie das Bild (Abschnitt 7)."""
+    """Der Ton muss dieselbe Streckung mitmachen wie das Bild (Abschnitt 7).
+
+    Geprueft wird gegen den Bereich, den ``ffmpeg -h filter=atempo`` nennt:
+    0.5 bis 100. Die frueher hier stehende Obergrenze 2.0 galt bis ffmpeg 3.x
+    und liess die Kette nach oben unnoetig lang werden.
+    """
     assert atempo_chain(1.0) == []
-    for speed in (0.8333333, 1.2, 2.5, 0.3, 4.0):
+    for speed in (0.8333333, 1.2, 2.5, 0.3, 4.0, 0.2, 150.0):
         faktoren = [float(f.split("=")[1]) for f in atempo_chain(speed)]
         assert faktoren, f"{speed} ergab keine Kette"
-        assert all(0.5 <= f <= 2.0 for f in faktoren), \
+        assert all(0.5 <= f <= 100.0 for f in faktoren), \
             f"{faktoren} verlaesst den gueltigen Bereich von atempo"
         assert np.prod(faktoren) == pytest.approx(speed, rel=1e-9)
+
+
+def test_die_atempo_kette_bleibt_so_kurz_wie_moeglich():
+    """Jede Instanz rechnet den Ton ein weiteres Mal um.
+
+    Alles innerhalb des zulaessigen Bereichs gehoert deshalb in *eine*
+    Instanz; gekettet wird nur, was sonst gar nicht ginge — praktisch also nur
+    nach unten, etwa bei 240p-Material auf 60p (speed 0.25).
+    """
+    for speed in (0.5, 0.8333333, 2.5, 4.0, 100.0):
+        assert len(atempo_chain(speed)) == 1, \
+            f"{speed} liegt im gueltigen Bereich und braucht keine Kette"
+    # Zwei Instanzen reichen bis 0.5 * 0.5 = 0.25 hinunter; darunter kostet es
+    # eine dritte.
+    assert len(atempo_chain(0.25)) == 2
+    assert len(atempo_chain(0.2)) == 3
 
 
 def test_ohne_anforderung_kein_originalton():

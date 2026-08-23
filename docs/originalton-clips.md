@@ -96,8 +96,9 @@ fällt; der Musikpegel ist `1 − (1 − music) · Hüllkurve`.
 
 **Der Ton macht das Retiming mit.** Wird ein Clip nach Abschnitt 7 per
 `setpts` konformiert, läuft sein Ton per `atempo` im selben Verhältnis —
-Tempo angepasst, Tonhöhe unverändert. `atempo` akzeptiert je Instanz nur
-[0.5, 2.0]; größere Faktoren werden gekettet.
+Tempo angepasst, Tonhöhe unverändert. Eine `atempo`-Instanz deckt **[0.5,
+100.0]** ab (`ffmpeg -h filter=atempo`); praktisch greift die Kettung deshalb
+nur nach unten, etwa bei 240p-Material auf 60p (speed 0.25).
 
 **Extrahiert wird vorsorglich, verwendet nur auf Anforderung.**
 `preprocess` legt `cache/<id>.audio.flac` neben das Intermediate, sobald der
