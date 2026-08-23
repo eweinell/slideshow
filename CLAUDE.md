@@ -9,24 +9,42 @@ herausfindet.
 
 ## Umgebung
 
-- **Windows, PowerShell.** Das Bash-Tool ist in dieser Umgebung nicht verfügbar
-  (`No suitable shell found`) — alles über PowerShell.
+**Diese Datei schreibt die Maschine nicht fest.** Hardware und Werkzeugstände
+wechseln zwischen Sessions; was zählt, ist der Messwert von jetzt.
+`slideshow doctor` gibt ihn vollständig aus — Binaries samt Version, GPU,
+NVENC-Fähigkeiten, Tonemapping-Pfade. Einmal laufen lassen schlägt jede Annahme.
+
+- **Windows, PowerShell** ist der verlässliche Weg. Das Bash-Tool ist
+  *manchmal* verfügbar und meldet sonst `No suitable shell found`. Nicht darauf
+  bauen, sondern kurz prüfen — die POSIX-Skripte aus `docs/` laufen damit
+  unverändert, statt sie nach PowerShell übersetzen zu müssen.
 - **`.venv` enthält kein pytest.** Tests laufen über `uv`:
   ```powershell
   uv run --extra dev pytest -q
   ```
   Das CLI dagegen aus dem venv: `.\.venv\Scripts\slideshow.exe`
-- **ffmpeg 8.1.2**, exiftool, ImageMagick und `melt` sind installiert;
-  **keine NVIDIA-GPU**. `doctor` meldet NVENC-Encoder als vorhanden (ffmpeg hat
-  sie einkompiliert), die Codec-Auswahl prüft aber praktisch nach und fällt
-  korrekt auf libx265 zurück. Vorschläge wie `--codec av1_nvenc` aus dem
-  `probe`-Report würden hier fehlschlagen.
-- **`libplacebo` ist hier nutzbar** — Vulkan läuft auf der integrierten GPU.
-  `tonemap_chain` bevorzugt es deshalb, `zscale` kommt nie zum Zug. Ein Test,
-  der `zscale_usable=True` setzt und `libplacebo_usable` auf dem Maschinenwert
-  lässt, prüft dann den anderen Pfad als gedacht (Fall
+- **ffmpeg, exiftool, ImageMagick und `melt`** sind installiert. Entwickelt
+  wurde gegen ffmpeg 8.1.2; **9.0.1 ist geprüft und freigegeben**
+  ([`docs/pruefbericht-ffmpeg9.md`](docs/pruefbericht-ffmpeg9.md)). Die
+  Versionsnummer hier nicht raten — `doctor` fragt sie ab.
+- **Ob eine NVIDIA-GPU da ist, entscheidet die Maschine, nicht diese Datei.**
+  `doctor` meldet die NVENC-Encoder immer als vorhanden (ffmpeg hat sie
+  einkompiliert); erst der Praxistest darunter — Zeilen „GPU", „NVENC
+  10-Bit-HEVC", „NVENC-Sessions" — sagt, ob sie wirklich laufen. Ohne GPU prüft
+  die Codec-Auswahl praktisch nach und fällt korrekt auf libx265 zurück;
+  Vorschläge wie `--codec av1_nvenc` aus dem `probe`-Report schlagen dann fehl.
+  **Ist eine da, lohnt sie sich deutlich**: NVENC verkürzt den 4K-Render um ein
+  Vielfaches gegenüber libx265, NVDEC nimmt 4:2:2-10-Bit-Clips ohne CPU-Decode
+  an, und `--codec av1_nvenc` wird zur echten Option. Der Preis ist die
+  NVENC-Sessiongrenze — sie deckelt den Render-Pool (oft auf 4), unabhängig von
+  `--jobs` und der Kernzahl.
+- **`libplacebo` ist nutzbar, wo ein Vulkan-Gerät läuft** — auch eine
+  integrierte GPU genügt. `tonemap_chain` bevorzugt es dann, und `zscale` kommt
+  nie zum Zug. Ein Test, der `zscale_usable=True` setzt und `libplacebo_usable`
+  auf dem Maschinenwert lässt, prüft dort den anderen Pfad als gedacht (Fall
   `test_tonemapping_steht_vor_dem_scale`, siehe
   [`docs/briefing-hlg-ffmpeg8.md`](docs/briefing-hlg-ffmpeg8.md), Abschnitt 8).
+  Welcher Pfad hier greift, steht in der `doctor`-Zeile „HDR-Tonemapping".
 
 ### PowerShell-Falle
 
@@ -85,7 +103,8 @@ Repo-Pfad, kein echtes Problem.
   --dry-run render edit.yaml`. Danach ergibt es einen Usage-Fehler.
 - `testset1/` ist ein reales Testprojekt (14 Fotos einer Sony ILCE-6700, ein
   Track von 6:32). Nicht eingecheckt.
-- **Ein voller 4K-Render dauert 45–90 Minuten.** Für alles, was nur das
+- **Ein voller 4K-Render dauert auf der CPU 45–90 Minuten** (mit NVENC
+  deutlich weniger — wie viel, sagt nur die Messung). Für alles, was nur das
   Verhalten prüft (Mux, Tonlänge, Ausblende, Segment-Cache), reicht
   `render --preview` — derselbe Mux-Pfad, nur 720p/x264. Für Teilbereiche
   `--range A:B`.
@@ -143,3 +162,4 @@ Verletzt man eine davon, fällt es erst spät und woanders auf:
 | **Mindeststandzeit am Regionsende** | **Umgesetzt.** Eine Beat-Region ist nie ein ganzzahliges Vielfaches der Slotlänge; der Rest bekam ein eigenes Bild — in `sommer26` viermal unter 1 s, im schlimmsten Fall 0,30 s mit 0,06 s freier Sicht. `planner._rest_zuschlagen` schlägt ihn stattdessen dem Vorgänger derselben Region zu, sobald er unter `defaults.min_still_seconds` liegt (Vorgabe: `still_tolerance[0]`, also 3,0 s). **Zwei Ausnahmen, beide notwendig:** am Filmende greift die Regel nicht (dort ist die Grenze kein Schnitt, und `stretched` erledigt es schon — sonst kostet sie bei materialbestimmter Länge grundlos ein Medium), und hinter einem Clip lässt sich nicht verlängern. Was durchfällt, wird gemeldet. `_region_capacity` führt dieselbe Rechnung, sonst wählte `select` gegen eine andere Regel. **Folge: pro betroffener Region ein Bild weniger** — in `sommer26` schloss das nebenbei die 52,5 s Unterdeckung. Verstärkt wird der Effekt von der Beat-Erkennung: nicht verschmolzene `MAX_FIT_WINDOW`-Fenster (dBPM knapp über `BEAT_MERGE_BPM_TOL`) liefern zusätzliche Regionsgrenzen und damit zusätzliche Reste. |
 | **Schwenk am Zoomanfang** | **Umgesetzt.** Der Schwenk hat jetzt ein ruhendes Ende in der Bildmitte (`defaults.kb.pan_anchor: center`) und wird auf `0,5 − 1/(2z)` des größten Zooms gedeckelt — der geplante Weg ist damit auch der sichtbare. Vorher lief er symmetrisch durch die Mitte und kippte sichtbar die Richtung, sobald die Klemmung bei `z = 1,0` aufging (gemessen über 5 s: 0,500 → 0,526 → 0,447). Die alte Auslegung bleibt als `pan_anchor: through` erreichbar; `pan_amount` in einer alten Datei setzt sie selbst. **Folge: `pan_rate`/`pan_total` greifen mit den Vorgaben nicht mehr** — es gewinnt der Deckel. Mehr Schwenk heißt jetzt mehr `zoom_total`. |
 | **Originalton der Videoclips** | **Umgesetzt** ([`docs/originalton-clips.md`](docs/originalton-clips.md)). Nachtrag 5.5 — steht nicht im Briefing, das den Originalton ausnahmslos verwirft (Abschnitt 7 baut die Framerate-Politik darauf auf). Angefordert wird er in `overrides.yaml`: `defaults: clip_audio:` filmweit, `media: {clip_x: {audio: true, music: 0.2}}` je Clip. **Der Ton bleibt aus den Segmenten heraus** — sie bleiben `-an`, untergemischt wird beim Muxen, und deshalb ändert das Umschalten keinen einzigen Cache-Key (Invariante 3/4): die Entscheidung lässt sich nach einem 90-Minuten-Render noch umwerfen. **Die Musik wird gedückt, nicht angehalten** — ein Pausieren bräche Invariante 2, jeder folgende Beat verschöbe sich; der Pegel gilt je Clip, der Verlauf ist die Summe der Absenkungen über disjunkten Fenstern. Drei Fallen, die Messungen an echtem Material gezeigt haben: **(1)** der Planer streckt das letzte Segment auf die Timelinelänge — ohne Klemmung auf die vorhandene Tonlänge dückte ein 4-s-Clip die Musik über 17,5 s Standbild weg. **(2)** Die Ausblende am Filmende muss hinter dem `amix` sitzen, nicht nur auf der Musik, sonst läuft ein Schlussclip weiter, während das Bild schwarz ist. **(3)** Rich frisst `[aout]` als Stil-Tag und `0:v:0` als Emoji — der Trockenlauf gab bis dahin nicht kopierbare Kommandozeilen aus. Offen ist nur die akustische Sichtprüfung (`docs/manuelle-checks.md`, Punkt 7). |
+| **ffmpeg 9** | **Geprüft und freigegeben** ([`docs/pruefbericht-ffmpeg9.md`](docs/pruefbericht-ffmpeg9.md) beantwortet [`docs/pruefauftrag-ffmpeg9.md`](docs/pruefauftrag-ffmpeg9.md)). Elf Messungen an 9.0.1: Suite grün, die volle Kette `probe → audio → preprocess → beats → build → render` in jeder Stufe Exitcode 0, Framezahl exakt, Sync auf die Millisekunde. Zwei Dinge zum Merken. **(1)** Die `zoompan`-Bittiefensonde in `doctor.py` liest Logtext, und eine Quelltextanalyse hatte behauptet, die Formulierung sei in 9 verschwunden — **sie ist unverändert da**, die Sonde antwortet richtig (`zoompan` kürzt weiterhin auf 8 Bit, unabhängig nachgemessen mit einer 10-Bit-Rampe: 256 statt 1024 unterscheidbare Werte). **(2)** Der einzige Befund: `-color_trc` und `-color_primaries` als *Ausgabeoption* landen nicht mehr in der Datei — der Master trägt `colorspace=bt709`, `color_range=tv` und `hvc1`, aber `color_transfer=unknown` und `color_primaries=unknown`. Das entsteht schon im ersten Encode (nicht beim Concat oder Mux) und gilt für jeden Encoder und Container; `setparams` vor dem Encoder rettet es vollständig — derselbe Weg, den `make_clips` seit dem HLG-Briefing schon geht. Vermutlich kein 9er-Regress, sondern mit 7 oder 8 gekommen: `encoders.COLOR_ARGS` liefert also **auch unter 8.1.2** einen unvollständig getaggten Master, und `verify_master` schaut nicht auf Farb-Tags. Nicht repariert (der Prüfauftrag misst nur). |
