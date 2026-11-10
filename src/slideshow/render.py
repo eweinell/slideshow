@@ -60,6 +60,12 @@ class RenderStats:
     music_seconds: float = 0.0
     #: Clips, deren Originalton in den Master gemischt wurde (5.5).
     clip_audio: int = 0
+    #: Clip-Intermediates, die dieser Lauf erzeugt bzw. wiederverwendet hat.
+    clips_erzeugt: int = 0
+    clips_aus_cache: int = 0
+    #: Segmente, die nach dem Lauf verwaist waren und geloescht wurden.
+    verwaist_geloescht: int = 0
+    verwaist_bytes: int = 0
     failures: list[str] = field(default_factory=list)
 
 
@@ -509,10 +515,45 @@ def parse_range(spec: str | None, count: int) -> tuple[int, int]:
     return (start, end)
 
 
+def clips_in(segments: list[RenderSegment]) -> set[str]:
+    """Die Clip-Kennungen, die eine Auswahl von Segmenten liest."""
+    srcs: set[str] = set()
+    for seg in segments:
+        for slot in (seg.slot, seg.a, seg.b):
+            if slot is not None and slot.intent.kind == "clip":
+                srcs.add(slot.intent.src)
+    return srcs
+
+
+def provide_clips(project: Project, edit: EditList, plan: Plan, *, caps: Capabilities,
+                  manifest: Manifest | None, intermediate: str = "dnxhr_hqx",
+                  segments: list[RenderSegment] | None = None,
+                  dry: DryRun | None = None):
+    """Clip-Intermediates fuer den Plan erzeugen, bevor ein Segment sie liest.
+
+    Ohne Manifest bleibt es beim alten Weg: die Dateien muessen schon da sein
+    (``check_sources_exist`` sagt es sonst).
+    """
+    from .preprocess import ClipStats, ensure_clip_intermediates
+
+    if manifest is None:
+        return ClipStats()
+    nur = clips_in(segments) if segments is not None else None
+    stats = ensure_clip_intermediates(
+        project, plan, manifest, size=tuple(edit.size), caps=caps, codec=intermediate,
+        portrait_mode=edit.defaults.portrait, nur=nur, dry=dry)
+    if stats.failures:
+        raise SlideshowError("Clip-Intermediates fehlgeschlagen:\n"
+                             + "\n".join(stats.failures))
+    return stats
+
+
 def render(project: Project, edit: EditList, plan: Plan, *, caps: Capabilities,
            manifest: Manifest | None, out: Path, jobs_limit: int | None = None,
            preview: bool = False, codec: str = "auto", range_spec: str | None = None,
-           dry: DryRun | None = None) -> RenderStats:
+           intermediate: str = "dnxhr_hqx", dry: DryRun | None = None) -> RenderStats:
+    from .clean import remember_segments
+
     segments = resolve(plan)
     validate_continuity(segments, plan.total_frames)
 
@@ -522,12 +563,16 @@ def render(project: Project, edit: EditList, plan: Plan, *, caps: Capabilities,
     log.info("Encoder: %s (%s, %dx%d @ %g fps)", profile.name, profile.pix_fmt,
              profile.width, profile.height, profile.fps)
 
+    clip_stats = provide_clips(project, edit, plan, caps=caps, manifest=manifest,
+                               intermediate=intermediate, segments=selected, dry=dry)
+
     index = HashIndex(project.cache / "hashindex.json")
     jobs = plan_jobs(project, plan, edit, selected, profile=profile, caps=caps,
                      manifest=manifest, index=index)
     index.save()
 
     stats = render_segments(jobs, workers=caps.max_workers(jobs_limit), dry=dry)
+    stats.clips_erzeugt, stats.clips_aus_cache = clip_stats.erzeugt, clip_stats.aus_cache
     if stats.failures:
         raise SlideshowError("Rendering fehlgeschlagen:\n" + "\n".join(stats.failures))
 
@@ -560,6 +605,11 @@ def render(project: Project, edit: EditList, plan: Plan, *, caps: Capabilities,
     if not (dry and dry.enabled):
         info = verify_master(out, expected_seconds=timeline_seconds, fps=plan.fps)
         stats.out_bytes = info["size_bytes"]
+        # Erst nach dem geprueften Master. Und nur ein voller Lauf darf
+        # Segmente fuer verwaist erklaeren; ein ``--range`` kennt die uebrigen
+        # gar nicht.
+        stats.verwaist_geloescht, stats.verwaist_bytes = remember_segments(
+            project, profile, jobs, complete=(lo, hi) == (0, len(segments)))
     return stats
 
 
@@ -579,6 +629,12 @@ def print_report(stats: RenderStats, out: Path) -> None:
     t.add_row("Musiklaenge", f"{stats.music_seconds:.2f} s")
     if stats.clip_audio:
         t.add_row("Clips mit Originalton", str(stats.clip_audio))
+    if stats.clips_erzeugt or stats.clips_aus_cache:
+        t.add_row("Clip-Intermediates", f"{stats.clips_erzeugt} neu, "
+                                        f"{stats.clips_aus_cache} aus Cache")
+    if stats.verwaist_geloescht:
+        t.add_row("verwaiste Segmente geloescht",
+                  f"{stats.verwaist_geloescht} ({stats.verwaist_bytes / 1e9:.2f} GB)")
     t.add_row("Ausgabe", str(out))
     con.print(t)
 

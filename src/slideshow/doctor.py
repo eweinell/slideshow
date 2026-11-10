@@ -728,8 +728,14 @@ def _check_disk(rep: DoctorReport, project: Project) -> None:
 
 
 def estimate_space(*, images: int, clip_seconds: float, timeline_seconds: float,
-                   intermediate_mbit: float = 700.0) -> dict[str, float]:
+                   intermediate_mbit: float = 1456.0) -> dict[str, float]:
     """Schaetzung in Bytes, *bevor* irgendetwas geschrieben wird (3.4).
+
+    ``intermediate_mbit`` ist DNxHR HQX in UHD/50p, gemessen (182 MB/s,
+    Pruefbericht 2026-11); die fruehere Annahme von 700 Mbit/s lag um die
+    Haelfte darunter. ``clip_seconds`` meint die *verwendeten* Sekunden samt
+    Rand — ``preprocess`` gibt 0, weil die Intermediates erst beim Rendern
+    entstehen und dort gegen den echten Bereich geprueft werden.
 
     Der Segment-Cache kann groesser als der Master werden. Die Bitrate bleibt
     auch unter ``vbr``/``-cq`` motivabhaengig — ein Schwenk durchs Laub kostet

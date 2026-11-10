@@ -20,11 +20,12 @@ import pytest
 from slideshow.doctor import Capabilities, probe_capabilities
 from slideshow.framerate import plan_retime, suggest_target_fps
 from slideshow.models import Manifest
-from slideshow.preprocess import build_clip_filter, preprocess, process_image
+from slideshow.preprocess import (build_clip_filter, clip_kennung, make_clip_intermediates,
+                                  process_image)
 from slideshow.probe import classify, detect_hdr, probe_sources, vfr_suspect
 from slideshow.proc import ffprobe_json
 
-from .conftest import TEST_LONG_EDGE, requires_ffmpeg
+from .conftest import TEST_INTERMEDIATE, requires_ffmpeg
 
 pytestmark = requires_ffmpeg
 
@@ -45,6 +46,15 @@ def probed(tmp_path_factory, clips, images):
 
 def _item(manifest: Manifest, name: str):
     return next(m for m in manifest.media if name in m.path)
+
+
+def _ganz(project, nur: Manifest, caps):
+    """Intermediates ueber die volle Clipdauer — die Eigenschaften der Datei
+    haengen nicht am Bereich, und so prueft der Test sie ohne Plan."""
+    for item in nur.media:
+        item.cache_path = clip_kennung(item)
+    return make_clip_intermediates(project, nur, {m.cache_path: None for m in nur.media},
+                                   size=SIZE, caps=caps, codec=TEST_INTERMEDIATE)
 
 
 # --------------------------------------------------------------------------
@@ -261,8 +271,7 @@ def test_vfr_und_rotation_ergeben_cfr_und_aufrecht(probed):
     project, manifest, caps = probed
     nur = Manifest(media=[_item(manifest, "clip_vfr"), _item(manifest, "clip_rot90")],
                    fps_suggestion=FPS)
-    stats = preprocess(project, nur, caps=caps, size=SIZE,
-                       intermediate_codec="hevc_intra_cpu", long_edge=TEST_LONG_EDGE)
+    stats = _ganz(project, nur, caps)
     assert not stats.failures, stats.failures
 
     for item in nur.media:
@@ -300,8 +309,7 @@ def test_die_zeitlupe_ueberlebt_die_quellbegrenzung(
                            caps=caps, target_fps=ZIEL_FPS)
     nur = Manifest(media=[m for m in result.manifest.media if m.kind == "clip"],
                    fps_suggestion=ZIEL_FPS)
-    stats = preprocess(project, nur, caps=caps, size=SIZE,
-                       intermediate_codec="hevc_intra_cpu", long_edge=TEST_LONG_EDGE)
+    stats = _ganz(project, nur, caps)
     assert not stats.failures, stats.failures
 
     item = nur.media[0]
@@ -335,8 +343,7 @@ def test_hdr_clip_bekommt_bt709_tags(probed):
     if caps.tonemap_chain("hlg") is None:
         pytest.skip("weder zscale noch libplacebo nutzbar")
     nur = Manifest(media=[_item(manifest, "clip_hlg")], fps_suggestion=FPS)
-    stats = preprocess(project, nur, caps=caps, size=SIZE,
-                       intermediate_codec="hevc_intra_cpu", long_edge=TEST_LONG_EDGE)
+    stats = _ganz(project, nur, caps)
     assert not stats.failures, stats.failures
     stream = next(s for s in ffprobe_json(project.abs(nur.media[0].cache_path))["streams"]
                   if s["codec_type"] == "video")

@@ -363,7 +363,7 @@ def _kontext(m: MediaItem, tag_eins: _dt.date | None, offsets: dict[str, float],
                      else f"{day_label(ts, tag_eins)} {wann:%H:%M}")
     if m.kind == "clip":
         info = m.clip
-        dauer = (info.cache_duration or info.effective_duration) if info else 0.0
+        dauer = (info.effective_duration or info.duration) if info else 0.0
         teile.append(f"Clip {dauer:.1f} s".replace(".", ","))
     elif m.image is not None:
         teile.append("hoch" if m.image.portrait else "quer")

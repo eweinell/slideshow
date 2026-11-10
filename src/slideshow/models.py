@@ -112,10 +112,12 @@ class ClipInfo(BaseModel):
     effective_duration: float = 0.0
     #: NVDEC deaktivieren (4:2:2-10-Bit-Falle, 3.3)
     force_cpu_decode: bool = False
-    #: Startpunkt des Intermediates in der retimten Zeitbasis. Wurde der Clip
-    #: nur ausschnittsweise extrahiert, verschiebt das in/out der Edit-List.
+    #: Startpunkt des Intermediates in der retimten Zeitbasis. Gesetzt wird er
+    #: beim Rendern (``preprocess.ensure_clip_intermediates``), nur im
+    #: Speicher: das Intermediate deckt den Bereich ab, den der Plan verwendet.
+    #: Fuer die Grenzen von in/out zaehlt ``effective_duration``, nicht dieses Feld.
     cache_offset: float = 0.0
-    #: Dauer des Intermediates in der retimten Zeitbasis.
+    #: Dauer des Intermediates in der retimten Zeitbasis; wie ``cache_offset``.
     cache_duration: float = 0.0
 
 

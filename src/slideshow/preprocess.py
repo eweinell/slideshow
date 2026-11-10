@@ -64,12 +64,11 @@ def title_canvas(size: tuple[int, int]) -> tuple[int, int]:
 class PreprocessStats:
     images_done: int = 0
     images_cached: int = 0
-    clips_done: int = 0
-    clips_cached: int = 0
+    #: Clips, die eine Kennung bekommen haben. Umgerechnet werden sie erst
+    #: beim Rendern (:func:`ensure_clip_intermediates`).
+    clips: int = 0
     #: Medien, die die Auswahl ausgelassen hat (``only``).
     skipped: int = 0
-    clip_audio_done: int = 0
-    clip_audio_cached: int = 0
     failures: list[str] = None
 
     def __post_init__(self):
@@ -525,13 +524,20 @@ def clip_audio_cmd(project: Project, item: MediaItem, dst: Path, *, fps: float,
 
 def _extract_clip_audio(project: Project, item: MediaItem, *, fps: float,
                         span: tuple[float, float] | None, index: HashIndex,
-                        stats: PreprocessStats, dry: DryRun | None) -> None:
-    """Legt ``cache/<id>.audio.flac`` an, sofern der Clip ueberhaupt Ton hat."""
+                        stats: "ClipStats", dry: DryRun | None,
+                        handle: float = 1.0) -> None:
+    """Legt ``cache/<id>.audio.flac`` an, sofern der Clip ueberhaupt Ton hat.
+
+    Derselbe Bereich wie das Bild-Intermediate, damit beide denselben
+    ``cache_offset`` haben. Die Datei entsteht auch dann, wenn der Ton nicht
+    angefordert ist: sie ist klein, und so kostet ``audio: true`` nachtraeglich
+    nur einen Mux.
+    """
     if item.clip is None or not item.clip.has_audio:
         item.audio_cache_path = ""
         return
     dst = project.cache / f"{item.id}.audio.flac"
-    cmd = clip_audio_cmd(project, item, dst, fps=fps, span=span)
+    cmd = clip_audio_cmd(project, item, dst, fps=fps, span=span, handle=handle)
     try:
         key = cache_key([index.file_hash(project.abs(item.path))],
                         {"op": "clip-audio", "v": PREPROC_VERSION, "cmd": cmd[3:]})
@@ -564,16 +570,226 @@ def _extract_clip_audio(project: Project, item: MediaItem, *, fps: float,
 
 
 # --------------------------------------------------------------------------
+# Clip-Intermediates beim Rendern (Pruefbericht 2026-11, AP2)
+# --------------------------------------------------------------------------
+
+#: Vor- und Nachlauf um den genutzten Bereich, bevor auf ganze Sekunden
+#: gerundet wird. Die Blenden sind darin schon enthalten (``clip_bereiche``
+#: rechnet ueber die sichtbare Spanne); der Rand ist fuer Kdenlive und dafuer,
+#: dass ein um ein paar Frames korrigierter Schnitt den Cache-Key nicht aendert.
+CLIP_HANDLE = 1.0
+
+#: Bytes je Sekunde fuer DNxHR HQX in UHD/50p, gemessen an ``kenia-2026``
+#: (Pruefbericht 2026-11, 3.2). Fuer die anderen Codecs gibt es keine Messung;
+#: sie werden mit demselben Wert geschaetzt, das ist eine Obergrenze.
+INTERMEDIATE_BPS_UHD50 = 182e6
+
+#: Codecs, deren Intermediate im ``.mov`` landet — dem Container, den die
+#: Clip-Kennung ``cache/<id>.mov`` traegt.
+INTERMEDIATE_CODECS = ("dnxhr_hqx", "hevc_intra_nvenc", "hevc_intra_cpu")
+
+
+@dataclass
+class ClipStats:
+    erzeugt: int = 0
+    aus_cache: int = 0
+    #: Sekunden Intermediate (retimte Zeitbasis), die dieser Lauf neu schreibt.
+    sekunden_neu: float = 0.0
+    clip_audio_done: int = 0
+    clip_audio_cached: int = 0
+    failures: list[str] = None
+
+    def __post_init__(self):
+        if self.failures is None:
+            self.failures = []
+
+
+def clip_kennung(item: MediaItem) -> str:
+    """Der ``cache/``-Pfad, unter dem ein Clip in ``edit.yaml`` steht.
+
+    Er ist zugleich der Ort des Intermediates. Die Datei entsteht aber erst
+    beim Rendern; ``preprocess`` vergibt nur die Kennung, damit ``build`` den
+    Clip ueberhaupt einplant.
+    """
+    return f"cache/{item.id}.mov"
+
+
+def clip_bereiche(plan, manifest: Manifest) -> dict[str, tuple[float, float]]:
+    """Je Clip-Kennung der Bereich, den das Intermediate abdecken muss.
+
+    In der retimten Zeitbasis, ueber die volle **sichtbare** Spanne jedes Slots
+    (also einschliesslich der halben Blenden), um ``CLIP_HANDLE`` erweitert und
+    nach aussen auf ganze Sekunden gerundet. Die Rundung ist der Punkt: der
+    Bereich geht ueber das Kommando in den Cache-Key ein, und ohne sie loeste
+    jede Korrektur um ein paar Frames eine neue Umrechnung aus.
+
+    Ein mehrfach verwendeter Clip bekommt die Huelle seiner Bereiche.
+    """
+    from .planner import visible_span
+
+    bereiche: dict[str, tuple[float, float]] = {}
+    for i, slot in enumerate(plan.slots):
+        if slot.intent.kind != "clip":
+            continue
+        item = manifest.by_cache_path(slot.intent.src)
+        if item is None or item.clip is None:
+            continue
+        vs, ve = visible_span(plan, i)
+        lo = slot.clip_in - (slot.start_f - vs) / plan.fps
+        hi = slot.clip_in + (ve - slot.start_f) / plan.fps
+        lo = max(0.0, float(math.floor(lo - CLIP_HANDLE + 1e-6)))
+        hi = float(math.ceil(hi + CLIP_HANDLE - 1e-6))
+        ende = item.clip.effective_duration or item.clip.duration
+        if ende > 0:
+            hi = min(hi, ende)
+        alt = bereiche.get(slot.intent.src)
+        bereiche[slot.intent.src] = (min(lo, alt[0]), max(hi, alt[1])) if alt else (lo, hi)
+    return bereiche
+
+
+def intermediate_bps(size: tuple[int, int], fps: float) -> float:
+    """Geschaetzte Bytes je Sekunde Intermediate, linear in Pixeln mal Rate."""
+    w, h = size
+    return INTERMEDIATE_BPS_UHD50 * (w * h * fps) / (3840 * 2160 * 50)
+
+
+def ensure_clip_intermediates(project: Project, plan, manifest: Manifest, *,
+                              size: tuple[int, int], caps: Capabilities,
+                              codec: str = "dnxhr_hqx", portrait_mode: str = "blur",
+                              nur: set[str] | None = None, clip_audio: bool = True,
+                              dry: DryRun | None = None) -> ClipStats:
+    """Erzeugt die Intermediates der Clips im Plan, nur im verwendeten Bereich.
+
+    Gegenstueck zu :func:`ensure_title_assets` und aus demselben Grund beim
+    Rendern statt beim Vorverarbeiten: erst der Plan weiss, welcher Teil eines
+    Clips im Film steht. Vorher wurde jeder Clip ganz umgerechnet, in
+    ``kenia-2026`` 192 GB, von denen ein Drittel im Film vorkam.
+
+    Setzt ``cache_offset``, ``cache_duration`` und ``audio_cache_path`` am
+    Manifest-Eintrag **im Speicher** — danach lesen Segmentkommandos, Ton und
+    Kdenlive-Export die Datei in ihrer tatsaechlichen Zeitbasis. Das Manifest
+    auf der Platte bleibt unberuehrt: der Bereich ist eine Eigenschaft dieses
+    Plans, nicht des Materials.
+
+    ``nur`` beschraenkt die Erzeugung auf eine Menge von Kennungen (``render
+    --range``). Der Bereich wird trotzdem aus dem ganzen Plan bestimmt, damit
+    ein Teilrender dieselbe Datei erzeugt wie der volle.
+    """
+    bereiche = clip_bereiche(plan, manifest)
+    if nur is not None:
+        bereiche = {k: v for k, v in bereiche.items() if k in nur}
+    return make_clip_intermediates(project, manifest, bereiche, size=size, caps=caps,
+                                   codec=codec, portrait_mode=portrait_mode,
+                                   clip_audio=clip_audio, dry=dry)
+
+
+def make_clip_intermediates(project: Project, manifest: Manifest,
+                            bereiche: dict[str, tuple[float, float] | None], *,
+                            size: tuple[int, int], caps: Capabilities,
+                            codec: str = "dnxhr_hqx", portrait_mode: str = "blur",
+                            clip_audio: bool = True,
+                            dry: DryRun | None = None) -> ClipStats:
+    """Erzeugt Intermediates fuer ausdrueckliche Bereiche je Clip-Kennung.
+
+    ``None`` als Bereich heisst: der ganze Clip. Normalerweise kommen die
+    Bereiche aus dem Plan (:func:`ensure_clip_intermediates`); direkt
+    aufgerufen wird diese Funktion von den Tests, die das Intermediate selbst
+    pruefen.
+    """
+    if codec not in INTERMEDIATE_CODECS:
+        raise SlideshowError(
+            f"Intermediate-Codec {codec!r} wird nicht unterstuetzt. Moeglich: "
+            f"{', '.join(INTERMEDIATE_CODECS)}.")
+    stats = ClipStats()
+    if not bereiche:
+        return stats
+
+    project.ensure_dirs()
+    index = HashIndex(project.cache / "hashindex.json")
+    fps = manifest.fps_suggestion
+    auftraege = []
+    for kennung, span in bereiche.items():
+        item = manifest.by_cache_path(kennung)
+        if item is None or item.clip is None:
+            stats.failures.append(f"{kennung}: steht nicht als Clip im Manifest")
+            continue
+        dst = project.abs(kennung)
+        cmd, offset, dur = clip_intermediate_cmd(
+            project, item, dst, size=size, fps=fps, caps=caps, codec=codec,
+            portrait_mode=portrait_mode, span=span, handle=0.0)
+        try:
+            key = cache_key([index.file_hash(project.abs(item.path))],
+                            {"op": "clip", "v": PREPROC_VERSION, "cmd": cmd[3:],
+                             "fps": fps, "size": list(size)})
+        except FileNotFoundError as exc:
+            stats.failures.append(str(exc))
+            continue
+        item.clip.cache_offset = round(offset, 6)
+        item.clip.cache_duration = round(dur, 6)
+        if clip_audio:
+            _extract_clip_audio(project, item, fps=fps, span=span, handle=0.0,
+                                index=index, stats=stats, dry=dry)
+        if _is_fresh(dst, key):
+            stats.aus_cache += 1
+            continue
+        auftraege.append((item, dst, cmd, key, dur))
+
+    stats.sekunden_neu = sum(a[4] for a in auftraege)
+    if auftraege and not (dry and dry.enabled):
+        _platz_fuer_clips(project, stats.sekunden_neu * intermediate_bps(size, fps))
+
+    for item, dst, cmd, key, _dur in auftraege:
+        if dry and dry.enabled:
+            dry.record(cmd)
+            continue
+        log.info("Clip %s -> %s (%.1f s ab %.1f s, %s)", item.id, dst.name,
+                 item.clip.cache_duration, item.clip.cache_offset, item.clip.retime_note)
+        try:
+            run(cmd, timeout=3600)
+            if not dst.exists() or dst.stat().st_size == 0:
+                raise SlideshowError(
+                    f"ffmpeg meldete Erfolg, hat aber nichts geschrieben: {dst}")
+            _mark_fresh(dst, key)
+            stats.erzeugt += 1
+        except SlideshowError as exc:
+            # Eine leere Datei ist gefaehrlicher als gar keine: sie sieht fuer
+            # spaetere Phasen wie ein gueltiges Intermediate aus.
+            dst.unlink(missing_ok=True)
+            _keyfile(dst).unlink(missing_ok=True)
+            stats.failures.append(f"{item.id}: {exc}")
+            log.error("Clip %s fehlgeschlagen: %s", item.id, exc)
+    index.save()
+    return stats
+
+
+def _platz_fuer_clips(project: Project, bedarf: float) -> None:
+    """Bricht ab, bevor ein Intermediate die Platte fuellt.
+
+    Ohne Reserve, anders als ``doctor.check_space``: der Bedarf ist bereits
+    eine Obergrenze (DNxHR-Rate fuer jeden Codec), und ein ueberschriebenes
+    Intermediate gibt seinen alten Platz ohnehin frei.
+    """
+    import shutil
+    try:
+        frei = shutil.disk_usage(project.cache).free
+    except OSError:
+        return
+    if frei < bedarf:
+        raise SlideshowError(
+            f"Die Clip-Intermediates brauchen bis zu {bedarf / 1e9:.1f} GB, frei sind "
+            f"{frei / 1e9:.1f} GB. Platz schaffen (`slideshow clean`) oder einen "
+            f"kleineren Codec waehlen (`render --intermediate hevc_intra_nvenc`).")
+
+
+# --------------------------------------------------------------------------
 # Orchestrierung
 # --------------------------------------------------------------------------
 
 def preprocess(project: Project, manifest: Manifest, *, caps: Capabilities,
                portrait_mode: str = "blur", image_format: str = "jpeg",
                quality: int = 95, size: tuple[int, int] = (3840, 2160),
-               intermediate_codec: str = "dnxhr_hqx", jobs: int | None = None,
+               jobs: int | None = None,
                dry: DryRun | None = None,
-               spans: dict[str, tuple[float, float]] | None = None,
-               clip_audio: bool = True,
                long_edge: int = LONG_EDGE,
                only: set[str] | None = None) -> PreprocessStats:
     """Verarbeitet die Medien des Manifests nach ``cache/``.
@@ -592,15 +808,15 @@ def preprocess(project: Project, manifest: Manifest, *, caps: Capabilities,
     ``long_edge`` ist der Subpixel-Vorrat fuer Ken Burns und nur fuer die
     Testsuite gedacht — dort waeren 7680 px reine Wartezeit.
 
-    ``clip_audio`` extrahiert den Originalton der Clips als Beiwerk (5.5).
-    Verwendet wird er nur auf Anforderung; die Extraktion vorab zu erledigen
-    kostet wenig und erspart einen zweiten Lauf, wenn die Entscheidung
-    spaeter faellt.
+    **Clips werden hier nicht umgerechnet.** Sie bekommen nur ihre Kennung
+    (:func:`clip_kennung`); Intermediate und Originalton entstehen beim
+    Rendern, und zwar nur fuer den Bereich, den der Plan verwendet
+    (:func:`ensure_clip_intermediates`). ``cache_offset``/``cache_duration``
+    werden zurueckgesetzt: ``build`` plant gegen den ganzen Clip.
     """
     project.ensure_dirs()
     stats = PreprocessStats()
     index = HashIndex(project.cache / "hashindex.json")
-    fps = manifest.fps_suggestion
     img_size = (long_edge, int(round(long_edge * size[1] / size[0])))
     workers = caps.max_workers(jobs)
 
@@ -644,51 +860,17 @@ def preprocess(project: Project, manifest: Manifest, *, caps: Capabilities,
                 if item and item.image and info:
                     item.image.portrait = info["portrait"]
 
-    # --- Clips --------------------------------------------------------
+    # --- Clips: nur die Kennung ----------------------------------------
     for item in filme:
-        src = project.abs(item.path)
-        _enc, container = intermediate_args(intermediate_codec)
-        dst = project.cache / f"{item.id}.{container}"
-        span = (spans or {}).get(item.id)
-        cmd, offset, dur = clip_intermediate_cmd(
-            project, item, dst, size=size, fps=fps, caps=caps,
-            codec=intermediate_codec, portrait_mode=portrait_mode, span=span)
-        try:
-            key = cache_key([index.file_hash(src)],
-                            {"op": "clip", "v": PREPROC_VERSION, "cmd": cmd[3:],
-                             "fps": fps, "size": list(size)})
-        except FileNotFoundError as exc:
-            stats.failures.append(str(exc))
+        if not project.abs(item.path).exists():
+            stats.failures.append(f"Quelldatei fehlt: {project.abs(item.path)}")
             continue
-        item.cache_path = project.rel(dst)
+        item.cache_path = clip_kennung(item)
+        item.audio_cache_path = ""
         if item.clip:
-            item.clip.cache_offset = round(offset, 6)
-            item.clip.cache_duration = round(dur, 6)
-        if clip_audio:
-            _extract_clip_audio(project, item, fps=fps, span=span, index=index,
-                                stats=stats, dry=dry)
-        if _is_fresh(dst, key):
-            stats.clips_cached += 1
-            continue
-        if dry and dry.enabled:
-            dry.record(cmd)
-            continue
-        log.info("Clip %s -> %s (%s)", item.id, dst.name,
-                 item.clip.retime_note if item.clip else "")
-        try:
-            run(cmd, timeout=3600)
-            if not dst.exists() or dst.stat().st_size == 0:
-                raise SlideshowError(
-                    f"ffmpeg meldete Erfolg, hat aber nichts geschrieben: {dst}")
-            _mark_fresh(dst, key)
-            stats.clips_done += 1
-        except SlideshowError as exc:
-            # Eine leere Datei ist gefaehrlicher als gar keine: sie sieht fuer
-            # spaetere Phasen wie ein gueltiges Intermediate aus.
-            dst.unlink(missing_ok=True)
-            _keyfile(dst).unlink(missing_ok=True)
-            stats.failures.append(f"{item.id}: {exc}")
-            log.error("Clip %s fehlgeschlagen: %s", item.id, exc)
+            item.clip.cache_offset = 0.0
+            item.clip.cache_duration = 0.0
+        stats.clips += 1
 
     index.save()
     return stats

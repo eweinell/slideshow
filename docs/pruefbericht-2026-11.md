@@ -82,6 +82,7 @@ Die Messungen lassen sich wiederholen:
 
 - `cli._size_of` (`cli.py:647`) gibt konstant `(3840, 2160)` zurück. `preprocess`
   rechnet Clip-Intermediates also immer in 4K, unabhängig von `edit.size`.
+  (Behoben mit AP2.)
 - `build --size` und `--fps` stehen in keiner Eingabedatei. `slideshow overrides`
   baut zum Vergleich ohne sie.
 - Vier Standbilder in `london-2026` stehen unter 3 s. Eines ist das letzte Bild
@@ -326,7 +327,7 @@ Reihenfolge nach Nutzen und Abhängigkeit. Jedes Paket ist für sich lieferbar.
 | AP | Inhalt | Stand |
 |---|---|---|
 | 1 | Onset-Fehler beheben, Suite grün, Pfad in `beats.yaml` | **umgesetzt 2026-11-10** |
-| 2 | Clip-Intermediates beim Rendern und nur im verwendeten Bereich; `slideshow clean` | offen |
+| 2 | Clip-Intermediates beim Rendern und nur im verwendeten Bereich; `slideshow clean` | **umgesetzt 2026-11-10**; A1 nur gerechnet, nicht an `kenia-2026` erzeugt |
 | 3 | `slideshow make` | offen |
 | 4 | Erster echter `analyze`-Lauf | offen |
 | 5 | Beat-Liste und eine Kapazitätsrechnung | offen |
@@ -482,3 +483,103 @@ Offen geblieben:
   hierher.
 - Der librosa-Pfad wird nur geprüft, wo librosa installiert ist. Soll die
   Suite beide Pfade immer prüfen, muss librosa in das Extra `dev`.
+
+### AP2, 2026-11-10
+
+Geändert:
+
+- **`preprocess` rechnet keine Clips mehr um.** Ein Clip bekommt nur seine
+  Kennung `cache/<id>.mov` (`preprocess.clip_kennung`); `cache_offset` und
+  `cache_duration` werden auf 0 gesetzt. Die Schalter `--intermediate`,
+  `--ranges-from` und `--no-audio-extract` sind entfallen.
+- **`build` plant gegen den ganzen Clip.** Grenze für `in`/`out` ist
+  `build.clip_laenge` (= `effective_duration`), nicht mehr `cache_duration`.
+  Das gilt auch für `_clip_bounds` und `clamp_transitions_for_handles`. Ohne
+  das schrumpfte der Spielraum mit jedem Lauf auf den letzten Schnitt, und der
+  Rundlauf `build → render` wäre nicht stabil. `order`, `select` und
+  `_clip_mehrbedarf` lesen dieselbe Länge.
+- **`preprocess.ensure_clip_intermediates(project, plan, manifest, …)`**, analog
+  zu `ensure_title_assets`, aufgerufen in `render.render` (über
+  `provide_clips`) und in `cmd_export_mlt`. Der Bereich kommt aus
+  `clip_bereiche(plan, manifest)`: sichtbare Spanne jedes Slots samt halber
+  Blenden, 1 s Rand (`CLIP_HANDLE`), nach außen auf ganze Sekunden gerundet,
+  an den Clipgrenzen geklemmt, bei Mehrfachverwendung die Hülle. Gerechnet
+  wird über die **gezeigten** Frames, nicht über `out`: in `london-2026` steht
+  bei C0198 `out: 34.4`, der Slot zeigt 4,1 s.
+- Der Originalton entsteht im selben Bereich und damit mit demselben
+  `cache_offset`.
+- `cache_offset`, `cache_duration` und `audio_cache_path` setzt
+  `ensure_clip_intermediates` **nur im Speicher**. Das Manifest auf der Platte
+  bleibt ohne Bereich.
+- `render --range` erzeugt nur die Clips der gewählten Segmente, den Bereich
+  aber aus dem ganzen Plan. So entsteht dieselbe Datei wie beim vollen Lauf.
+- `check_sources_exist` prüft bei Clips mit Manifest die Quelldatei, nicht das
+  Intermediate.
+- Größe der Intermediates ist `edit.size` (Schritt c). `cli._size_of` ist
+  ersetzt durch `_ausgabegroesse`; sie liest `edit.size`, sobald es eine
+  `edit.yaml` gibt, und bestimmt nur noch das Seitenverhältnis der Bilder.
+- Codec wählbar über `render --intermediate` und `export-mlt --intermediate`
+  (`dnxhr_hqx`, `hevc_intra_nvenc`, `hevc_intra_cpu`). `ffv1` ist entfallen,
+  weil es in `.mkv` landet und die Kennung `.mov` trägt.
+- Platzprüfung vor dem Erzeugen (`_platz_fuer_clips`): Sekunden mal 182 MB/s
+  (auf Größe und Rate skaliert) gegen freien Platz, ohne Reserve.
+  `doctor.estimate_space` rechnet jetzt mit 1456 statt 700 Mbit/s.
+  `preprocess` schätzt Clips nicht mehr.
+- **Segmentlisten je Profil** (`clean.remember_segments`):
+  `cache/segments/<profil>_<WxH>_<fps>.liste`. Ein voller, geprüfter Render
+  ersetzt die Liste und löscht, was nur in der alten stand und in keiner
+  anderen Liste. Ein `--range`-Lauf ergänzt nur.
+- **`slideshow clean`** (`clean.plan_clean`/`apply_clean`): löscht, was die
+  aktuelle `edit.yaml` nicht nennt, aufgeteilt in sechs Arten (Bilder,
+  Clips, Ton, Titel, Segmente, Thumbs). `--dry-run` listet je Art Anzahl und
+  Größe, `--only` wählt Arten. Bei gelöschten Bildern leert `clean` den
+  `cache_path` im Manifest, sonst plante `build` sie ein und `render` fände die
+  Datei nicht. Gibt es noch keine Segmentliste, bleiben alle Segmente stehen.
+- Tests: `tests/test_clip_bereich.py` (Bereichsrechnung, Rundung gegen
+  Feinkorrektur, Teil-Intermediate an einem 14-s-Clip, zweiter Lauf erzeugt
+  nichts, Manifest bleibt ohne Bereich), `tests/test_clean.py` (Profillisten,
+  `clean` schont Referenziertes, `--dry-run` löscht nichts, ohne Liste keine
+  Segmente). `conftest.build_project` ruft nach dem Bauen
+  `ensure_clip_intermediates`, wie `render` es täte.
+
+Messwerte (`scripts/cache_bilanz.py`, neue Zeile „nach AP2“; gerechnet mit der
+gemessenen Rate der vorhandenen Dateien, nicht erzeugt):
+
+| | kenia-2026 | london-2026 |
+|---|---|---|
+| Intermediates heute | 64 Clips, 1108 s, 201,5 GB | 14 Clips, 220 s, 27,2 GB |
+| gezeigte Sekunden | 351 s in 28 Clips | 102 s in 11 Clips |
+| Bereich nach AP2 | 390 s ≈ 71,0 GB | 105 s ≈ 13,0 GB |
+| A1-Schranke (1,3 × (gezeigt + 2 s je Clip)) | 529 s ≈ 96,1 GB | 161 s ≈ 19,9 GB |
+
+`clean --dry-run` an `kenia-2026`: 920 Bilder (12,2 GB), 36 Clips (93,1 GB),
+deren Originalton (0,08 GB), 6 Titelfolien, 956 Thumbs; zusammen 105,4 GB.
+Segmente nicht, es gibt noch keine Liste.
+
+Abnahme:
+
+- A1: **gerechnet erfüllt** (390 s gegen 529 s Schranke). Erzeugt wurde an
+  `kenia-2026` nichts: das wären rund 71 GB DNxHR-Schreiblast und der Ersatz der
+  vorhandenen Dateien im echten Projekt. Am 14-s-Fixture-Clip gemessen: die
+  Datei deckt 6 s statt 16,8 s, Bild- und Tonlänge stimmen auf einen Frame.
+- A2: `test_sync.py` und `verify_master` in der Suite grün; Framezahl und Sync
+  an echtem Material nicht neu gemessen.
+- A3: erfüllt, `clean --dry-run` wie oben; `test_clean_loescht_nichts_was_die_edit_list_nennt`.
+- A4: für Clips `test_ein_zweiter_lauf_ohne_aenderung_erzeugt_nichts`, für
+  Segmente der vorhandene Cache-Test in `test_render.py`.
+- Suite: 648 von 648 in 245 s.
+
+Offen geblieben:
+
+- Beim ersten `render` nach dem Umbau rechnet jedes Projekt seine Clips einmal
+  neu: der Bereich steht im Kommando und damit im Key. Die alten Dateien werden
+  dabei überschrieben, nicht verdoppelt.
+- Die Intermediates laufen weiter in `manifest.fps_suggestion`, nicht in
+  `edit.fps`. Weichen beide ab (`build --fps`), stimmt die Retime-Zeitbasis
+  nicht mit der Timeline überein. Das war vorher genauso und gehört zu AP3
+  (Projektdatei).
+- Die Ersparnis der HEVC-Intra-Codecs ist weiterhin nicht gemessen (Vorschlag
+  3.3 Nr. 3).
+- Wer in Kdenlive einen Clip über den Bereich hinaus verlängert, sieht dort nur
+  den Rand. `reimport_mlt` übernimmt die Länge; der nächste `export-mlt` erzeugt
+  den größeren Bereich.

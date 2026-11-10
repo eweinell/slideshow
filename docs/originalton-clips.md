@@ -101,11 +101,12 @@ Tempo angepasst, Tonhöhe unverändert. Eine `atempo`-Instanz deckt **[0.5,
 nur nach unten, etwa bei 240p-Material auf 60p (speed 0.25).
 
 **Extrahiert wird vorsorglich, verwendet nur auf Anforderung.**
-`preprocess` legt `cache/<id>.audio.flac` neben das Intermediate, sobald der
+`render` legt `cache/<id>.audio.flac` neben das Intermediate, sobald der
 Clip überhaupt eine Tonspur hat — im selben Ausschnitt und derselben Zeitbasis
-wie das Bild. Das kostet fast nichts und erspart einen zweiten
-Preprocessing-Lauf, wenn die Entscheidung später fällt. `--no-audio-extract`
-schaltet es ab.
+wie das Bild. Das kostet fast nichts, und ein nachträgliches `audio: true`
+kostet so nur einen Mux. (Bis zum Prüfbericht 2026-11 geschah das in
+`preprocess` über den ganzen Clip; seit AP2 entstehen Bild und Ton erst beim
+Rendern und nur im verwendeten Bereich.)
 
 **Die Ausblende am Filmende gilt für den Mix, nicht nur für die Musik.**
 Ein Clip, der bis zuletzt läuft, blendet zusammen mit dem Bild aus — sonst

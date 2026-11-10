@@ -187,8 +187,8 @@ def preview_profile(fps: float) -> EncoderProfile:
 def intermediate_args(kind: str) -> tuple[list[str], str]:
     """Encoder-Argumente fuer das Clip-Intermediate (5.2).
 
-    DNxHR HQX ist gross (~700 Mbit/s bei 4K60); als Option gibt es
-    HEVC-Intra mit ``-cq 12``.
+    DNxHR HQX ist gross (gemessen 182 MB/s, also ~1,5 Gbit/s in UHD/50p); als
+    Option gibt es HEVC-Intra mit ``-qp``/``-crf 12``.
     """
     if kind == "dnxhr_hqx":
         return (["-c:v", "dnxhd", "-profile:v", "dnxhr_hqx", "-pix_fmt", "yuv422p10le"], "mov")

@@ -25,6 +25,8 @@ from slideshow.proc import have
 #: Kleine Testaufloesung — 7680 px waeren reine Wartezeit.
 TEST_SIZE = (640, 360)
 TEST_LONG_EDGE = 1280
+#: Clip-Intermediate der Tests: klein und ohne GPU.
+TEST_INTERMEDIATE = "hevc_intra_cpu"
 
 requires_ffmpeg = pytest.mark.skipif(not have("ffmpeg"), reason="ffmpeg fehlt")
 
@@ -117,7 +119,7 @@ def build_project(project: Project, *, images: list[Path], audio, caps,
     from slideshow.beats import detect_regions
     from slideshow.build import build_edit_list
     from slideshow.models import Defaults
-    from slideshow.preprocess import preprocess
+    from slideshow.preprocess import ensure_clip_intermediates, preprocess
     from slideshow.probe import probe_sources
 
     sources = [p for p in images]
@@ -131,8 +133,7 @@ def build_project(project: Project, *, images: list[Path], audio, caps,
     manifest.audio = build_mix([Path(audio.path)], mix)
     manifest.audio.file = project.rel(mix)
 
-    preprocess(project, manifest, caps=caps, size=size,
-               intermediate_codec="hevc_intra_cpu", long_edge=TEST_LONG_EDGE)
+    preprocess(project, manifest, caps=caps, size=size, long_edge=TEST_LONG_EDGE)
     manifest.save(project.manifest)
 
     beatmap = detect_regions(mix, track_bounds=[(t.start, t.end)
@@ -143,6 +144,13 @@ def build_project(project: Project, *, images: list[Path], audio, caps,
         order=order(manifest) if callable(order) else order,
         overrides=overrides(manifest) if callable(overrides) else overrides)
     edit.save(project.edit)
+    if clips:
+        # Was `render` als Erstes tut: die Clips im verwendeten Bereich
+        # aufbereiten. Danach stehen Datei, ``cache_offset`` und Originalton
+        # bereit, wie es die Tests auf Segment- und Cue-Ebene erwarten.
+        stats = ensure_clip_intermediates(project, plan, manifest, size=size, caps=caps,
+                                          codec=TEST_INTERMEDIATE)
+        assert not stats.failures, stats.failures
     return (manifest, edit, plan, cov)
 
 

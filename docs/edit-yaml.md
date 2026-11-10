@@ -564,8 +564,8 @@ Zwei Folgen sind beabsichtigt:
 
 | Schlüssel | Typ | Vorgabe | Bedeutung |
 |---|---|---|---|
-| `src` | string | – | Pfad zum **Intermediate**, nicht zur Originaldatei. |
-| `in` | float\|string | `0.0` | In-Punkt im Intermediate. |
+| `src` | string | – | Kennung des Clips, `cache/<id>.mov` — zugleich der Ort des **Intermediates**, nicht der Originaldatei. Das Intermediate entsteht erst beim Rendern. |
+| `in` | float\|string | `0.0` | In-Punkt, gemessen vom Anfang des (retimten) Clips. |
 | `out` | float\|string | – | Out-Punkt. Ohne Angabe läuft der Clip bis zum Rasterpunkt. |
 | `snap` | enum | `out` | `out` zieht den Out-Punkt auf das Beat-Raster (max. `clip_snap_tol` Beats), `none` lässt die Länge frei. |
 | `snap_back` | bool | von `defaults` | Wie beim Standbild. |
@@ -574,9 +574,12 @@ Zwei Folgen sind beabsichtigt:
 | `music` | float | von `defaults.clip_audio.music` | Musikpegel, solange dieser Clip läuft. `0` = stumm. |
 | `fade` | float | von `defaults.clip_audio.fade` | Ein-/Ausblende an den Grenzen dieses Clips. |
 
-`in` und `out` beziehen sich **immer** auf das (gegebenenfalls retimte)
-Intermediate, nie auf die Originaldatei. Beide akzeptieren Sekunden (`6.5`)
-oder `[[HH:]MM:]SS.mmm` als String (`"00:08.500"`, `"01:02:03.250"`).
+`in` und `out` beziehen sich **immer** auf die retimte Zeitbasis des ganzen
+Clips, nie auf die Originaldatei und nie auf den Anfang des Intermediates —
+das deckt seit dem Prüfbericht 2026-11 (AP2) nur den verwendeten Bereich ab und
+beginnt meist später; `render` rechnet den Versatz selbst heraus. Beide
+akzeptieren Sekunden (`6.5`) oder `[[HH:]MM:]SS.mmm` als String
+(`"00:08.500"`, `"01:02:03.250"`).
 
 Die vier Tonschlüssel schreibt man nicht hierher, sondern nach
 [`overrides.yaml`](#overridesyaml--der-feinschliff) unter `media:` — dort

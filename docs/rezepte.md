@@ -35,7 +35,7 @@ nichts mehr — alles Weitere arbeitet auf ihren Ergebnissen.
 slideshow doctor                                # läuft ffmpeg? welche Encoder?
 slideshow probe /material/urlaub                # was liegt vor?
 slideshow audio track1.mp3 track2.mp3 --gap 6   # Musik normalisieren und mischen
-slideshow preprocess                            # Bilder und Clips aufbereiten
+slideshow preprocess                            # Bilder aufbereiten
 slideshow beats                                 # wo ist der Takt?
 ```
 
@@ -44,7 +44,7 @@ slideshow beats                                 # wo ist der Takt?
 | `doctor` | Prüft die Umgebung und gibt zu jedem Fehlschlag einen kopierbaren Installationsbefehl aus. | einmal, und wenn etwas kaputtgeht |
 | `probe` | Liest Aufnahmezeit, Kamera, GPS, Auflösung und vergibt jedem Foto seine **Medien-ID** — den Namen, unter dem es überall sonst auftaucht. | wenn Material dazukommt |
 | `audio` | Mischt die Tracks zu einer Tonspur. `--gap 6` legt 6 s Stille dazwischen, `--xfade 3` blendet stattdessen über. Optional — ohne Musik siehe [Rezept 7](#7-stummer-film). | wenn sich die Musik ändert |
-| `preprocess` | Normalisiert jedes Foto und schneidet Clips zu. Der langsame Schritt. | wenn Material dazukommt |
+| `preprocess` | Normalisiert jedes Foto. Clips bekommen nur ihre Kennung; umgerechnet werden sie beim `render`, und nur der Teil, der im Film steht. | wenn Material dazukommt |
 | `beats` | Findet den Takt und schreibt die Regionenkarte. **Diese Datei vorher ansehen** — sie entscheidet, wo geschnitten wird. | wenn sich die Musik ändert |
 
 Die Reihenfolge muss man sich nicht merken: jeder Schritt schließt mit dem

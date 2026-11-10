@@ -15,7 +15,9 @@ from .paths import Project, is_wsl
 from .proc import DryRun
 # Nur Konstanten — die Vorgaben stehen dort, wo sie wirken, und nicht ein
 # zweites Mal in den `--help`-Texten.
+from .clean import ARTEN as CLEAN_ARTEN
 from .kbplan import VARIETY
+from .preprocess import INTERMEDIATE_CODECS
 from .select import (BURST_GAP, BY_CHOICES, DAY_ALPHA, MAX_PORTRAIT, MAX_SHARE,
                      MIN_LONG_EDGE, MIN_PER_DAY)
 from .sheet import THUMB_SIZE
@@ -54,6 +56,14 @@ def add_clip_audio_args(p: argparse.ArgumentParser) -> None:
                    help="Pegel des Originaltons (Default: 1.0)")
     p.add_argument("--clip-audio-fade", type=float, default=None, metavar="S",
                    help="Ein-/Ausblende an den Clipgrenzen (Default: 0.25 s)")
+
+
+def _intermediate_arg(p: argparse.ArgumentParser) -> None:
+    """Der Codec der Clip-Intermediates — erzeugt werden sie beim Rendern."""
+    p.add_argument("--intermediate", default="dnxhr_hqx", choices=INTERMEDIATE_CODECS,
+                   help="Codec der Clip-Intermediates (Default dnxhr_hqx, rund "
+                        "180 MB je Sekunde in UHD/50p; die HEVC-Varianten sind "
+                        "kleiner, ihre Groesse ist nicht gemessen)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -102,20 +112,16 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--gap", type=float, metavar="S", help="Sekunden Stille zwischen Tracks")
     g.add_argument("--xfade", type=float, metavar="S", help="Sekunden Crossfade")
 
-    pp = sub.add_parser("preprocess", help="Bilder und Clips normalisieren -> cache/")
+    pp = sub.add_parser(
+        "preprocess", help="Bilder normalisieren -> cache/",
+        description="Normalisiert die Bilder. Clips bekommen nur ihre Kennung; "
+                    "umgerechnet werden sie beim Rendern, und nur der Bereich, "
+                    "den der Film verwendet.")
     pp.add_argument("--manifest", default=None)
     pp.add_argument("--portrait", choices=("blur", "black", "crop"), default="blur")
     pp.add_argument("--image-format", choices=("jpeg", "png16"), default="jpeg",
                     help="png16 nur sinnvoll mit --kb-engine scale16")
-    pp.add_argument("--intermediate", default="dnxhr_hqx",
-                    choices=("dnxhr_hqx", "hevc_intra_nvenc", "hevc_intra_cpu", "ffv1"))
     pp.add_argument("--jobs", type=int, default=None)
-    pp.add_argument("--no-audio-extract", action="store_true",
-                    help="Originalton der Clips gar nicht erst extrahieren. "
-                         "Ob er im Film landet, entscheidet spaeter "
-                         "`build`/`render --clip-audio`.")
-    pp.add_argument("--ranges-from", default=None, metavar="edit.yaml",
-                    help="nur die tatsaechlich verwendeten Clipbereiche extrahieren")
     pp.add_argument("--order", default=None, metavar="order.yaml",
                     help="nur die dort genannten Medien normalisieren "
                          "(Default: order.yaml im Projekt, falls vorhanden). "
@@ -377,6 +383,7 @@ def build_parser() -> argparse.ArgumentParser:
     rd.add_argument("--codec", default="auto",
                     choices=("auto", "hevc_nvenc", "av1_nvenc", "libx265", "libx264"))
     rd.add_argument("--manifest", default=None)
+    _intermediate_arg(rd)
 
     mx = sub.add_parser("export-mlt", help="Kdenlive-Projekt aus der Edit-List")
     mx.add_argument("edit", nargs="?", default=None, metavar="edit.yaml")
@@ -384,6 +391,20 @@ def build_parser() -> argparse.ArgumentParser:
     mx.add_argument("--manifest", default=None)
     mx.add_argument("--reimport", default=None, metavar="project.kdenlive",
                     help="in Kdenlive korrigierte Zeiten in die Edit-List zurueckfuehren")
+    _intermediate_arg(mx)
+
+    cl = sub.add_parser(
+        "clean", help="Cache aufraeumen: was edit.yaml nicht referenziert",
+        description="Loescht aus cache/, was die aktuelle edit.yaml nicht "
+                    "referenziert: normalisierte Bilder, Clip-Intermediates, "
+                    "Originalton, Titelfolien, Vorschaubilder und Segmente, die "
+                    "kein Renderprofil mehr fuehrt. Erst mit --dry-run ansehen.")
+    cl.add_argument("edit", nargs="?", default=None, metavar="edit.yaml")
+    cl.add_argument("--manifest", default=None)
+    cl.add_argument("--dry-run", dest="clean_dry", action="store_true",
+                    help="nur auflisten, nichts loeschen")
+    cl.add_argument("--only", default=None, metavar="ARTEN",
+                    help=f"nur diese Arten, kommagetrennt: {','.join(CLEAN_ARTEN)}")
 
     st = sub.add_parser("selftest", help="Fixtures erzeugen und Testsuite laufen lassen")
     st.add_argument("--make-fixtures", action="store_true")
@@ -526,9 +547,10 @@ def _print_probe_report(result, out: Path) -> None:
     con.print(f"  Zielframerate      {m.fps_suggestion:g}p          "
               f"[dim]--fps 50[/dim]")
     con.print( "  Intermediate       dnxhr_hqx        "
-               "[dim]preprocess --intermediate hevc_intra_cpu[/dim]")
+               "[dim]render --intermediate hevc_intra_nvenc[/dim]")
     con.print( "  Ausgabecodec       HEVC             [dim]render --codec av1_nvenc[/dim]")
-    con.print( "  Hochformat-Modus   blur             [dim]preprocess --portrait crop[/dim]")
+    con.print( "  Hochformat-Modus   blur             [dim]preprocess --portrait crop "
+               "(Bilder), build --portrait crop (Clips)[/dim]")
     con.print( "  Beats pro Bild     8                [dim]build --beats-per-still 6[/dim]")
     con.print(f"\nManifest: {out}")
 
@@ -597,13 +619,13 @@ def cmd_preprocess(args, project: Project) -> int:
 
     only = None if args.all else _auswahl(project, args.order, manifest)
     bilder = [m for m in manifest.images if only is None or m.id in only]
-    filme = [m for m in manifest.clips if only is None or m.id in only]
 
     # Geschaetzt wird ueber das, was wirklich verarbeitet wird. Sonst verlangt
     # die Platzpruefung bei tausend erfassten und zweihundert gewaehlten
-    # Bildern das Fuenffache und schlaegt Alarm, wo nichts ist.
-    clip_seconds = sum((m.clip.duration if m.clip else 0.0) for m in filme)
-    est = estimate_space(images=len(bilder), clip_seconds=clip_seconds,
+    # Bildern das Fuenffache und schlaegt Alarm, wo nichts ist. Clips stehen
+    # nicht darin: ihre Intermediates entstehen erst beim Rendern, und dort
+    # prueft ``ensure_clip_intermediates`` den Platz gegen den echten Bereich.
+    est = estimate_space(images=len(bilder), clip_seconds=0.0,
                          timeline_seconds=manifest.audio.duration or 300.0)
     check = check_space(project, est)
     console().print(f"[{'green' if check.status == 'OK' else 'red'}]{check.status}[/] "
@@ -611,32 +633,23 @@ def cmd_preprocess(args, project: Project) -> int:
     if check.status == "FAIL":
         raise SlideshowError(check.fix or "Zu wenig Speicherplatz.")
 
-    spans = None
-    if args.ranges_from:
-        spans = _spans_from_edit(project, Path(args.ranges_from), manifest)
-
     dry = DryRun(enabled=args.dry_run)
     stats = preprocess(project, manifest, caps=caps, portrait_mode=args.portrait,
-                       image_format=args.image_format, size=tuple(_size_of(manifest)),
-                       intermediate_codec=args.intermediate, jobs=args.jobs,
-                       dry=dry, spans=spans, only=only,
-                       clip_audio=not args.no_audio_extract)
+                       image_format=args.image_format, size=_ausgabegroesse(project),
+                       jobs=args.jobs, dry=dry, only=only)
     if args.dry_run:
         _print_commands(dry.as_text())
         return 0
 
     manifest.save(path)
-    console().print(f"Bilder: {stats.images_done} neu, {stats.images_cached} aus Cache | "
-                    f"Clips: {stats.clips_done} neu, {stats.clips_cached} aus Cache")
+    console().print(f"Bilder: {stats.images_done} neu, {stats.images_cached} aus Cache"
+                    + (f" | Clips: {stats.clips} [dim](werden beim Rendern "
+                       f"aufbereitet, nur im verwendeten Bereich)[/dim]"
+                       if stats.clips else ""))
     if stats.skipped:
         console().print(f"  [dim]{stats.skipped} Medien ausgelassen — sie stehen "
                         f"nicht in der Auswahl. `--all` verarbeitet trotzdem "
                         f"alles.[/dim]")
-    if stats.clip_audio_done or stats.clip_audio_cached:
-        console().print(f"Originalton: {stats.clip_audio_done} neu, "
-                        f"{stats.clip_audio_cached} aus Cache "
-                        f"[dim](verwendet wird er nur, wo overrides.yaml bzw. "
-                        f"`build --clip-audio` ihn anfordert)[/dim]")
     if stats.failures:
         for f in stats.failures:
             console().print(f"  [red]FAIL[/] {f}")
@@ -644,24 +657,20 @@ def cmd_preprocess(args, project: Project) -> int:
     return 0
 
 
-def _size_of(manifest) -> tuple[int, int]:
+def _ausgabegroesse(project: Project) -> tuple[int, int]:
+    """Ausgabegroesse fuer die Normalform der Bilder.
+
+    Aus ``edit.yaml``, sobald es eine gibt; davor gilt UHD. Eingehen tut nur
+    das Seitenverhaeltnis — die Bilder liegen immer mit ``LONG_EDGE`` Breite
+    vor.
+    """
+    from .models import EditList
+    if project.edit.exists():
+        try:
+            return tuple(EditList.load(project.edit).size)
+        except Exception:                          # noqa: BLE001 - nur Vorgabe
+            log.debug("edit.yaml nicht lesbar, Normalform in 16:9")
     return (3840, 2160)
-
-
-def _spans_from_edit(project: Project, edit_path: Path, manifest) -> dict:
-    from .models import ClipSegment, EditList
-    edit = EditList.load(edit_path)
-    spans: dict[str, tuple[float, float]] = {}
-    for seg in edit.segments:
-        if not isinstance(seg, ClipSegment):
-            continue
-        item = manifest.by_cache_path(seg.src)
-        if item is None:
-            continue
-        lo, hi = seg.in_, (seg.out if seg.out is not None else seg.in_)
-        prev = spans.get(item.id)
-        spans[item.id] = (min(lo, prev[0]), max(hi, prev[1])) if prev else (lo, hi)
-    return spans
 
 
 def _merge_audio_info(project: Project, manifest) -> None:
@@ -1624,7 +1633,7 @@ def _clip_mehrbedarf(manifest, beatmap, defaults) -> int:
     for m in manifest.media:
         if m.kind != "clip" or m.clip is None:
             continue
-        dauer = m.clip.cache_duration or m.clip.effective_duration or m.clip.duration
+        dauer = m.clip.effective_duration or m.clip.duration
         mehr += max(0.0, (dauer - takt) / takt)
     return int(round(mehr))
 
@@ -1781,7 +1790,7 @@ def cmd_render(args, project: Project) -> int:
     manifest = Manifest.load(mpath) if mpath.exists() else None
 
     _titelassets(project, edit, manifest, dry=DryRun(enabled=args.dry_run))
-    check_sources_exist(project, edit)
+    check_sources_exist(project, edit, manifest)
     plan = validate_edit(edit, manifest)
     # ``build`` zeigt diese Meldungen in der Deckungstabelle, ``render`` bisher
     # nicht — wer eine Edit-List von Hand anfasst und direkt rendert, bekam sie
@@ -1796,7 +1805,7 @@ def cmd_render(args, project: Project) -> int:
     dry = DryRun(enabled=args.dry_run)
     stats = render(project, edit, plan, caps=caps, manifest=manifest, out=out,
                    jobs_limit=args.jobs, preview=args.preview, codec=args.codec,
-                   range_spec=args.range_spec, dry=dry)
+                   range_spec=args.range_spec, intermediate=args.intermediate, dry=dry)
     if args.dry_run:
         _print_commands(dry.as_text())
         return 0
@@ -1843,7 +1852,20 @@ def cmd_export_mlt(args, project: Project) -> int:
                         "`build` sie neu rechnet.[/dim]")
         return 0
 
-    _titelassets(project, edit, manifest, dry=DryRun(enabled=args.dry_run))
+    dry = DryRun(enabled=args.dry_run)
+    _titelassets(project, edit, manifest, dry=dry)
+    if manifest is not None:
+        # Kdenlive liest die Intermediates; sie entstehen wie beim Rendern erst
+        # hier, und die Zeitbasis (``cache_offset``) setzt dieser Aufruf.
+        from .build import plan_from_edit
+        from .doctor import preflight
+        from .render import provide_clips
+        stats = provide_clips(project, edit, plan_from_edit(edit, manifest),
+                              caps=preflight(project, "render"), manifest=manifest,
+                              intermediate=args.intermediate, dry=dry)
+        if stats.erzeugt or stats.aus_cache:
+            console().print(f"Clip-Intermediates: {stats.erzeugt} erzeugt, "
+                            f"{stats.aus_cache} aus Cache")
     out = Path(args.output) if args.output else (project.out / "project.kdenlive")
     xml = export_mlt(project, edit, manifest)
     if args.dry_run:
@@ -1852,6 +1874,56 @@ def cmd_export_mlt(args, project: Project) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(xml, encoding="utf-8")
     console().print(f"Kdenlive-Projekt: {out}")
+    return 0
+
+
+def cmd_clean(args, project: Project) -> int:
+    from rich.table import Table
+    from .clean import ARTEN, apply_clean, plan_clean
+    from .models import EditList, Manifest
+
+    epath = Path(args.edit) if args.edit else project.edit
+    if not epath.exists():
+        raise UsageError(f"{epath} fehlt. `clean` loescht, was die Edit-List nicht "
+                         f"nennt — ohne sie waere das alles.")
+    edit = EditList.load(epath)
+    mpath = Path(args.manifest) if args.manifest else project.manifest
+    manifest = Manifest.load(mpath)
+
+    arten = ARTEN
+    if args.only:
+        arten = tuple(a.strip() for a in args.only.split(",") if a.strip())
+        falsch = [a for a in arten if a not in ARTEN]
+        if falsch:
+            raise UsageError(f"Unbekannte Art {', '.join(falsch)}. Moeglich: "
+                             f"{', '.join(ARTEN)}")
+
+    plan = plan_clean(project, edit, manifest, arten=arten)
+    trocken = args.dry_run or args.clean_dry
+
+    t = Table(title=("Wuerde loeschen" if trocken else "Geloescht")
+              + f" (nicht in {epath.name})", title_justify="left")
+    t.add_column("Art", style="bold")
+    t.add_column("Anzahl", justify="right")
+    t.add_column("Groesse", justify="right")
+    gesamt = 0
+    for art in arten:
+        groesse = plan.bytes(art)
+        gesamt += groesse
+        t.add_row(art, str(plan.anzahl(art)), f"{groesse / 1e9:.2f} GB")
+    t.add_row("[bold]gesamt[/bold]", str(sum(plan.anzahl(a) for a in arten)),
+              f"[bold]{gesamt / 1e9:.2f} GB[/bold]")
+
+    if not trocken:
+        apply_clean(project, plan, manifest)
+        if plan.bilder_ids:
+            manifest.save(mpath)
+    console().print(t)
+    for h in plan.hinweise:
+        console().print(f"  [dim]{h}[/dim]")
+    if trocken and gesamt:
+        console().print(f"[dim]Loeschen mit: {_praefix(args, project)} clean"
+                        + (f" --only {args.only}" if args.only else "") + "[/dim]")
     return 0
 
 
@@ -1881,7 +1953,8 @@ _COMMANDS = {
     "preprocess": cmd_preprocess, "beats": cmd_beats, "chapters": cmd_chapters,
     "order": cmd_order, "select": cmd_select, "sheet": cmd_sheet,
     "analyze": cmd_analyze, "build": cmd_build, "overrides": cmd_overrides,
-    "render": cmd_render, "export-mlt": cmd_export_mlt, "selftest": cmd_selftest,
+    "render": cmd_render, "export-mlt": cmd_export_mlt, "clean": cmd_clean,
+    "selftest": cmd_selftest,
 }
 
 

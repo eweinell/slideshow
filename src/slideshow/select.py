@@ -901,7 +901,7 @@ def _zeilenkontext(m: MediaItem, sel: Selection, offsets: dict[str, float]) -> s
         teile.append(f"{_dt.datetime.fromtimestamp(ts):%H:%M}")
     if m.kind == "clip":
         info = m.clip
-        dauer = (info.cache_duration or info.effective_duration) if info else 0.0
+        dauer = (info.effective_duration or info.duration) if info else 0.0
         teile.append(f"Clip {dauer:.1f} s".replace(".", ","))
     elif m.image is not None:
         teile.append("hoch" if m.image.portrait else "quer")

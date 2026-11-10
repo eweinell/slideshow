@@ -34,7 +34,7 @@ from slideshow.planner import Intent, resolve, to_time
 from slideshow.proc import run
 from slideshow.render import plan_jobs, render
 
-from .conftest import build_project, requires_ffmpeg
+from .conftest import TEST_INTERMEDIATE, build_project, requires_ffmpeg
 
 #: Frequenz des Clip-Fixtures und der Musikklicks.
 TON_HZ = 300.0
@@ -189,12 +189,12 @@ def mit_ton(project, images, click_two_songs, caps, clip_with_audio):
 
 
 @requires_ffmpeg
-def test_preprocess_legt_die_tonspur_neben_das_intermediate(mit_ton):
+def test_die_aufbereitung_legt_die_tonspur_neben_das_intermediate(mit_ton):
     """Ohne extrahierte Tonspur gibt es spaeter nichts zu mischen."""
     project, manifest = mit_ton["project"], mit_ton["manifest"]
     clip = manifest.clips[0]
     assert clip.clip.has_audio, "das Fixture hat keinen Ton — Test wertlos"
-    assert clip.audio_cache_path, "preprocess hat keine Tonspur abgelegt"
+    assert clip.audio_cache_path, "die Aufbereitung hat keine Tonspur abgelegt"
     assert project.abs(clip.audio_cache_path).exists()
 
 
@@ -283,7 +283,7 @@ def test_fehlende_tonspur_wird_gemeldet_statt_verschluckt(mit_ton):
     manifest.clips[0].audio_cache_path = ""
     cues, warnungen = collect_cues(plan, edit, manifest)
     assert cues == []
-    assert len(warnungen) == 1 and "preprocess" in warnungen[0]
+    assert len(warnungen) == 1 and "Rendern" in warnungen[0]
 
 
 @requires_ffmpeg
@@ -349,7 +349,8 @@ def test_master_traegt_den_originalton_und_dueckt_die_musik(mit_ton, caps, tmp_p
     project, edit, plan = mit_ton["project"], mit_ton["edit"], mit_ton["plan"]
     out = project.out / "mit_ton.mp4"
     stats = render(project, edit, plan, caps=caps, manifest=mit_ton["manifest"],
-                   out=out, codec="libx264", jobs_limit=2)
+                   out=out, codec="libx264", jobs_limit=2,
+                   intermediate=TEST_INTERMEDIATE)
     assert stats.clip_audio == 1
     assert not stats.failures
 
@@ -384,7 +385,7 @@ def test_ohne_anforderung_kein_ton_im_master(project, images, click_two_songs, c
                                         clip_with_audio)
     out = project.out / "stumm.mp4"
     stats = render(project, edit, plan, caps=caps, manifest=manifest, out=out,
-                   codec="libx264", jobs_limit=2)
+                   codec="libx264", jobs_limit=2, intermediate=TEST_INTERMEDIATE)
     assert stats.clip_audio == 0
 
     slot = next(s for s in plan.slots if s.intent.kind == "clip")

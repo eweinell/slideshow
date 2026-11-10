@@ -7,7 +7,7 @@ musiksynchrone 4K-Slideshow rendert.
 slideshow doctor                              # Umgebung prüfen
 slideshow probe /material/urlaub              # → manifest.json
 slideshow audio track1.mp3 track2.mp3 --gap 6 # → cache/mix.flac
-slideshow preprocess                          # → cache/
+slideshow preprocess                          # → cache/ (Bilder; Clips erst beim Rendern)
 slideshow beats                               # → beats.yaml  ← ansehen!
 slideshow order                               # → order.yaml  ← optional, zum Sortieren
 slideshow select                              # → order.yaml  ← statt dessen, bei sehr viel Material
@@ -125,6 +125,28 @@ cache/          normalisierte Bilder, Clip-Intermediates, Segment-Cache
 out/            master.mp4, timeline.json, project.kdenlive
 logs/           ein Logfile je Subkommando, mit den exakten ffmpeg-Aufrufen
 ```
+
+### Cache
+
+`preprocess` normalisiert nur die Bilder. **Clips werden erst beim Rendern
+umgerechnet**, und nur der Bereich, den der Film zeigt: sichtbare Spanne samt
+halber Blenden, 1 s Rand, auf ganze Sekunden gerundet. Ein um ein paar Frames
+korrigierter Schnitt rechnet den Clip deshalb nicht neu. DNxHR HQX belegt in
+UHD/50p rund 180 MB je Sekunde; kleiner geht es mit
+`render --intermediate hevc_intra_nvenc` (oder `hevc_intra_cpu` ohne GPU).
+
+Nach jedem vollständigen `render` löscht das Tool die Segmente, die der vorige
+Lauf desselben Profils brauchte und dieser nicht mehr. Alles andere räumt
+`slideshow clean` auf — was die aktuelle `edit.yaml` nicht nennt:
+
+```bash
+slideshow clean --dry-run          # je Art Anzahl und Größe, löscht nichts
+slideshow clean                    # löscht
+slideshow clean --only clips,ton   # nur bestimmte Arten
+```
+
+Gelöschte Bilder holt `preprocess` nach, sobald sie wieder in der Auswahl
+stehen; Clips entstehen beim nächsten `render` ohnehin neu.
 
 Sämtliche Schlüssel der Edit-List — Takt, Ken Burns, Übergänge, Präzedenz der
 Dauerangaben und die üblichen Eingriffe von Hand — stehen in
@@ -459,9 +481,9 @@ Drei Eigenschaften, die die Umsetzung trägt:
 Die Entwurfsentscheidungen im Detail stehen in
 [`docs/originalton-clips.md`](docs/originalton-clips.md).
 
-`preprocess` legt den Originalton als `cache/<id>.audio.flac` neben das
-Intermediate, sobald der Clip überhaupt eine Tonspur hat; `--no-audio-extract`
-schaltet das ab. Endet ein Clip vor seinem Slot (der Planer hält dann das
+`render` legt den Originalton als `cache/<id>.audio.flac` neben das
+Intermediate, sobald der Clip überhaupt eine Tonspur hat — im selben Bereich
+wie das Bild, also nur für den Teil, der im Film steht. Endet ein Clip vor seinem Slot (der Planer hält dann das
 letzte Bild), endet auch der Ton dort — und die Musik kommt zurück, statt über
 dem Standbild unten zu bleiben. Die Ausblende am Filmende gilt für den fertigen
 Mix, ein Clip am Schluss blendet also mit dem Bild zusammen aus.

@@ -216,7 +216,8 @@ def _audio_source(cache_path: str, manifest) -> tuple[str | None, float, float, 
             return (None, 0.0, 0.0, "Originalton angefordert, aber der Clip hat "
                                     "keine Tonspur")
         return (None, 0.0, 0.0, "Originalton angefordert, aber nicht extrahiert — "
-                                "`slideshow preprocess` erneut laufen lassen")
+                                "das geschieht beim Rendern; steht davor eine "
+                                "Fehlermeldung zum Clip?")
     info = item.clip
     available = (info.cache_duration or info.effective_duration) if info else 0.0
     return (item.audio_cache_path, (info.cache_offset if info else 0.0), available, "")

@@ -59,6 +59,7 @@ def bilanz(root: pathlib.Path) -> None:
           f"{HANDLE:g} s Handles: {entbehrlich / 1e3:.1f} GB")
     for z in sorted(zeilen, key=lambda z: -z[3])[:5]:
         print(f"     {z[0]:<34} {z[1]:6.1f} s, {z[2]:5.1f} s verwendet, {z[3] / 1e3:5.1f} GB")
+    _bereiche_aus_dem_plan(root, gesamt_mb / max(gesamt_s, 1))
 
     # --- Bilder --------------------------------------------------------
     im_film = {s["src"] for s in segmente if s.get("type") == "still"}
@@ -80,6 +81,37 @@ def bilanz(root: pathlib.Path) -> None:
     print(f"   Segmente: {len(seg)} Dateien, {s_mb / 1e3:.1f} GB "
           f"(Plan: {sum(1 for s in segmente)} Eintraege in edit.yaml)")
     print(f"   Cache gesamt: {alles / 1e3:.1f} GB")
+
+
+def _bereiche_aus_dem_plan(root: pathlib.Path, mb_je_s: float) -> None:
+    """Was die Intermediates seit AP2 belegen: die Bereiche, die
+    ``ensure_clip_intermediates`` aus dem Plan der aktuellen edit.yaml waehlt.
+
+    Gerechnet, nicht erzeugt — mit der gemessenen Rate der vorhandenen Dateien.
+    Daneben die Schranke aus AP2/A1: das 1,3-Fache von "verwendete Sekunden +
+    2 s je Clip".
+    """
+    try:
+        from slideshow.build import plan_from_edit
+        from slideshow.models import EditList, Manifest
+        from slideshow.preprocess import clip_bereiche
+    except ImportError:
+        print("   (Bereiche nach AP2: slideshow nicht importierbar)")
+        return
+    edit = EditList.load(root / "edit.yaml")
+    manifest = Manifest.load(root / "manifest.json")
+    plan = plan_from_edit(edit, manifest)
+    bereiche = clip_bereiche(plan, manifest)
+    # Gezeigte Sekunden, nicht ``out - in``: ein Slot am Filmende oder vor
+    # einem Raster kann kuerzer sein als sein ``out`` (london-2026, C0198:
+    # out 34,4 s, gezeigt 4,1 s), und gelesen wird nur, was gezeigt wird.
+    verwendet = sum(s.frames / plan.fps for s in plan.slots if s.intent.kind == "clip")
+    bereich_s = sum(hi - lo for lo, hi in bereiche.values())
+    schranke_s = 1.3 * (verwendet + 2.0 * len(bereiche))
+    print(f"   nach AP2: {len(bereiche)} Intermediates, {bereich_s:.0f} s "
+          f"(verwendet {verwendet:.0f} s) = {bereich_s * mb_je_s / 1e3:.1f} GB; "
+          f"A1-Schranke {schranke_s:.0f} s = {schranke_s * mb_je_s / 1e3:.1f} GB "
+          f"-> {'erfuellt' if bereich_s <= schranke_s else 'VERFEHLT'}")
 
 
 if __name__ == "__main__":

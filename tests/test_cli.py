@@ -68,8 +68,7 @@ def test_clip_audio_wird_ueber_overrides_yaml_gestellt(tmp_path, quelle_mit_clip
 
     assert _run("--project", str(proj), "probe", str(src), "--fps", "60") == 0
     assert _run("--project", str(proj), "audio", str(audio)) == 0
-    assert _run("--project", str(proj), "preprocess",
-                "--intermediate", "hevc_intra_cpu") == 0
+    assert _run("--project", str(proj), "preprocess") == 0
     assert _run("--project", str(proj), "beats") == 0
 
     # Ohne Eintrag: kein Originalton.
@@ -108,7 +107,7 @@ def test_ganze_kette(tmp_path, quelle):
     assert _run("--project", proj, "audio", str(audio)) == 0
     assert (tmp_path / "proj" / "cache" / "mix.flac").exists()
 
-    assert _run("--project", proj, "preprocess", "--intermediate", "hevc_intra_cpu") == 0
+    assert _run("--project", proj, "preprocess") == 0
     assert list((tmp_path / "proj" / "cache").glob("img_*.jpg"))
 
     assert _run("--project", proj, "beats") == 0
@@ -139,7 +138,7 @@ def test_handarbeit_haelt_den_neubau_an_und_laesst_sich_sichern(tmp_path, quelle
     proj = str(tmp_path / "proj")
     _run("--project", proj, "probe", str(src), "--fps", "60")
     _run("--project", proj, "audio", str(audio))
-    _run("--project", proj, "preprocess", "--intermediate", "hevc_intra_cpu")
+    _run("--project", proj, "preprocess")
     _run("--project", proj, "beats")
     assert _run("--project", proj, "build") == 0
 
@@ -174,7 +173,7 @@ def test_render_dry_run_zeigt_kommandos(tmp_path, quelle, capsys):
     proj = str(tmp_path / "proj")
     _run("--project", proj, "probe", str(src), "--fps", "60")
     _run("--project", proj, "audio", str(audio))
-    _run("--project", proj, "preprocess", "--intermediate", "hevc_intra_cpu")
+    _run("--project", proj, "preprocess")
     _run("--project", proj, "beats")
     _run("--project", proj, "build", "--force")
     capsys.readouterr()

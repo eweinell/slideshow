@@ -120,14 +120,14 @@ def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
                 kb=motion_kb(e.kb if e else None,
                              bewegung or defaults.kb.motion)))
         else:
-            info = m.clip
-            available = (info.cache_duration or info.effective_duration) if info else 0.0
-            start = info.cache_offset if info else 0.0
-            clip_in = e.in_ if (e and e.in_ is not None) else start
+            # Geplant wird gegen den ganzen Clip: das Intermediate entsteht
+            # erst beim Rendern, und zwar fuer genau den Bereich, den dieser
+            # Plan waehlt (``preprocess.ensure_clip_intermediates``).
+            clip_in = e.in_ if (e and e.in_ is not None) else 0.0
             clip_out = e.out if e else None
             intents.append(Intent(kind="clip", src=m.cache_path, index=len(intents),
                                   clip_in=clip_in,
-                                  clip_available=start + available,
+                                  clip_available=clip_laenge(m),
                                   clip_out=clip_out,
                                   dur=(clip_out - clip_in) if clip_out is not None else None,
                                   snap=(e.snap if (e and e.snap) else "out"),
@@ -1354,15 +1354,27 @@ def plan_from_edit(edit: EditList, manifest: Manifest | None = None) -> Plan:
     return plan
 
 
+def clip_laenge(item) -> float:
+    """Die Laenge eines Clips in der retimten Zeitbasis — die Grenze fuer in/out.
+
+    Bewusst nicht ``cache_duration``: das ist die Laenge des *Intermediates*,
+    und das deckt seit AP2 nur den Bereich ab, den der letzte Plan verwendet
+    hat. Planten ``build`` oder ``render`` dagegen, schrumpfte der Spielraum
+    mit jedem Lauf, und der Rundlauf ``build -> render`` waere nicht stabil.
+    """
+    info = item.clip
+    if info is None:
+        return 0.0
+    return info.effective_duration or info.duration
+
+
 def _clip_bounds(seg: ClipSegment, manifest: Manifest | None) -> tuple[float, float | None]:
     if manifest is None:
         return (0.0, None)
     item = manifest.by_cache_path(seg.src)
     if item is None or item.clip is None:
         return (0.0, None)
-    info = item.clip
-    return (info.cache_offset + (info.cache_duration or info.effective_duration),
-            info.cache_offset)
+    return (clip_laenge(item), 0.0)
 
 
 # --------------------------------------------------------------------------
@@ -1372,10 +1384,12 @@ def _clip_bounds(seg: ClipSegment, manifest: Manifest | None) -> tuple[float, fl
 def clamp_transitions_for_handles(plan: Plan, manifest: Manifest) -> None:
     """``build`` muss validieren, dass ``T/2`` <= Handle ist (8.2).
 
-    Fuer Clip-Nachbarn liefert das Intermediate die Frames ausserhalb des
-    exklusiven Anteils — aber nur, soweit die 1-s-Handles aus 5.2 reichen.
-    Statt hart abzubrechen wird die Blende auf das Moegliche gekuerzt und
-    gewarnt: eine kuerzere Blende ist immer noch ein brauchbarer Film.
+    Fuer Clip-Nachbarn liefert die Quelle die Frames ausserhalb des
+    exklusiven Anteils — aber nur, soweit der Clip vor ``in`` bzw. hinter
+    ``out`` noch Material hat. Statt hart abzubrechen wird die Blende auf das
+    Moegliche gekuerzt und gewarnt: eine kuerzere Blende ist immer noch ein
+    brauchbarer Film. Das Intermediate entsteht danach passend
+    (``clip_bereiche`` rechnet ueber die sichtbare Spanne).
     """
     fps = plan.fps
     for cut in range(1, len(plan.slots)):
@@ -1388,12 +1402,10 @@ def clamp_transitions_for_handles(plan: Plan, manifest: Manifest) -> None:
             if slot.intent.kind != "clip":
                 continue
             item = manifest.by_cache_path(slot.intent.src)
-            info = item.clip if item else None
-            if info is None:
+            if item is None or item.clip is None:
                 continue
-            start = info.cache_offset
-            end = info.cache_offset + (info.cache_duration or info.effective_duration)
-            handle = (end - slot.clip_out) if side == "after" else (slot.clip_in - start)
+            end = clip_laenge(item)
+            handle = (end - slot.clip_out) if side == "after" else slot.clip_in
             limit = min(limit, max(0.0, handle))
         if limit < half - 1e-6:
             # Abrunden, damit die Blende sicher in die Handles passt, und auf
@@ -1401,8 +1413,8 @@ def clamp_transitions_for_handles(plan: Plan, manifest: Manifest) -> None:
             plan.transitions[cut] = max(0, min(t, int(limit * fps) * 2))
             plan.warnings.append(
                 f"Blende an Schnitt {cut} von {t / fps:.3f} s auf "
-                f"{plan.transitions[cut] / fps:.3f} s gekuerzt — die Handles des "
-                f"angrenzenden Clips reichen nicht weiter (5.2: 1 s).")
+                f"{plan.transitions[cut] / fps:.3f} s gekuerzt — der angrenzende "
+                f"Clip hat vor `in` bzw. hinter `out` nicht mehr Material.")
 
 
 def validate_edit(edit: EditList, manifest: Manifest | None = None) -> Plan:
@@ -1452,7 +1464,15 @@ def _validate_sources(edit: EditList, manifest: Manifest) -> None:
                 path=f"segments[{idx}].src")
 
 
-def check_sources_exist(project: Project, edit: EditList) -> None:
+def check_sources_exist(project: Project, edit: EditList,
+                        manifest: Manifest | None = None) -> None:
+    """Jede Datei, die ``render`` lesen wird, muss da sein.
+
+    Fuer einen Clip ist das mit Manifest die **Quelldatei**: das Intermediate
+    entsteht erst beim Rendern (``ensure_clip_intermediates``), sein Fehlen ist
+    also der Normalfall. Ohne Manifest laesst es sich nicht erzeugen, dann muss
+    es schon liegen.
+    """
     missing: list[tuple[int, str]] = []
     for idx, seg in enumerate(edit.segments):
         if isinstance(seg, TitleSegment):
@@ -1468,7 +1488,15 @@ def check_sources_exist(project: Project, edit: EditList) -> None:
                     f"erzeugen lassen.", path=f"segments[{idx}].title")
             continue
         src = getattr(seg, "src", None)
-        if src and not project.abs(src).exists():
+        if not src:
+            continue
+        if isinstance(seg, ClipSegment) and manifest is not None:
+            item = manifest.by_cache_path(src)
+            if item is not None:
+                if not project.abs(item.path).exists():
+                    missing.append((idx, item.path))
+                continue
+        if not project.abs(src).exists():
             missing.append((idx, src))
     if missing:
         idx, src = missing[0]
