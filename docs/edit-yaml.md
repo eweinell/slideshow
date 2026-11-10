@@ -82,7 +82,7 @@ und bricht sonst ab.
 | `conf` | `beat` | Konfidenz der Erkennung, 0…1. Rein informativ. |
 | `reason` | `free` | Warum kein Raster: `stille`, `niedrige Rhythmus-Konfidenz`, … |
 | `quiet` | `free` | `true` nur bei **echter Stille**. Steuert die `hold_seconds`-Regel: nur eine stille Region bekommt ein einzelnes ruhiges Bild. Läuft Musik ohne erkanntes Raster, muss das `false` sein, sonst steht ein Bild über die ganze Region. Fehlt der Schlüssel, wird er aus `reason == "stille"` abgeleitet. |
-| `beats_per_still` | `beat` | Überschreibt `defaults.beats_per_still` für **diese** Region. |
+| `beats_per_still` | `beat` | Überschreibt `defaults.beats_per_still` für **diese** Region — und gilt dann **ohne** den [Boden](#der-boden-unter-beats_per_still). |
 | `still_seconds` | `free` | Überschreibt `defaults.still_seconds` für **diese** Region. |
 
 ---
@@ -95,7 +95,7 @@ Gelten für jedes Segment, das nichts Eigenes sagt.
 
 | Schlüssel | Typ | Vorgabe | Bedeutung |
 |---|---|---|---|
-| `beats_per_still` | int | `8` | Beats je Standbild in einer Beat-Region. Kleiner = schnellerer Schnitt. |
+| `beats_per_still` | int | `8` | Beats je Standbild in einer Beat-Region. Kleiner = schnellerer Schnitt. **Hat einen Boden:** liegt `beats_per_still × Beat` unter `still_tolerance[0]` (bei 200 bpm sind 8 Beats nur 2,4 s), wird der Wert pro Region angehoben — siehe [Der Boden unter `beats_per_still`](#der-boden-unter-beats_per_still). |
 | `still_seconds` | float | `4.0` | Standzeit je Bild in einer `free`-Region — der Takt, wenn es kein Raster gibt. Auch der Takt für den stummen Teil hinter dem Tonende. |
 | `still_tolerance` | [float, float] | `[3.0, 6.0]` | Erlaubtes Band, in dem eine `free`-Region **exakt** gefüllt werden darf. Die Region wird in gleich lange Slots geteilt; passt keine Anzahl ins Band, gewinnt die nächstbeste. `min` muss < `max` sein. |
 | `min_still_seconds` | float | `still_tolerance[0]` | Kürzeste Standzeit, die ein eigenes Bild rechtfertigt — siehe [Der Rest am Regionsende](#der-rest-am-regionsende). `0` schaltet die Regel ab. |
@@ -1230,6 +1230,45 @@ Cursor. Deshalb findet schon das folgende Bild nach einem Override von selbst
 aufs Raster zurück — ein Tippfehler in `dur:` kann den Rest des Films nicht aus
 dem Takt bringen.
 
+### Der Boden unter `beats_per_still`
+
+`beats_per_still` zählt Beats, gemeint ist aber eine Zeit. Bei 200 bpm sind
+8 Beats nur 2,4 s — weniger als `still_tolerance[0]` (3,0 s), das `free`-Regionen
+ohnehin einhalten. Schnelle Regionen, wie sie die Beat-Erkennung bei
+Oktavfehlern (Verdopplung auf 190–200 bpm) liefert, bekämen sonst Bilder, die
+kürzer stehen als überall sonst.
+
+Deshalb wird der **globale** Wert pro Region angehoben, bis
+`Beats × Beat ≥ still_tolerance[0]` gilt:
+
+| bpm | Beat | 8 Beats | gilt |
+|---|---|---|---|
+| 120 | 0,50 s | 4,0 s | 8 (unverändert) |
+| 130 | 0,46 s | 3,7 s | 8 (unverändert) |
+| 195 | 0,31 s | 2,5 s | **10** → 3,1 s |
+| 200 | 0,30 s | 2,4 s | **10** → 3,0 s |
+
+Gerundet wird in **Beatpaaren** (halben Takten), solange der Vorgabewert selbst
+gerade ist (8 → 10); sonst in ganzen Beats. Ein Schritt von 4 Beats überschoss:
+bei 123 bpm sind 8 Beats 3,9 s, und ein Boden von 4,0 s hätte daraus 12 Beats
+= 5,9 s gemacht — fast die Hälfte aller Bilder stünde dann über 5,5 s. Mit
+Paaren bleibt der Zuschlag unter einer Sekunde (an `kenia-2026` mit Boden 4,0 s
+gerechnet: zeitgewichtet 4,5 s, Spanne 4,0–4,9 s).
+
+- **`beats_per_still` an der Region** gilt unverändert — wer dort einen Wert
+  schreibt, meint ihn.
+- **`beats:` am Segment** gilt ebenfalls unverändert.
+- **Abschalten** lässt sich der Boden nur über `still_tolerance`: ein kleineres
+  `min` senkt ihn mit.
+- In `edit.yaml` steht der angehobene Wert ausgeschrieben als `beats: 12.0` —
+  ein dort stehender Wert gilt ausdrücklich und geht an keiner Regel vorbei.
+- Der Boden kostet Kapazität: weniger Bilder pro Sekunde Musik. An `kenia-2026`
+  standen 59 von 168 Standbildern unter 3 s, danach eines: ein 0,9-s-Rest hinter
+  einem Clip, den [der Rest am Regionsende](#der-rest-am-regionsende) nicht
+  zuschlagen kann und der schon vorher da war.
+- Der Rat „`beats_per_still` senken" bei Überdeckung nennt die Regionen, in
+  denen er wegen des Bodens nichts bewirkt (`coverage_advice`).
+
 ### Der Rest am Regionsende
 
 Die Dauer einer Beat-Region ist so gut wie nie ein ganzzahliges Vielfaches der
@@ -1263,6 +1302,32 @@ Vorschlag, `beats_per_still` zu senken, steht dann im Bericht.
 
 `free`-Regionen brauchen die Schranke nicht: sie sind über `still_tolerance`
 exakt gekachelt und haben gar keinen Rest.
+
+### Die Filmlänge, wenn das Material sie bestimmt
+
+Füllt das Material die Musik nicht bis auf eine Bildlänge (`audio.duration` in
+der Edit-List ist dann kürzer als die Tonspur), gewinnt das Material: der Film
+endet dort, der Ton wird abgeschnitten (Meldung „Material (…) ist kürzer als
+die Tonspur"). Die Länge entsteht in zwei Schritten:
+
+1. **Schätzung** (`planner.material_seconds`): ein Zeitcursor läuft über die
+   Regionenkarte. Ein Standbild belegt den Standard-Slot seiner Region, ein
+   **Clip seine Länge** (`out − in`, ohne `out` der Rest des Intermediates), ein
+   Bild mit `dur:` seine Sekunden. Früher zählte jedes Medium als *ein*
+   Standard-Slot — ein 20-s-Clip kostete 4,5 s, die Laufzeit kam um den
+   Mehrbedarf aller Clips zu kurz heraus, und hinten fielen Bilder aus dem Film
+   („n Medien passen nicht mehr in die Musik"), obwohl die Tonspur sie getragen
+   hätte. An `kenia-2026`: 26 Clips, 173 s Mehrbedarf, 36 Medien ungenutzt.
+2. **Nachmessung** (`build`): die Schätzung bleibt eine Näherung — der Planer
+   zieht Clip-Enden ans Raster, rastet nach jedem Clip neu ein und schlägt Reste
+   zu. Deshalb wird am fertigen Plan nachgemessen: bleibt Material übrig, wird
+   die Länge verlängert (höchstens bis zur Tonspur), wurde das letzte Bild
+   gestreckt, wird sie auf das natürliche Ende gekürzt. Die Slots davor ändern
+   sich dabei nicht, nur der Schwanz. Höchstens vier Durchgänge.
+
+Ergebnis an `kenia-2026` (Clips mit `in/out`): 1468,28 s und 36 ungenutzte
+Medien vorher; 1658,18 s, alle 324 Slots belegt, nichts gestreckt nachher.
+Bestimmt die Musik die Länge, ändert sich nichts.
 
 ---
 

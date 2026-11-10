@@ -17,6 +17,7 @@ Wer die aufgeloeste Timeline sehen will, bekommt sie als Report bzw. in
 
 from __future__ import annotations
 
+import copy
 import datetime as _dt
 import json
 import logging
@@ -35,7 +36,7 @@ from .paths import Project
 from .planner import (Coverage, Intent, Plan, RenderSegment, apply_transitions,
                       beat_index_at_or_after, coverage, default_transition_seconds,
                       fit_regions_to, material_seconds, plan_slots, resolve,
-                      standard_slot, to_frame, to_time, validate_continuity,
+                      standard_beats, standard_slot, to_frame, to_time, validate_continuity,
                       visible_span)
 from .preprocess import title_canvas
 from .probe import chronological
@@ -164,12 +165,47 @@ def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
     # Titel um einen Standard-Slot zu kurz, und ohne Tonspur deckte die
     # zugeschnittene Regionenkarte die Timeline nicht mehr ab.
     duration, hinweis = _timeline_length(regions, len(intents), defaults,
-                                         audio_seconds=audio_seconds)
-    regions = fit_regions_to(regions, duration)
+                                         audio_seconds=audio_seconds,
+                                         fixed=_feste_dauern(intents))
+    karte = regions
+    regions = fit_regions_to(karte, duration)
     total_frames = to_frame(duration, fps)
 
-    plan, lage_warnungen = plan_with_titles(regions, intents, defaults, fps=fps,
-                                            total_frames=total_frames)
+    plan, lage_warnungen = plan_with_titles(regions, copy.deepcopy(intents), defaults,
+                                            fps=fps, total_frames=total_frames)
+    # Die Laenge aus ``_timeline_length`` ist eine Schaetzung: der Planer zieht
+    # Clip-Enden ans Raster, rastet nach jedem Clip neu ein und schlaegt Reste
+    # zu. Bestimmt das Material die Laenge, wird sie deshalb am Plan **nach**-
+    # gemessen — ein Durchgang mehr, aber exakt: bleibt Material uebrig, wird
+    # verlaengert, wurde das letzte Bild gestreckt, auf das natuerliche Ende
+    # gekuerzt. Die Slots bis dorthin aendern sich nicht (die Grenze liegt hinter
+    # ihnen), nur der Schwanz.
+    if hinweis or audio_seconds <= 0:
+        grenze = audio_seconds if audio_seconds > 0 else float("inf")
+        for _ in range(_MAX_LAENGE_PASSES):
+            if plan.stretched > 0:
+                neu = to_time(plan.total_frames - plan.stretched, fps)
+            elif plan.unused and duration < grenze - 1e-6:
+                mittel = standard_slot(karte, defaults)
+                neu = min(grenze, duration + len(plan.unused) * mittel)
+            else:
+                break
+            if abs(neu - duration) < 1.0 / fps:
+                break
+            duration = neu
+            regions = fit_regions_to(karte, duration)
+            total_frames = to_frame(duration, fps)
+            plan, lage_warnungen = plan_with_titles(
+                regions, copy.deepcopy(intents), defaults, fps=fps,
+                total_frames=total_frames)
+            # Die Meldung nennt sonst die ueberholte Schaetzung.
+            if hinweis and audio_seconds > 0:
+                hinweis = (f"Material ({duration:.1f} s) ist "
+                           f"{'kuerzer' if duration < audio_seconds else 'laenger'} "
+                           f"als die Tonspur ({audio_seconds:.1f} s) — "
+                           + ("der Ton wird auf die Filmlaenge abgeschnitten"
+                              if duration < audio_seconds
+                              else "die restlichen Bilder laufen ohne Ton"))
     explicit = None if defaults.xfade.auto else {}
     apply_transitions(plan, defaults, explicit=explicit)
     if defaults.xfade.auto:
@@ -217,8 +253,27 @@ def build_edit_list(project: Project, manifest: Manifest, beatmap: BeatMap, *,
     return (edit, plan, cov)
 
 
+def _feste_dauern(intents: list[Intent]) -> list[float | None]:
+    """Je Medium die Dauer, die es von sich aus belegt — sonst ``None``.
+
+    Ein Clip belegt seine Laenge (``out - in``, ohne ``out`` den Rest des
+    Intermediates), ein Bild mit ``dur:`` seine Sekunden. Alles andere nimmt
+    einen Standard-Slot, und den kennt erst die Region.
+    """
+    out: list[float | None] = []
+    for it in intents:
+        if it.dur is not None:
+            out.append(float(it.dur))
+        elif it.kind == "clip" and it.clip_available:
+            out.append(max(0.0, float(it.clip_available) - float(it.clip_in or 0.0)))
+        else:
+            out.append(None)
+    return out
+
+
 def _timeline_length(regions: list[Region], n_media: int, defaults: Defaults, *,
-                     audio_seconds: float) -> tuple[float, str]:
+                     audio_seconds: float,
+                     fixed: list[float | None] | None = None) -> tuple[float, str]:
     """Laenge der Timeline bestimmen — und melden, wenn die Tonspur nachgibt.
 
     Die Musik gibt die Laufzeit vor, solange das Material sie bis auf eine
@@ -232,11 +287,12 @@ def _timeline_length(regions: list[Region], n_media: int, defaults: Defaults, *,
     ab, sondern meldet sich.
     """
     if audio_seconds <= 0:
-        laenge = material_seconds(regions, n_media, defaults) or regions[-1].end
+        laenge = material_seconds(regions, n_media, defaults, fixed=fixed) \
+            or regions[-1].end
         return (laenge, f"keine Tonspur — die Laufzeit ergibt sich aus dem Material "
                         f"({n_media} Medien, {laenge:.1f} s)")
 
-    material = material_seconds(regions, n_media, defaults)
+    material = material_seconds(regions, n_media, defaults, fixed=fixed)
     if abs(material - audio_seconds) <= standard_slot(regions, defaults):
         return (audio_seconds, "")
 
@@ -274,6 +330,10 @@ def _region_dict(r: Region) -> dict:
 #: Schleife. Zwei Durchgaenge genuegen in der Praxis; die Grenze verhindert
 #: nur, dass zwei Titel sich gegenseitig hin- und herschieben.
 _MAX_LAGE_PASSES = 4
+#: Nachmessungen der Filmlaenge (``plan_from_manifest``): Verlaengern bei
+#: uebrigem Material, Kuerzen bei gestrecktem Schwanz. Zwei reichen meist; ein
+#: Pendeln zwischen beiden endet hier statt in einer Schleife.
+_MAX_LAENGE_PASSES = 4
 
 _MONATE = ["Januar", "Februar", "Maerz", "April", "Mai", "Juni", "Juli",
            "August", "September", "Oktober", "November", "Dezember"]
@@ -742,7 +802,7 @@ def _phrasenlage(plan: Plan, i: int, defaults: Defaults,
     # melden, und der stehengebliebene Satz aus dem ersten Durchgang muss weg.
     vorher = lage.vorher(vor.intent)
     ausgang = float(vorher if vorher is not None
-                    else (region.beats_per_still or defaults.beats_per_still))
+                    else standard_beats(region, defaults))
     if abs(ausgang - neu) < 1e-6:
         lage.meldungen.pop(("phrase", seg.title), None)
         return True
@@ -1179,7 +1239,7 @@ def _segment_from_slot(plan: Plan, i: int, slot, defaults: Defaults):
         # Explizit ausschreiben: so ist beim Lesen sofort klar, warum ein Bild
         # so lang steht, und die Zahl laesst sich direkt anfassen.
         felder["beats"] = intent.beats if intent.beats is not None else \
-            (region.beats_per_still or defaults.beats_per_still)
+            standard_beats(region, defaults)
     if intent.snap_back is not None:
         felder["snap_back"] = intent.snap_back
 

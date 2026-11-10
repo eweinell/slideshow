@@ -297,6 +297,64 @@ def test_die_karte_haelt_was_slot_capacity_verspricht():
 
 
 # --------------------------------------------------------------------------
+# Boden unter beats_per_still: Beats x Beat >= still_tolerance[0]
+# --------------------------------------------------------------------------
+
+def test_bei_200_bpm_hebt_der_boden_acht_beats_auf_zehn():
+    from slideshow.planner import standard_beats
+    r = Region(type="beat", start=0.0, end=60.0, bpm=200.0, offset=0.0)
+    # 8 Beats = 2,4 s < 3,0 s; 10 Beats = 3,0 s, in Beatpaaren gerundet.
+    assert standard_beats(r, Defaults()) == 10
+
+
+def test_ein_boden_von_vier_sekunden_laesst_123_bpm_nicht_auf_zwoelf_springen():
+    """Der Schritt von 4 Beats machte aus 3,9 s gleich 5,9 s."""
+    from slideshow.planner import standard_beats
+    r = Region(type="beat", start=0.0, end=60.0, bpm=123.0, offset=0.0)
+    d = Defaults(still_tolerance=(4.0, 6.0))
+    n = standard_beats(r, d)
+    assert n == 10
+    assert n * r.beat_duration() < 5.0
+
+
+def test_bei_normalem_tempo_bleibt_beats_per_still_unveraendert():
+    from slideshow.planner import standard_beats
+    r = Region(type="beat", start=0.0, end=60.0, bpm=120.0, offset=0.0)
+    assert standard_beats(r, Defaults()) == 8          # 4,0 s
+
+
+def test_ein_ungerader_vorgabewert_wird_in_ganzen_beats_gehoben():
+    from slideshow.planner import standard_beats
+    r = Region(type="beat", start=0.0, end=60.0, bpm=200.0, offset=0.0)
+    assert standard_beats(r, Defaults(beats_per_still=5)) == 10   # 3,0 s
+
+
+def test_beats_per_still_an_der_region_gilt_ohne_boden():
+    from slideshow.planner import standard_beats
+    r = Region(type="beat", start=0.0, end=60.0, bpm=200.0, offset=0.0,
+               beats_per_still=4)
+    assert standard_beats(r, Defaults()) == 4
+
+
+def test_der_boden_folgt_einer_gesenkten_still_tolerance():
+    from slideshow.planner import standard_beats
+    r = Region(type="beat", start=0.0, end=60.0, bpm=200.0, offset=0.0)
+    assert standard_beats(r, Defaults(still_tolerance=(2.0, 6.0))) == 8
+
+
+def test_kein_standbild_in_einer_schnellen_region_steht_unter_der_untergrenze():
+    fps = 50.0
+    regions = [Region(type="beat", start=0.0, end=120.0, bpm=195.0, offset=0.0)]
+    defaults = Defaults()
+    plan = plan_slots(regions, _stills(60), defaults, fps=fps,
+                      total_frames=int(120 * fps))
+    # Ohne den letzten Slot: am Filmende ist die Grenze kein Schnitt, dort
+    # gilt die Mindeststandzeit-Regel bewusst nicht (siehe ``_rest_zuschlagen``).
+    laengen = [s.frames / fps for s in plan.slots[:-1]]
+    assert min(laengen) >= defaults.still_tolerance[0] - 1e-6
+
+
+# --------------------------------------------------------------------------
 # Mindeststandzeit — der Rest am Regionsende
 #
 # Eine beat-Region ist so gut wie nie ein ganzzahliges Vielfaches der
@@ -592,6 +650,74 @@ def test_material_laenge_folgt_dem_standardtakt():
     assert material_seconds(regions, 12, Defaults()) == pytest.approx(48.0)
 
 
+def test_ein_clip_belegt_seine_laenge_und_nicht_einen_standard_slot():
+    from slideshow.planner import material_seconds
+    regions = [Region(type="free", start=0.0, end=60.0, reason="x")]   # 15 Slots à 4 s
+
+    assert material_seconds(regions, 3, Defaults(),
+                            fixed=[None, 20.0, None]) == pytest.approx(28.0)
+    # Ohne Angabe bleibt es bei der Zaehlung: 3 Slots.
+    assert material_seconds(regions, 3, Defaults(),
+                            fixed=[None, None, None]) == pytest.approx(12.0)
+
+
+def test_ein_clip_ueber_die_regionsgrenze_hinaus_verschiebt_den_rest():
+    from slideshow.planner import material_seconds
+    regions = [Region(type="free", start=0.0, end=20.0, reason="x"),
+               Region(type="free", start=20.0, end=60.0, reason="y")]
+    # Ein 22-s-Clip reicht in die zweite Region (Slots dort 40 s / 10 = 4 s); das
+    # Bild danach steht in dieser, nicht in der ersten. Eine Schaetzung: der
+    # Planer rastet auf die naechste Kante (24 s), die Rechnung addiert einen Slot.
+    gesamt = material_seconds(regions, 2, Defaults(), fixed=[22.0, None])
+    assert 24.0 <= gesamt <= 26.0 + 1e-6
+    # Ein Clip, der die erste Region nur anschneidet, laesst dem Bild den Rest
+    # dieser Region (2 s < Mindeststandzeit: es endet an der Grenze).
+    assert material_seconds(regions, 2, Defaults(),
+                            fixed=[18.0, None]) == pytest.approx(20.0)
+
+
+def _manifest_mit_clips(n_bilder: int, n_clips: int, clip_s: float):
+    from slideshow.models import ClipInfo, ImageInfo, Manifest, MediaItem
+    media = []
+    for i in range(n_bilder):
+        media.append(MediaItem(id=f"img_{i:03d}", path=f"src/img_{i:03d}.jpg",
+                               kind="image", cache_path=f"cache/img_{i:03d}.jpg",
+                               time_source="exif", capture_time=1_753_000_000 + i * 600,
+                               image=ImageInfo(width=6000, height=4000)))
+    for k in range(n_clips):
+        media.append(MediaItem(
+            id=f"clip_{k:03d}", path=f"src/clip_{k:03d}.mp4", kind="clip",
+            cache_path=f"cache/clip_{k:03d}.mov", time_source="container",
+            capture_time=1_753_000_000 + (3 + k * 7) * 600 + 1,
+            clip=ClipInfo(duration=clip_s, effective_duration=clip_s,
+                          cache_offset=0.0, cache_duration=clip_s)))
+    m = Manifest(media=media, fps_suggestion=50.0)
+    m.audio.file = "cache/mix.flac"
+    m.audio.duration = 600.0
+    return m
+
+
+def test_lange_clips_verdraengen_am_ende_keine_bilder():
+    """An ``kenia-2026``: 26 Clips à ~11 s, 173 s Mehrbedarf gegen die Zaehlung als
+    Standard-Slot — 36 Bilder fielen hinten aus dem Film, obwohl die Tonspur
+    sie getragen haette. Die Laufzeit muss um die Clipdauern wachsen."""
+    from slideshow.build import build_edit_list
+    from slideshow.models import BeatMap
+    manifest = _manifest_mit_clips(30, 4, 20.0)
+    regions = [Region(type="beat", start=0.0, end=600.0, bpm=120.0, offset=0.0, conf=0.9)]
+    beatmap = BeatMap(audio={"file": "cache/mix.flac", "duration": 600.0}, regions=regions)
+
+    edit, plan, cov = build_edit_list(None, manifest, beatmap, defaults=Defaults(),
+                                      fps=50.0, size=(1280, 720))
+
+    assert plan.unused == [], "kein Medium darf hinten herausfallen"
+    assert plan.stretched == 0, "und das letzte Bild darf nicht gestreckt sein"
+    assert cov.stills == 30 and cov.clips == 4
+    # 30 Bilder à ~4 s + 4 Clips à 20 s: deutlich ueber der Zaehlung 34 x 4 s.
+    assert edit.audio["duration"] > 34 * 4.0 + 40.0
+    assert edit.audio["duration"] < 600.0
+
+
 def test_ohne_tonspur_bestimmt_das_material_die_laufzeit():
     regions = [Region(type="free", start=0.0, end=12.0, reason="ohne Tonspur")]
     dauer, hinweis = _tl(regions, 3, audio=0.0)
@@ -711,6 +837,24 @@ def test_der_vorgeschlagene_wert_schliesst_die_luecke_wirklich():
                                total_frames=total), danach)
     assert not cov2.underrun, "nach dem Befolgen darf keine Luecke mehr offen sein"
     assert not cov2.overrun
+
+
+def test_der_ratschlag_warnt_vor_dem_boden_in_schnellen_regionen():
+    """Ein kleineres ``beats_per_still`` hebt der Boden in schnellen Regionen
+    wieder an — der Vorschlag darf das nicht verschweigen."""
+    from slideshow.planner import coverage_advice
+    defaults = Defaults()
+    regions = [Region(type="beat", start=0.0, end=60.0, bpm=120.0, offset=0.0),
+               Region(type="beat", start=60.0, end=120.0, bpm=200.0, offset=60.0)]
+    plan = plan_slots(regions, _stills(60), defaults, fps=FPS,
+                      total_frames=int(120 * FPS))
+    cov = coverage(plan, defaults)
+    assert [r["am_boden"] for r in cov.per_region] == [False, True]
+
+    tips = " ".join(coverage_advice(cov, defaults))
+    assert cov.overrun
+    assert "wirkt in 1 von 2 Beat-Regionen nicht" in tips
+    assert "still_tolerance" in tips
 
 
 def test_free_region_bekommt_den_regler_der_dort_wirkt():

@@ -37,6 +37,13 @@ ist eine Differenz zweier solcher Nummern.
 
    Die free-Regionen brauchen die Regel nicht: sie sind ueber ``linspace``
    exakt gekachelt und haben gar keinen Rest.
+
+.. note::
+   **Der Boden unter ``beats_per_still``.** Acht Beats sind bei 200 bpm nur
+   2,4 s — unter ``still_tolerance[0]``, die free-Regionen ohnehin einhalten.
+   :func:`standard_beats` hebt den *globalen* Wert deshalb pro Region an, bis
+   ``Beats x Beat >= still_tolerance[0]`` gilt. Ein ``beats_per_still`` an der
+   Region selbst bleibt unangetastet.
 """
 
 from __future__ import annotations
@@ -97,6 +104,40 @@ def beat_index_at_or_after(t: float, offset: float, beat: float, fps: float) -> 
 # Regionsraster
 # --------------------------------------------------------------------------
 
+def standard_beats(region: Region, defaults: Defaults) -> int:
+    """Wie viele Beats ein Standard-Slot in dieser beat-Region steht.
+
+    Ein ausdruecklich gesetztes ``Region.beats_per_still`` gilt unveraendert.
+    Der **globale** Wert ``defaults.beats_per_still`` ist dagegen eine Vorgabe in
+    *Beats* und meint eigentlich eine Zeit: bei 195 bpm sind 8 Beats nur 2,46 s,
+    also unter ``still_tolerance[0]`` und damit unter dem, was free-Regionen
+    ohnehin einhalten. Der Wert wird deshalb nach oben gerundet, bis der Slot die
+    Untergrenze erreicht.
+
+    Gerundet wird in **Beatpaaren** (halben Takten), solange die Vorgabe selbst
+    gerade ist (8 -> 10), sonst in ganzen Beats. Ein groeberer Schritt von 4
+    ueberschoss an echtem Material: bei 123 bpm sind 8 Beats 3,9 s, und ein
+    Boden von 4,0 s machte daraus 12 Beats = 5,9 s — fast die Haelfte aller
+    Bilder stand dann ueber 5,5 s. Mit Paaren bleibt der Zuschlag unter einer
+    Sekunde, und ein Schnitt nach einem halben Takt liegt weiter auf der Zaehlzeit.
+
+    Die Regel steht hier und nirgends sonst: der Planer, die Kapazitaetsrechnung
+    und ``build`` (das den Wert als ``beats:`` in ``edit.yaml`` ausschreibt —
+    ein dort stehender Wert gilt ausdruecklich und liefe am Boden vorbei) rufen
+    alle diese Funktion.
+    """
+    if region.beats_per_still:
+        return int(region.beats_per_still)
+    bps = max(1, int(defaults.beats_per_still))
+    beat = region.beat_duration() if region.type == "beat" and region.bpm else 0.0
+    lo = float(defaults.still_tolerance[0])
+    if beat <= 0 or bps * beat >= lo - 1e-9:
+        return bps
+    schritt = 2 if bps % 2 == 0 else 1
+    noetig = math.ceil(lo / beat - 1e-9)
+    return bps + math.ceil((noetig - bps) / schritt) * schritt
+
+
 class RegionGrid:
     """Die zulaessigen Schnittpunkte einer Region.
 
@@ -115,7 +156,7 @@ class RegionGrid:
         if self.is_beat:
             self.beat = region.beat_duration()
             self.offset = float(region.offset if region.offset is not None else region.start)
-            self.bps = int(region.beats_per_still or defaults.beats_per_still)
+            self.bps = standard_beats(region, defaults)
             self.edges: np.ndarray | None = None
         else:
             self.beat = 0.0
@@ -718,6 +759,12 @@ def coverage(plan: Plan, defaults: Defaults) -> Coverage:
             "index": i, "type": r.type, "start": r.start, "end": r.end,
             "seconds": r.duration, "bpm": r.bpm, "stills": stills, "clips": clips,
             "titles": titles, "capacity": capacity,
+            # Steht die Region am Boden von ``beats_per_still``? Dann wirkt ein
+            # kleinerer globaler Wert dort nicht — ``coverage_advice`` muss das
+            # wissen, sonst empfiehlt es einen Regler, der in genau diesen
+            # Regionen nichts bewegt.
+            "am_boden": bool(r.type == "beat" and r.bpm and not r.beats_per_still
+                             and standard_beats(r, defaults) > defaults.beats_per_still),
         })
     return Coverage(
         music_seconds=to_time(plan.total_frames, plan.fps),
@@ -731,7 +778,8 @@ def coverage(plan: Plan, defaults: Defaults) -> Coverage:
         per_region=per_region)
 
 
-def material_seconds(regions: list[Region], n_media: int, defaults: Defaults) -> float:
+def material_seconds(regions: list[Region], n_media: int, defaults: Defaults, *,
+                     fixed: list[float | None] | None = None) -> float:
     """Wie lang das Material bei Standardtaktung von sich aus laeuft.
 
     Gegenstueck zur Tonspurlaenge: erst der Vergleich beider Zahlen sagt, ob
@@ -739,7 +787,17 @@ def material_seconds(regions: list[Region], n_media: int, defaults: Defaults) ->
     denselben Slotlaengen, die der Planer spaeter vergibt — in einer
     beat-Region ``beats_per_still`` Beats, in einer free-Region der
     Standardtakt.
+
+    ``fixed`` nennt je Medium (in Reihenfolge) die Dauer, die es **von sich aus**
+    belegt: ein Clip seine Laenge (``out - in``), ein Bild mit ``dur:`` seine
+    Sekunden; ``None`` heisst Standard-Slot. Ohne diese Angabe zaehlte jedes
+    Medium als ein Standard-Slot, und ein 20-s-Clip kostete 4,5 s: die
+    Laufzeit kam um den Mehrbedarf aller Clips zu kurz heraus, und hinten fielen
+    Bilder aus dem Film (an ``kenia-2026``: 26 Clips, 173 s Mehrbedarf, 36
+    Medien ungenutzt), obwohl die Tonspur sie getragen haette.
     """
+    if fixed is not None and any(f is not None for f in fixed):
+        return _material_sequenziell(regions, fixed, defaults)
     rest = n_media
     total = 0.0
     for r in regions:
@@ -758,11 +816,53 @@ def material_seconds(regions: list[Region], n_media: int, defaults: Defaults) ->
     return total
 
 
+def _material_sequenziell(regions: list[Region], fixed: list[float | None],
+                          defaults: Defaults) -> float:
+    """Die Materiallaenge, wenn einzelne Medien eigene Dauern mitbringen.
+
+    Ein Zeitcursor laeuft ueber die Karte: ein Standbild belegt den
+    Standard-Slot der Region, in der der Cursor steht (``Dauer / Kapazitaet``,
+    dieselbe Zahl wie in der Rechnung ohne ``fixed``), ein Medium mit fester
+    Dauer genau diese. Ein Slot, der ueber die Regionsgrenze liefe oder einen
+    Rest unter der Mindeststandzeit liesse, endet an der Grenze — so greift
+    derselbe Zuschlag wie im Planer (:func:`_rest_zuschlagen`).
+
+    Das ist eine **Schaetzung**: der Planer zieht Clip-Enden ans Raster und
+    kennt Sonderfaelle, die hier fehlen. Sie liegt aber um die Dauern der Clips
+    naeher an der Wirklichkeit als die Zaehlung ohne.
+    """
+    if not regions:
+        return sum(f if f is not None else defaults.still_seconds for f in fixed)
+    caps = [max(0, _region_capacity(r, defaults)) for r in regions]
+    min_still = defaults.min_still
+    t = regions[0].start
+    ri = 0
+    for f in fixed:
+        while ri < len(regions) and t >= regions[ri].end - 1e-6:
+            ri += 1
+        if ri >= len(regions):
+            # Material ueber die Karte hinaus: Standardtakt, wie ohne ``fixed``.
+            t += f if f is not None else defaults.still_seconds
+            continue
+        r = regions[ri]
+        if f is not None:
+            t += f
+            continue
+        cap = caps[ri]
+        if cap <= 0:
+            t = r.end
+            continue
+        t += r.duration / cap
+        if t > r.end - max(min_still, 1e-6) or abs(t - r.end) < 1e-6:
+            t = r.end
+    return t - regions[0].start
+
+
 def standard_slot(regions: list[Region], defaults: Defaults) -> float:
     """Laenge *eines* Standardbildes — das Mass fuer die Toleranz."""
     for r in regions:
         if r.type == "beat" and r.bpm:
-            return (r.beats_per_still or defaults.beats_per_still) * r.beat_duration()
+            return standard_beats(r, defaults) * r.beat_duration()
         return float(r.still_seconds or defaults.still_seconds)
     return float(defaults.still_seconds)
 
@@ -810,7 +910,7 @@ def fit_regions_to(regions: list[Region], duration: float, *,
 def _region_capacity(r: Region, defaults: Defaults) -> int:
     """Wie viele Standardbilder die Region fassen wuerde."""
     if r.type == "beat" and r.bpm:
-        per_still = (r.beats_per_still or defaults.beats_per_still) * r.beat_duration()
+        per_still = standard_beats(r, defaults) * r.beat_duration()
         # Dieselbe Regel wie im Planer, nicht ein gerundetes ``duration /
         # per_still``: der Rest am Regionsende bekommt nur dann ein eigenes
         # Bild, wenn er die Mindeststandzeit erreicht (``_rest_zuschlagen``).
@@ -891,13 +991,23 @@ def _stellschraube(cov: Coverage, defaults: Defaults):
     ``faktor`` ist der Streckungsfaktor der Standzeit: > 1 laenger, < 1 kuerzer.
     """
     hat_beat = any(r["type"] == "beat" for r in cov.per_region)
+    am_boden = [r for r in cov.per_region if r.get("am_boden")]
+    beat_regionen = [r for r in cov.per_region if r["type"] == "beat"]
 
     def formuliere(faktor: float) -> str:
         richtung = "erhoehen" if faktor > 1 else "reduzieren"
         if hat_beat:
             bps = defaults.beats_per_still
-            return (f"beats_per_still von {bps} auf ~{max(1, round(bps * faktor))} "
+            text = (f"beats_per_still von {bps} auf ~{max(1, round(bps * faktor))} "
                     f"{richtung} (`build --beats-per-still`)")
+            if faktor < 1 and am_boden:
+                # Ein kleinerer Wert wird dort vom Boden wieder angehoben.
+                text += (f" — wirkt in {len(am_boden)} von {len(beat_regionen)} "
+                         f"Beat-Regionen nicht: dort haelt der Boden "
+                         f"`still_tolerance[0]` = {defaults.still_tolerance[0]:g} s "
+                         f"die Standzeit; fuer die bliebe nur ein kleineres "
+                         f"`still_tolerance` oder ein `beats_per_still` an der Region")
+            return text
         s = defaults.still_seconds
         return (f"Standzeit still_seconds von {s:.1f} s auf ~{max(0.5, s * faktor):.1f} s "
                 f"{richtung} (`build --still-seconds`)")
