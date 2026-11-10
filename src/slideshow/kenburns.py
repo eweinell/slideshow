@@ -355,7 +355,10 @@ def clip_input_args(src: str, *, start: float, frames: int, fps: float) -> list[
     """Eingabe-Argumente fuer einen Ausschnitt aus einem Clip-Intermediate.
 
     ``-ss`` steht auch hier vor ``-i``; das Intermediate ist All-Intra, das
-    Seeking also framegenau und billig.
+    Seeking also framegenau und billig. ``-t`` dagegen bewusst dahinter — es
+    soll die *Ausgabe* auf die gewuenschte Framezahl begrenzen und kein
+    Quellfenster lesen; im Gegensatz zu preprocess wird hier keine Zeitbasis
+    mehr gestreckt (dorthin gehoert der Streckfaktor, Abschnitt 7).
     """
     duration = frames / fps
     args: list[str] = []

@@ -456,12 +456,17 @@ def clip_intermediate_cmd(project: Project, item: MediaItem, dst: Path, *,
     elif caps.gpu_name and "cuda" in caps.hwaccels:
         args += ["-hwaccel", "cuda"]
 
+    # -ss und -t gehoeren beide vor -i: als Eingabeoptionen begrenzen sie das
+    # gelesene Quellfenster, und -t zaehlt ab dem Seek-Ziel (gemessen). Steht
+    # -t dagegen dahinter, ist es eine Ausgabeoption und kappt das per setpts
+    # gestreckte Ergebnis wieder auf die ungestreckte Quelldauer — Zeitlupen-
+    # Clips (setpts > 1) kamen zu kurz an, waehrend Manifest und Planer weiter
+    # mit der vollen Dauer rechneten.
     if src_start > 0:
-        # -ss vor -i fuer schnelles Keyframe-Seeking, danach exakt trimmen.
         args += ["-ss", f"{src_start:.6f}"]
-    args += ["-i", str(project.abs(item.path))]
     if src_dur > 0:
         args += ["-t", f"{src_dur:.6f}"]
+    args += ["-i", str(project.abs(item.path))]
 
     vf = build_clip_filter(item, size=size, fps=fps, caps=caps, portrait_mode=portrait_mode)
     enc, _container = intermediate_args(codec)
@@ -505,12 +510,14 @@ def clip_audio_cmd(project: Project, item: MediaItem, dst: Path, *, fps: float,
     chain = [*atempo_chain(cs.speed), f"aresample={CLIP_AUDIO_RATE}",
              "aformat=channel_layouts=stereo"]
 
+    # Dasselbe wie im Bildpfad: -ss/-t vor -i, sonst kappt die Ausgabeoption
+    # -t den per atempo gestreckten Ton auf die Quelldauer zurueck.
     args = ["ffmpeg", "-hide_banner", "-v", "error", "-y"]
     if cs.src_start > 0:
         args += ["-ss", f"{cs.src_start:.6f}"]
-    args += ["-i", str(project.abs(item.path))]
     if cs.src_duration > 0:
         args += ["-t", f"{cs.src_duration:.6f}"]
+    args += ["-i", str(project.abs(item.path))]
     args += ["-vn", "-map", "0:a:0", "-af", ",".join(chain),
              "-c:a", "flac", str(dst)]
     return args

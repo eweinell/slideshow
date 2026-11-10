@@ -277,6 +277,55 @@ def test_vfr_und_rotation_ergeben_cfr_und_aufrecht(probed):
 
 
 @pytest.mark.slow
+def test_die_zeitlupe_ueberlebt_die_quellbegrenzung(
+        tmp_path_factory, images, clip_with_audio, caps):
+    """Ein ``setpts > 1``-Clip kommt mit seiner *gereckten* Dauer an.
+
+    Stand ``-t`` hinter ``-i``, war es eine Ausgabeoption und kappte das
+    gestreckte Ergebnis wieder auf die ungestreckte Quelldauer zurueck:
+    das Intermediate fiel zu kurz aus, waehrend Manifest und Planer weiter
+    mit der vollen ``cache_duration`` rechneten. Der Segmentencoder lief
+    ihm davon, alles nach dem Clip rueckte vor, und der Originalton setzte
+    gegenueber dem Bild sekundenversetzt zu spaet ein (gemessen an echtem
+    VFR-Material in london-2026). Als Eingabeoption vor ``-i`` begrenzt
+    ``-t`` stattdessen das gelesene Quellfenster — und zaehlt dabei ab dem
+    Seek-Ziel.
+    """
+    from slideshow.paths import Project
+
+    ZIEL_FPS = 50.0                    # 30p -> 50p ergibt setpts 1,2 (Zeitlupe)
+    project = Project.open(tmp_path_factory.mktemp("zeitlupe"), create=True)
+    project.ensure_dirs()
+    result = probe_sources(project, [clip_with_audio] + images[:1],
+                           caps=caps, target_fps=ZIEL_FPS)
+    nur = Manifest(media=[m for m in result.manifest.media if m.kind == "clip"],
+                   fps_suggestion=ZIEL_FPS)
+    stats = preprocess(project, nur, caps=caps, size=SIZE,
+                       intermediate_codec="hevc_intra_cpu", long_edge=TEST_LONG_EDGE)
+    assert not stats.failures, stats.failures
+
+    item = nur.media[0]
+    rt = plan_retime(item.clip.fps, ZIEL_FPS)
+    assert rt.speed < 1.0, "die Fixture muss eine echte Zeitlupe sein — sonst prueft der Test nichts"
+    soll = item.clip.effective_duration
+    assert soll > item.clip.duration, "der Retiming-Fall muss die Dauer strecken"
+
+    # Bild: das Intermediate traegt die volle gereckte Dauer, nicht die der Quelle.
+    assert item.clip.cache_duration == pytest.approx(soll, abs=1e-6)
+    ist_video = float(ffprobe_json(project.abs(item.cache_path))["format"]["duration"])
+    assert ist_video > item.clip.duration, \
+        f"Intermediate ungestreckt geblieben: {ist_video:.3f} statt >= {item.clip.duration:.3f} s"
+    assert ist_video == pytest.approx(soll, abs=1.5 / ZIEL_FPS)
+
+    # Ton: dieselbe Streckung per atempo, dieselbe Kante.
+    assert item.audio_cache_path, "kein Originalton extrahiert"
+    ist_ton = float(ffprobe_json(project.abs(item.audio_cache_path))["format"]["duration"])
+    assert ist_ton > item.clip.duration, \
+        f"Tonspur ungestreckt geblieben: {ist_ton:.3f} statt >= {item.clip.duration:.3f} s"
+    assert ist_ton == pytest.approx(soll, abs=0.05)
+
+
+@pytest.mark.slow
 def test_hdr_clip_bekommt_bt709_tags(probed):
     """Kriterium 4, strukturell: nach dem Tonemapping ist das Material SDR.
 
