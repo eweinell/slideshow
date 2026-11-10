@@ -23,6 +23,19 @@ NVENC-Fähigkeiten, Tonemapping-Pfade. Einmal laufen lassen schlägt jede Annahm
   uv run --extra dev pytest -q
   ```
   Das CLI dagegen aus dem venv: `.\.venv\Scripts\slideshow.exe`
+- **`librosa` und `anthropic` sind Extras und überleben kein neu angelegtes
+  venv.** Nachinstallieren:
+  ```powershell
+  uv sync --inexact --extra dev --extra librosa --extra vision
+  ```
+  Ohne `--inexact` wirft `uv sync` alles hinaus, was nicht zu den genannten
+  Extras gehört. `uv run --extra dev …` lässt Vorhandenes dagegen stehen.
+  **librosa entscheidet mit über die Regionenkarte**: ohne es rechnet
+  `beats` die Onset-Kurve mit numpy. Beide Pfade liegen zeitlich richtig, die
+  Karten unterscheiden sich trotzdem. Welcher lief, steht in `beats.yaml`
+  unter `audio.onset` und in der `doctor`-Zeile „Beat-Analyse". Ein Test
+  erzwingt den numpy-Pfad (`test_ohne_librosa_treffen_die_offsets_den_ersten_schlag`);
+  den librosa-Pfad prüft die Suite nur, wenn es installiert ist.
 - **ffmpeg, exiftool, ImageMagick und `melt`** sind installiert. Entwickelt
   wurde gegen ffmpeg 8.1.2; **9.0.1 ist geprüft und freigegeben**
   ([`docs/pruefbericht-ffmpeg9.md`](docs/pruefbericht-ffmpeg9.md)). Die
@@ -146,6 +159,7 @@ Verletzt man eine davon, fällt es erst spät und woanders auf:
 
 | Thema | Stand |
 |---|---|
+| **Prüfbericht November 2026** | [`docs/pruefbericht-2026-11.md`](docs/pruefbericht-2026-11.md) ist die **Arbeitsgrundlage für die nächsten Umbauten**: Befunde mit Messwerten (Cache, Workflow, Beat-Ausrichtung, Codequalität) und sechs Arbeitspakete mit Abnahmekriterien in Abschnitt 7. **AP1 (Onset-Erkennung) ist umgesetzt**, AP2 (Clip-Intermediates beim Rendern, `slideshow clean`) ist das nächste. Wer ein Paket abschließt, trägt Stand und Messwerte dort in Abschnitt 7 und 8 nach. Nachmessen: `scripts/cache_bilanz.py`, `scripts/beat_drift.py`. |
 | **Beat-Erkennung bei langen Stücken** | **Umgesetzt** ([`docs/briefing-beat-detection.md`](docs/briefing-beat-detection.md)). Lange Abschnitte werden in `MAX_FIT_WINDOW`-Fenster (20 s) zerlegt, einzeln gefittet und über `merge_adjacent_beats` wieder verschmolzen. Offen bleibt nur die Abdeckung: 88,2 % statt der angepeilten 90 %, weil der Ausklang des Testtracks (die letzten ~40 s) rhythmisch wirklich zu dünn ist. |
 | **`fit_grid` misst lokal, nicht global** | Die Konfidenz ist nur für Fenster bis ~30 s kalibriert. `MAX_FIT_WINDOW` und `CONF_THRESHOLD` hängen zusammen — wer an einem dreht, muss den anderen nachmessen. Unter 16 s zerfallen zusätzlich die Fixture-Songs, und die konstruktive Garantie hinter Abnahmekriterium A5 fällt. |
 | **Titel- und Zwischenfolien** | **Vollständig** ([`docs/briefing-titelfolien.md`](docs/briefing-titelfolien.md), Stufen 1–3). `slideshow chapters` → `chapters.yaml` → `build` → `render`. Generator (`titles.py`), Phrasenlage, Stille-Regel, Fokusblende, Rundlauf, Deckungsrechnung, MLT. Offen ist nur die Sichtprüfung in Bewegung — sie braucht ffmpeg und eine echte Tonspur. |

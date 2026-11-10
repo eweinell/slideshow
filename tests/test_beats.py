@@ -14,10 +14,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import sys
+
 from slideshow.beats import (ANALYSIS_SR, CONF_THRESHOLD, HOP, MAX_FIT_WINDOW,
-                             _split_long, _stability, detect_regions, fit_grid,
-                             merge_adjacent_beats, merge_short_regions,
-                             validate_tiling)
+                             _spectral_flux, _split_long, _stability, detect_regions,
+                             fit_grid, merge_adjacent_beats, merge_short_regions,
+                             onset_mit_pfad, validate_tiling)
 from slideshow.errors import SlideshowError
 from slideshow.models import Region
 
@@ -68,6 +70,54 @@ def test_offsets_treffen_den_ersten_schlag(regions_two_songs, click_two_songs):
         delta = abs(region.offset - track["start"])
         assert delta < 1 / 60, (f"Offset {region.offset:.4f} vs {track['start']:.4f} "
                                 f"= {delta * 1000:.1f} ms, mehr als ein Frame bei 60p")
+
+
+def test_spectral_flux_legt_den_anschlag_auf_seine_zeit():
+    """Frame ``n`` steht fuer die Zeit ``n * hop / sr`` — so rechnet jeder
+    Aufrufer um. Ein unzentriertes Fenster legt den Anschlag eine halbe
+    Fensterlaenge (46 ms) davor, und ``refine_offset`` holt das mit +-30 ms
+    nicht mehr zurueck."""
+    y = np.zeros(ANALYSIS_SR * 4)
+    rng = np.random.default_rng(1)
+    zeiten = (1.0, 2.0, 3.0)
+    for t in zeiten:
+        i = int(t * ANALYSIS_SR)
+        y[i:i + 400] += rng.standard_normal(400) * np.exp(-np.arange(400) / 80)
+
+    flux = _spectral_flux(y)
+    fps = ANALYSIS_SR / HOP
+    for t in zeiten:
+        lo, hi = int((t - 0.2) * fps), int((t + 0.2) * fps)
+        gefunden = (lo + int(np.argmax(flux[lo:hi]))) / fps
+        assert abs(gefunden - t) <= HOP / ANALYSIS_SR, (
+            f"Anschlag bei {t:.3f} s liegt in der Onset-Kurve bei {gefunden:.3f} s "
+            f"({(gefunden - t) * 1000:+.0f} ms) — mehr als ein Frame der Kurve")
+
+
+def test_ohne_librosa_treffen_die_offsets_den_ersten_schlag(click_two_songs, monkeypatch):
+    """Dieselbe Zusage wie oben, aber auf dem numpy-Pfad **erzwungen**.
+
+    Welcher Pfad laeuft, entscheidet sonst die Umgebung: mit librosa im venv
+    prueft die Suite den numpy-Pfad gar nicht, und ein Fehler dort faellt erst
+    auf, wenn das venv einmal neu angelegt wird."""
+    monkeypatch.setitem(sys.modules, "librosa", None)      # Import schlaegt fehl
+    karte = detect_regions(Path(click_two_songs.path))
+
+    assert karte.audio["onset"] == "numpy"
+    beat = sorted((r for r in karte.regions if r.type == "beat"), key=lambda r: r.start)
+    assert len(beat) == len(click_two_songs.tracks)
+    for region, track in zip(beat, click_two_songs.tracks):
+        delta = abs(region.offset - track["start"])
+        assert delta < 1 / 60, (f"Offset {region.offset:.4f} vs {track['start']:.4f} "
+                                f"= {delta * 1000:.1f} ms auf dem numpy-Pfad")
+
+
+def test_die_karte_nennt_den_onset_pfad(regions_two_songs):
+    """Ohne den Vermerk ist einer ``beats.yaml`` nicht anzusehen, ob sie auf
+    diesem Rechner noch einmal genauso entstuende."""
+    assert regions_two_songs.audio["onset"] in ("librosa", "numpy")
+    _env, pfad = onset_mit_pfad(np.zeros(ANALYSIS_SR))
+    assert pfad == regions_two_songs.audio["onset"]
 
 
 def test_vorlauf_unter_einer_sekunde_wird_absorbiert(regions_two_songs):

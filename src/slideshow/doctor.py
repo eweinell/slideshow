@@ -563,11 +563,17 @@ def build_report(project: Project | None = None, *, deep: bool = True,
         # Kein FAIL: die Onset-Erkennung hat einen numpy-Fallback (Spectral
         # Flux), der auf perkussivem Material praktisch gleichwertig ist.
         # librosa zieht numba/llvmlite nach und ist schwergewichtig.
+        #
+        # Der Hinweis nennt den Weg ueber das Extra und nicht das nackte Paket:
+        # das Extra pinnt numba mit, ohne das der Resolver auf uralte Staende
+        # zurueckfaellt (siehe pyproject.toml).
         rep.add("Beat-Analyse", WARN,
                 "kein librosa — numpy-Fallback (Spectral Flux) wird verwendet; "
                 "auf perkussivem Material gleichwertig, auf weichem Material "
-                "schwaecher",
-                "pip install librosa   # optional")
+                "schwaecher. Eine Karte faellt je nach Pfad anders aus; "
+                "beats.yaml nennt ihn unter `audio.onset`",
+                "uv sync --inexact --extra librosa   "
+                "# oder: pip install -e \".[librosa]\"   (optional)")
 
     if not caps.ffmpeg:
         # Ohne ffmpeg ist alles Weitere sinnlos — aber kein Traceback (Kriterium 1).

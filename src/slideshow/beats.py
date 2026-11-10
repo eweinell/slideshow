@@ -145,21 +145,55 @@ def rms_db(y: np.ndarray, hop: int = HOP) -> np.ndarray:
 
 
 def onset_envelope(y: np.ndarray, sr: int = ANALYSIS_SR, hop: int = HOP) -> np.ndarray:
-    """Onset-Staerke. Nutzt librosa, wenn vorhanden, sonst Spectral Flux.
+    """Onset-Staerke. Nutzt librosa, wenn vorhanden, sonst Spectral Flux."""
+    return onset_mit_pfad(y, sr=sr, hop=hop)[0]
+
+
+def onset_mit_pfad(y: np.ndarray, sr: int = ANALYSIS_SR,
+                   hop: int = HOP) -> tuple[np.ndarray, str]:
+    """Onset-Staerke und der Pfad, der sie berechnet hat (``librosa``/``numpy``).
 
     Der numpy-Pfad ist kein Notnagel: er macht die ganze Analyse unabhaengig
     von einer schwergewichtigen Abhaengigkeit (librosa zieht numba/llvmlite
     nach) und ist auf perkussivem Material praktisch gleichwertig.
+
+    Der Pfad wird zurueckgegeben, weil er das Ergebnis mitbestimmt und sonst
+    nur von der Umgebung abhaengt: zwei Rechner liefern aus derselben Tonspur
+    zwei Karten, und der Karte ist nicht anzusehen, welche sie ist.
+    ``detect_regions`` schreibt ihn deshalb in die Karte.
     """
     try:
         import librosa
+    except ImportError:
+        return (_spectral_flux(y, hop=hop), "numpy")
+    except Exception as exc:                        # noqa: BLE001
+        # Installiert, aber nicht ladbar (typisch: numba passt nicht zur
+        # Python-Version). Das ist kein Normalfall und gehoert gemeldet.
+        log.warning("librosa ist installiert, laesst sich aber nicht laden (%s) — "
+                    "die Onset-Erkennung laeuft ueber den numpy-Pfad", exc)
+        return (_spectral_flux(y, hop=hop), "numpy")
+    try:
         env = librosa.onset.onset_strength(y=y.astype(np.float32), sr=sr, hop_length=hop)
-        return np.asarray(env, dtype=np.float64)
-    except Exception:                               # noqa: BLE001
-        return _spectral_flux(y, hop=hop)
+    except Exception as exc:                        # noqa: BLE001
+        log.warning("librosa-Onset-Erkennung gescheitert (%s) — weiter ueber den "
+                    "numpy-Pfad", exc)
+        return (_spectral_flux(y, hop=hop), "numpy")
+    return (np.asarray(env, dtype=np.float64), "librosa")
 
 
 def _spectral_flux(y: np.ndarray, *, hop: int = HOP, win: int = 2048) -> np.ndarray:
+    """Spectral Flux, Frame ``n`` **zentriert** auf ``n * hop``.
+
+    Die Zentrierung ist nicht kosmetisch. Jeder Aufrufer rechnet einen
+    Frameindex ueber ``n * hop / sr`` in eine Zeit um. Liegt das Fenster
+    stattdessen *ab* ``n * hop``, erscheint ein Anschlag um die halbe
+    Fensterlaenge zu frueh (46 ms) — mehr, als ``refine_offset`` mit seinen
+    +-30 ms zurueckholt, und der ganze Schnitt sitzt 2,5 Frames vor dem Beat.
+    Mit der Zentrierung bleibt ein Rest von unter 12 ms, den die Verfeinerung
+    auf der Wellenform beseitigt. librosa zentriert ebenso; nur so liefern
+    beide Pfade Zeiten in derselben Lage.
+    """
+    y = np.pad(y, (win // 2, win // 2))
     n = 1 + max(0, (len(y) - win)) // hop
     if n < 2:
         return np.zeros(max(1, n))
@@ -472,7 +506,8 @@ def detect_regions(path: Path, *, track_bounds: list[tuple[float, float]] | None
     loud_spans = _split_at(loud_spans, seeds)
     loud_spans = _split_long(loud_spans, MAX_FIT_WINDOW)
 
-    env = onset_envelope(y, sr=sr, hop=HOP)
+    env, onset_pfad = onset_mit_pfad(y, sr=sr, hop=HOP)
+    log.info("Onset-Erkennung: %s", onset_pfad)
     regions: list[Region] = []
 
     for s, e in loud_spans:
@@ -509,7 +544,8 @@ def detect_regions(path: Path, *, track_bounds: list[tuple[float, float]] | None
     validate_tiling(regions, duration)
 
     return BeatMap(version=BEATS_VERSION,
-                   audio={"file": path.name, "duration": round(duration, 6)},
+                   audio={"file": path.name, "duration": round(duration, 6),
+                          "onset": onset_pfad},
                    regions=regions)
 
 

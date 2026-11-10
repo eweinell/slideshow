@@ -260,8 +260,10 @@ durch, statt mit einem Traceback abzustürzen.
 
 Benötigt: ffmpeg ≥ 6.0, Python ≥ 3.11. Optional: exiftool (EXIF/ICC — ohne das
 können Hochformat-Fotos quer liegen), ImageMagick, `melt` für den MLT-Pfad,
-`librosa` für etwas bessere Onset-Erkennung (es gibt einen gleichwertigen
-numpy-Fallback für perkussisches Material), `anthropic` für `slideshow analyze`
+`librosa` für etwas bessere Onset-Erkennung (`pip install -e '.[librosa]'`; es
+gibt einen gleichwertigen numpy-Fallback für perkussisches Material, und
+`beats.yaml` nennt unter `audio.onset`, welcher Pfad sie erzeugt hat),
+`anthropic` für `slideshow analyze`
 (`pip install -e '.[vision]'`) — ohne das laufen `build` und `render`
 unverändert, nur eben mit der bisherigen Kamerafahrt.
 

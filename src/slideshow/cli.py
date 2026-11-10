@@ -771,6 +771,10 @@ def _print_beatmap(bm, out: Path) -> None:
                   f"{r.conf:.2f}" if r.conf is not None else "-")
     con = console()
     con.print(t)
+    if bm.audio.get("onset"):
+        # Derselbe Ton ergibt je nach Pfad eine andere Karte; die Zeile steht
+        # hier, damit ein Umgebungswechsel auffaellt, bevor gebaut wird.
+        con.print(f"[dim]Onset-Erkennung: {bm.audio['onset']}[/dim]")
     con.print(f"\n[bold]Bitte pruefen[/bold], dann `slideshow build`. Karte: {out}")
 
 
