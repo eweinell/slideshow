@@ -228,9 +228,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "Weg nach einem erneuten `probe`")
     od.add_argument("--apply", default=None, metavar="auswahl.txt",
                     help="Aenderungen aus dem Kontaktbogen einspielen: markierte "
-                         "Medien hereinnehmen, andere auskommentieren. `-` liest "
-                         "die Zeilen von der Eingabe, zum Einfuegen aus der "
-                         "Zwischenablage")
+                         "Medien hereinnehmen, andere auskommentieren — oder, "
+                         "aus der Ansicht 'Reihenfolge', die Medien umsortieren. "
+                         "`-` liest die Zeilen von der Eingabe, zum Einfuegen "
+                         "aus der Zwischenablage")
     od.add_argument("--force", action="store_true",
                     help="vorhandene Datei ueberschreiben und damit die Sortierung "
                          "verwerfen (globales --dry-run zeigt sie nur an)")
@@ -320,6 +321,12 @@ def build_parser() -> argparse.ArgumentParser:
     auswahl.add_argument("--selected", action="store_true",
                          help="nur die gewaehlten Medien — der schnelle Blick auf "
                               "den Film, ohne die Alternativen")
+    sh.add_argument("--sequence", action="store_true",
+                    help="mit der Ansicht 'Reihenfolge' oeffnen: nur die "
+                         "gelisteten Medien in Filmreihenfolge, nach den Bloecken "
+                         "der order.yaml, zum Umsortieren per Ziehen. Umschalten "
+                         "geht im Bogen jederzeit; mit --selected entstehen nur "
+                         "die Thumbnails der Auswahl")
     # Bewusst nicht `--force`. Der heisst bei `select`, `order` und `chapters`
     # "ueberschreib meine Handarbeit"; hier gibt es keine — contact.html ist ein
     # Erzeugnis und wird immer neu geschrieben. Wer den Schalter aus Gewohnheit
@@ -1392,8 +1399,8 @@ def _apply_changes(args, out: Path, manifest) -> tuple[str, list[str]]:
     das, was in der Zwischenablage liegt. Der zweite Weg ist der bequemere bei
     einer Handvoll Tausche, der erste der einzige bei hundertsechzig.
     """
-    from .order import apply_changes
-    from .sheet import parse_changes
+    from .order import apply_changes, apply_reorder, load_order
+    from .sheet import parse_changes, parse_reorder
 
     con = console()
     if args.apply == "-":
@@ -1408,6 +1415,22 @@ def _apply_changes(args, out: Path, manifest) -> tuple[str, list[str]]:
                 f"ueber den Knopf 'Aenderungen speichern' — oder `--apply -` "
                 f"nimmt sie aus der Zwischenablage entgegen.")
         roh = pfad.read_text(encoding="utf-8")
+
+    folge = parse_reorder(roh)
+    if folge is not None:
+        # Die Ausgabe der Ansicht "Reihenfolge": eine vollstaendige Folge,
+        # keine Tauschliste. Dieselbe Strenge bei unverstandenen Zeilen.
+        if folge.unklar:
+            stellen = "; ".join(f"Zeile {nr}: {z!r}" for nr, z in folge.unklar[:5])
+            raise SlideshowError(
+                f"{len(folge.unklar)} Zeilen der Reihenfolge sind weder Eintrag "
+                f"noch Kommentar oder stehen vor dem ersten `# block:`: {stellen}.")
+        olist, _zeilen = load_order(out)
+        con.print(f"Reihenfolge aus dem Kontaktbogen: "
+                  f"{sum(len(e) for _n, e in folge.bloecke)} Eintraege in "
+                  f"{len(folge.bloecke)} Bloecken")
+        return apply_reorder(out.read_text(encoding="utf-8"), manifest, olist,
+                             folge.bloecke, stand=folge.stand, quelle=str(out))
 
     rein, raus, unklar = parse_changes(roh)
     if unklar:
@@ -1503,6 +1526,7 @@ class _SheetArgs:
         self.jobs = None
         self.alles = True
         self.selected = False
+        self.sequence = False
         self.force = False
         self.dry_run = args.dry_run
         self.quiet = args.quiet
@@ -1510,9 +1534,9 @@ class _SheetArgs:
 
 def cmd_sheet(args, project: Project) -> int:
     from .models import Manifest
-    from .order import load_order, resolve_order
-    from .sheet import (dump_sheet_html, selection_from_order, sheet_media,
-                        thumbnails)
+    from .order import load_order, order_fingerprint, resolve_order
+    from .sheet import (dump_sheet_html, folge_bloecke, selection_from_order,
+                        sheet_media, thumbnails)
 
     manifest = Manifest.load(Path(args.manifest) if args.manifest else project.manifest)
     con = console()
@@ -1533,9 +1557,18 @@ def cmd_sheet(args, project: Project) -> int:
     medien = sheet_media(sel, manifest, nur_auswahl=args.selected)
     thumbs, stats = thumbnails(project, medien, size=args.thumb, force=args.force,
                                jobs=args.jobs, dry=DryRun(enabled=args.dry_run))
+    folge = folge_bloecke(olist, manifest)
+    gelistet = sum(len(b.medien) for b in folge)
+    if len(ids) > gelistet:
+        meldungen.append(
+            f"{len(ids) - gelistet} Medien laufen ueber `rest: append` hinten mit. "
+            f"Die Ansicht 'Reihenfolge' zeigt nur, was in {pfad.name} steht — "
+            f"verschieben laesst sich nur Gelistetes.")
     html = dump_sheet_html(sel, thumbs, manifest, base=out.parent,
                            nur_auswahl=args.selected, thumb=args.thumb,
-                           quelle=pfad.name)
+                           quelle=pfad.name, folge=folge,
+                           stand=order_fingerprint(olist),
+                           ansicht="folge" if args.sequence else "auswahl")
 
     if args.dry_run:
         con.print(f"Kontaktbogen: {out}  ({len(medien)} Kacheln, "
@@ -1555,8 +1588,9 @@ def cmd_sheet(args, project: Project) -> int:
     for m in meldungen + sel.meldungen:
         con.print(f"  [yellow]{m}[/yellow]")
     con.print(f"[yellow]Der Bogen schreibt nichts.[/yellow] Ein Klick markiert "
-              f"einen Tausch, der Knopf legt die Zeilen in die Zwischenablage — "
-              f"eintragen von Hand in {pfad.name}.")
+              f"einen Tausch, in der Ansicht 'Reihenfolge' verschiebt Ziehen; "
+              f"'Aenderungen speichern' legt auswahl.txt ab — einspielen mit "
+              f"`slideshow order --apply auswahl.txt`.")
     return 0
 
 

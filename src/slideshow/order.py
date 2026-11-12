@@ -587,6 +587,352 @@ def apply_changes(text: str, manifest: Manifest, rein: list[str], raus: list[str
     return (neuer_text, meldungen)
 
 
+# --------------------------------------------------------------------------
+# Umsortieren aus dem Kontaktbogen (Ansicht "Reihenfolge")
+# --------------------------------------------------------------------------
+
+def order_fingerprint(olist: OrderList) -> str:
+    """Kurze Pruefsumme ueber Bloecke und gelistete IDs, in Dateireihenfolge.
+
+    Der Bogen traegt sie mit, und ``--apply`` vergleicht sie mit der Datei.
+    Eine Umsortierung ist — anders als ein Tausch — eine *vollstaendige* Folge:
+    wer nach dem Erzeugen des Bogens von Hand drei Zeilen verschoben hat und
+    danach die Liste aus dem Bogen einspielt, verloere diese drei
+    Verschiebungen kommentarlos. Die Mengenpruefung in :func:`apply_reorder`
+    faengt nur hinzugekommene oder verschwundene IDs, keine geaenderte
+    Reihenfolge — das tut erst diese Summe.
+    """
+    import hashlib
+    h = hashlib.blake2b(digest_size=6)
+    for g in olist.blocks:
+        h.update(f"\x00{g.name}\x01".encode("utf-8"))
+        h.update("\x02".join(g.items).encode("utf-8"))
+    return h.hexdigest()
+
+
+#: ``- name: tag-3`` — ein Blockkopf; der Name darf in Anfuehrungszeichen stehen.
+_NAME_RE = re.compile(r"^(\s*)-\s*name:\s*(.*?)\s*(?:#.*)?$")
+#: ``items:`` bzw. ``order:`` (flache Form), leer oder ``[]``, ggf. mit Kommentar.
+_LISTE_RE = re.compile(r"^(\s*)(items|order):\s*(\[\s*\])?\s*(#.*)?$")
+#: Die Alternativen, die ``select`` unter eine gewaehlte Zeile schreibt
+#: (``#  statt: …``), und ihre Fortsetzungszeilen (``#         …``).
+_STATT_RE = re.compile(r"^\s*#\s*statt:")
+_FORTSETZUNG_RE = re.compile(r"^\s*#\s{3,}\S")
+
+
+def _gepaeck(zeilen: list[str], i: int) -> int:
+    """Index hinter der letzten Zeile, die mit dem Eintrag in Zeile ``i`` wandert.
+
+    Das sind nur die ``statt:``-Zeilen. Sie beschreiben *dieses* Bild — seine
+    Geschwister —, und an einer anderen Stelle stehengelassen zeigten sie auf
+    das falsche. Alles andere (ausgelassene Trauben, eigene Kommentare,
+    auskommentierte Abwahl) bleibt, wo es steht: es beschreibt eine *Stelle*
+    in der Zeitachse, nicht ein Bild.
+    """
+    j = i + 1
+    if j < len(zeilen) and _STATT_RE.match(zeilen[j]):
+        j += 1
+        while j < len(zeilen) and _FORTSETZUNG_RE.match(zeilen[j]):
+            j += 1
+    return j
+
+
+def _listenzeilen(text: str, olist: OrderList, quelle: str) -> list[int]:
+    """Index der ``items:``- bzw. ``order:``-Zeile je Block, in Blockreihenfolge.
+
+    Gebraucht fuer zwei Dinge: als Einfuegestelle in einen leeren Block und um
+    ``items: []`` umzuschreiben, sobald ein Block leer wird oder es nicht mehr
+    ist — ``items:`` ohne Eintrag waere YAML-``null`` und keine leere Liste.
+    """
+    zeilen = text.splitlines()
+    if olist.groups is None:
+        treffer = [i for i, z in enumerate(zeilen)
+                   if (m := _LISTE_RE.match(z)) and m.group(2) == "order"
+                   and not m.group(1)]
+        if len(treffer) != 1:
+            raise SchemaError("Die flache Liste `order:` steht nicht als eigene "
+                              "Zeile da — umsortieren laesst sich nur die "
+                              "Blockform mit einem Eintrag je Zeile.", file=quelle)
+        return treffer
+
+    koepfe = [i for i, z in enumerate(zeilen)
+              if _NAME_RE.match(z) and not z.lstrip().startswith("#")]
+    if len(koepfe) != len(olist.blocks):
+        raise SchemaError(
+            f"{len(olist.blocks)} Bloecke in der Datei, aber {len(koepfe)} Zeilen "
+            f"`- name:` — die Blockkoepfe muessen je eine eigene Zeile haben.",
+            file=quelle)
+    out: list[int] = []
+    for nr, (kopf, block) in enumerate(zip(koepfe, olist.blocks)):
+        name = _NAME_RE.match(zeilen[kopf]).group(2).strip("'\"")
+        if name != block.name:
+            raise SchemaError(f"Blockkopf in Zeile {kopf + 1} heisst {name!r}, "
+                              f"erwartet war {block.name!r}.", file=quelle,
+                              line=kopf + 1)
+        ende = koepfe[nr + 1] if nr + 1 < len(koepfe) else len(zeilen)
+        liste = next((i for i in range(kopf, ende)
+                      if (m := _LISTE_RE.match(zeilen[i])) and m.group(2) == "items"),
+                     None)
+        if liste is None:
+            raise SchemaError(
+                f"Block {block.name!r}: `items:` steht nicht als eigene Zeile da "
+                f"(Flow-Stil `items: [a, b]`?). Umsortieren aus dem Bogen braucht "
+                f"einen Eintrag je Zeile.", file=quelle, line=kopf + 1)
+        out.append(liste)
+    return out
+
+
+def _lis(folge: list[int]) -> set[int]:
+    """Positionen einer laengsten aufsteigenden Teilfolge.
+
+    Was *nicht* darin liegt, ist die kleinste Menge an Eintraegen, die man
+    verschieben muss, um von der alten zur neuen Folge zu kommen. Ein Bild nach
+    vorn gezogen heisst so "1 verschoben" und nicht "40 verschoben" — der
+    naive Positionsvergleich zaehlte jedes Bild dazwischen mit.
+    """
+    import bisect
+    enden: list[int] = []
+    wo: list[int] = []
+    vorher = [-1] * len(folge)
+    for i, x in enumerate(folge):
+        k = bisect.bisect_left(enden, x)
+        if k == len(enden):
+            enden.append(x)
+            wo.append(i)
+        else:
+            enden[k] = x
+            wo[k] = i
+        vorher[i] = wo[k - 1] if k else -1
+    out: set[int] = set()
+    i = wo[-1] if wo else -1
+    while i >= 0:
+        out.add(i)
+        i = vorher[i]
+    return out
+
+
+def apply_reorder(text: str, manifest: Manifest, olist: OrderList,
+                  bloecke: list[tuple[str, list[tuple[str, bool]]]], *,
+                  stand: str | None = None,
+                  quelle: str = "order.yaml") -> tuple[str, list[str]]:
+    """Schreibt eine neue Reihenfolge aus dem Kontaktbogen in die Datei.
+
+    ``bloecke`` ist die **vollstaendige** Folge, wie sie die Ansicht
+    "Reihenfolge" zeigt: je Block die Eintraege in Filmreihenfolge, jeder mit
+    der Angabe, ob er hinaus soll. Vollstaendig und nicht als Liste einzelner
+    Zuege, weil das Ergebnis dann nicht davon abhaengt, in welcher Reihenfolge
+    jemand im Browser gezogen hat — und weil sich so pruefen laesst, ob der
+    Bogen zur Datei passt (:func:`order_fingerprint`).
+
+    Gearbeitet wird wie in :func:`apply_changes` **auf dem Text**, und zwar so,
+    wie man es im Editor von Hand taete: **nur die bewegten Eintraege
+    wandern.** Welche das sind, sagt die laengste aufsteigende Teilfolge der
+    alten Positionen (:func:`_lis`) — alles darin bleibt Zeichen fuer Zeichen
+    stehen. Ein bewegter Eintrag (seine Zeile samt den ``statt:``-Zeilen
+    darunter, :func:`_gepaeck`) wird an seiner alten Stelle entfernt und direkt
+    hinter seinem neuen Vorgaenger eingesetzt; ohne Vorgaenger im Block direkt
+    hinter ``items:``.
+
+    Die naheliegende Alternative — die neue Folge der Reihe nach in die alten
+    Zeilenplaetze zu fuellen — sieht einfacher aus und ist an echten Dateien
+    falsch: ein Bild an den Blockanfang gezogen schiebt dann *jeden* Eintrag
+    des Blocks um einen Platz, und die Kommentare dazwischen (Abwahl,
+    ausgelassene Trauben) stehen danach neben fremden Bildern. An
+    ``london-2026`` waren das 20 geaenderte Zeilen fuer drei Handgriffe.
+
+    Kommentare zwischen den Eintraegen gehoeren dabei zum *folgenden* Eintrag
+    und bleiben vor ihm stehen — so schreibt ``select`` die ausgelassenen
+    Trauben (vor das naechste gewaehlte Bild), und deshalb setzt sich ein
+    bewegter Eintrag hinter seinen Vorgaenger und nicht vor seinen Nachfolger.
+
+    IDs, die die Folge nennt und die Datei nicht listet, sind
+    **hereingenommen** (im Bogen angeklickt) und stehen dort, wohin der Bogen
+    sie gesetzt hat. Hinausgenommenes wird auskommentiert wie in
+    :func:`apply_changes`.
+
+    Bloecke werden nicht umbenannt, neu angelegt oder umgestellt — ihre Namen
+    sind Anker fuer ``chapters.yaml`` (``group:``), und ein Kapitel, dessen
+    Gruppe still verschwindet, faellt erst beim naechsten ``build`` auf.
+    """
+    by_id = {m.id: m for m in manifest.media}
+    offsets = manifest.clock_offsets
+    name = Path(quelle).name
+
+    # -- passt der Bogen zur Datei? ---------------------------------------
+    if stand is not None and stand != order_fingerprint(olist):
+        raise SchemaError(
+            f"{name} wurde geaendert, nachdem der Kontaktbogen erzeugt wurde. "
+            f"Die Liste aus dem Bogen ist eine vollstaendige Reihenfolge und "
+            f"ueberschriebe diese Aenderungen — erst `slideshow sheet` neu "
+            f"erzeugen, dann noch einmal sortieren.", file=quelle)
+
+    soll_namen = [g.name for g in olist.blocks]
+    ist_namen = [n for n, _ in bloecke]
+    if ist_namen != soll_namen:
+        raise SchemaError(
+            f"Die Bloecke der Liste ({', '.join(ist_namen) or '—'}) passen nicht "
+            f"zu {name} ({', '.join(soll_namen) or '—'}). Stammt der Bogen von "
+            f"einem aelteren Stand? `slideshow sheet` erzeugt ihn neu.",
+            file=quelle)
+
+    alle = [mid for _n, eintraege in bloecke for mid, _r in eintraege]
+    unbekannt = [mid for mid in alle if mid not in by_id]
+    if unbekannt:
+        raise SchemaError(
+            f"{len(unbekannt)} Kennungen aus der Liste stehen nicht im Manifest: "
+            f"{_liste(unbekannt)}.", file=quelle)
+    doppelt = sorted({mid for mid in alle if alle.count(mid) > 1})
+    if doppelt:
+        raise SchemaError(f"{len(doppelt)} Medien stehen mehrfach in der Liste: "
+                          f"{_liste(doppelt)}.", file=quelle)
+
+    gelistet = [mid for g in olist.blocks for mid in g.items if mid in by_id]
+    fehlend = [mid for mid in gelistet if mid not in set(alle)]
+    if fehlend:
+        raise SchemaError(
+            f"{len(fehlend)} Medien aus {name} fehlen in der Liste: "
+            f"{_liste(fehlend)}. Eine Umsortierung nennt jedes gelistete Medium — "
+            f"der Bogen ist aelter als die Datei. `slideshow sheet` erzeugt ihn "
+            f"neu.", file=quelle)
+
+    # -- Plaetze und Listenzeilen bestimmen --------------------------------
+    zeilen = text.splitlines()
+    stellen = item_lines(text)
+    plaetze: dict[str, tuple[int, int]] = {}
+    for mid in gelistet:
+        nrs = stellen.get(mid, [])
+        if len(nrs) != 1:
+            raise SchemaError(f"{mid!r} steht nicht genau einmal als Eintrag in "
+                              f"{name}.", file=quelle)
+        i = nrs[0] - 1
+        vorn = zeilen[i].split("#", 1)[0]
+        if not re.fullmatch(rf"\s*-\s*{re.escape(mid)}\s*", vorn):
+            raise SchemaError(
+                f"Zeile {i + 1} enthaelt mehr als einen Eintrag oder ist im "
+                f"Flow-Stil geschrieben (`[a, b]`). Umsortieren aus dem Bogen "
+                f"braucht einen Eintrag je Zeile.", file=quelle, line=i + 1)
+        plaetze[mid] = (i, _gepaeck(zeilen, i))
+    listenzeilen = _listenzeilen(text, olist, quelle)
+
+    heute = _dt.date.today().isoformat()
+    knapp = _knappe_zeilen(text)
+    tag_eins = first_day(chronological(manifest), offsets)
+
+    def stueck(mid: str, raus: bool, einzug: str) -> list[str]:
+        if mid not in plaetze:                      # hereingenommen
+            if raus:
+                return []
+            return [f"{einzug}- {mid}"
+                    f"{_kontext(by_id[mid], tag_eins, offsets, knapp=knapp)}"]
+        a, b = plaetze[mid]
+        teil = list(zeilen[a:b])
+        if raus:
+            roh = teil[0]
+            ein = len(roh) - len(roh.lstrip())
+            teil[0] = f"{' ' * ein}# {roh.strip()}   # heraus {heute}"
+        return teil
+
+    # -- was bleibt stehen? -------------------------------------------------
+    alt_index = {mid: i for i, mid in enumerate(gelistet)}
+    alt_block = {mid: g.name for g in olist.blocks for mid in g.items}
+    # Kandidaten sind gelistete Eintraege, die ihren Block behalten. Ein
+    # Blockwechsel ist immer eine Bewegung, auch wenn die globale Folge gleich
+    # bleibt (letztes Bild von Tag 1 wird erstes von Tag 2).
+    kandidaten = [mid for n, e in bloecke for mid, _r in e
+                  if mid in alt_index and alt_block[mid] == n]
+    stabil = {kandidaten[p] for p in _lis([alt_index[m] for m in kandidaten])}
+
+    # Einzug neuer Zeilen: wie die vorhandenen Eintraege, sonst die Vorgabe.
+    erster = next(iter(plaetze.values()), None)
+    vorgabe = ("      " if olist.groups is not None else "  ")
+    if erster is not None:
+        roh = zeilen[erster[0]]
+        vorgabe = roh[:len(roh) - len(roh.lstrip())]
+
+    ersatz: dict[int, str] = {}             # Zeile -> neue Zeile (Abwahl)
+    weg: set[int] = set()                   # Zeilen bewegter Eintraege
+    danach: dict[int, list[str]] = {}       # Zeile -> dahinter einfuegen
+    listen_neu: dict[int, str] = {}
+
+    for mid in plaetze:
+        if mid not in stabil:
+            weg.update(range(*plaetze[mid]))
+
+    for (bname, eintraege), lz in zip(bloecke, listenzeilen):
+        anker = lz
+        for mid, raus in eintraege:
+            if mid in stabil:
+                a, b = plaetze[mid]
+                if raus:
+                    ersatz[a] = stueck(mid, True, vorgabe)[0]
+                anker = b - 1
+                continue
+            danach.setdefault(anker, []).extend(stueck(mid, raus, vorgabe))
+
+        # `items:` ohne einen einzigen Eintrag darunter ist YAML-null, und
+        # `items: []` mit Eintraegen darunter ist kaputt. Beides kann eine
+        # Umsortierung erzeugen — ein Block wird leergezogen oder gefuellt.
+        leer = not any(not raus for _mid, raus in eintraege)
+        m = _LISTE_RE.match(zeilen[lz])
+        war_leer = bool(m.group(3))
+        if leer != war_leer:
+            kommentar = f"  {m.group(4)}" if m.group(4) else ""
+            listen_neu[lz] = (f"{m.group(1)}{m.group(2)}:"
+                              f"{' []' if leer else ''}{kommentar}")
+
+    out: list[str] = []
+    for i, z in enumerate(zeilen):
+        if i in weg:
+            pass
+        elif i in ersatz:
+            out.append(ersatz[i])
+        else:
+            out.append(listen_neu.get(i, z))
+        # Auch hinter einer entfallenen Zeile: der Anker ist immer ein stehender
+        # Eintrag oder die `items:`-Zeile, nie eine bewegte — aber falls doch,
+        # geht so nichts verloren, und die Gegenprobe unten saehe es.
+        if i in danach:
+            out.extend(danach[i])
+    neuer_text = "\n".join(out) + "\n"
+
+    # -- Gegenprobe ---------------------------------------------------------
+    # Die Textchirurgie ist die riskante Stelle dieses Moduls. Bevor sie eine
+    # Datei schreibt, die `build` erst eine Stunde spaeter liest, wird das
+    # Ergebnis hier noch einmal geladen und mit der verlangten Folge verglichen.
+    import yaml
+    try:
+        probe = OrderList.model_validate(yaml.safe_load(neuer_text) or {})
+    except Exception as exc:                            # noqa: BLE001
+        raise SchemaError(f"Die umsortierte Datei waere kein gueltiges "
+                          f"{name} mehr ({exc}). Nichts geschrieben.",
+                          file=quelle) from exc
+    soll = [(n, [mid for mid, raus in e if not raus]) for n, e in bloecke]
+    ist = [(g.name, list(g.items)) for g in probe.blocks]
+    if ist != soll:
+        raise SchemaError(f"Die umsortierte Datei ergibt nicht die Folge aus dem "
+                          f"Bogen. Nichts geschrieben — bitte melden.", file=quelle)
+
+    # -- Meldungen ----------------------------------------------------------
+    # Gezaehlt wie im Bogen (`pruefen()` im Skript): ohne Hinausgenommenes,
+    # damit die Zahl auf dem Bildschirm und die im Bericht dieselbe ist.
+    raus_von = {mid: raus for _n, e in bloecke for mid, raus in e}
+    bleiben = [mid for mid in kandidaten if not raus_von[mid]]
+    drin = sum(1 for mid in alle if mid in alt_index and not raus_von[mid])
+    verschoben = drin - len(_lis([alt_index[m] for m in bleiben]))
+    herein = [mid for mid in alle if mid not in alt_index and not raus_von[mid]]
+    hinaus = [mid for mid in alle if mid in alt_index and raus_von[mid]]
+    meldungen: list[str] = []
+    if verschoben:
+        meldungen.append(f"{verschoben} Medien an neuer Stelle")
+    if herein:
+        meldungen.append(f"{len(herein)} Medien hereingenommen")
+    if hinaus:
+        meldungen.append(f"{len(hinaus)} Zeilen auskommentiert")
+    if not (verschoben or herein or hinaus):
+        meldungen.append(f"nichts zu tun — {name} steht bereits so da")
+    return (neuer_text, meldungen)
+
+
 #: Eine Eintragszeile, deren Kommentar mit der Uhrzeit beginnt — die Form aus
 #: ``slideshow select``. ``slideshow order`` schreibt stattdessen "Tag 3 · …".
 _KNAPP = re.compile(r"^\s*-\s*[A-Za-z0-9_-]+\s+#\s*\d{1,2}:\d{2}\b", re.M)

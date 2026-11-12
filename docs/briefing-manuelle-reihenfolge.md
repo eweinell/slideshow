@@ -21,8 +21,13 @@
 > 51 Tests).
 >
 > Offen ist nur noch **Stufe 3** — Wiederholtes Material,
-> `order --from edit.yaml`, Kontaktbogen. Alle drei bewusst zurückgestellt,
-> bis sich zeigt, dass sie gebraucht werden.
+> `order --from edit.yaml`, Kontaktbogen. Die ersten beiden sind bewusst
+> zurückgestellt, bis sich zeigt, dass sie gebraucht werden. **Der Kontaktbogen
+> ist inzwischen da**: aus dem Auswahl-Briefing, mit der Ansicht „Reihenfolge“
+> (`slideshow sheet --sequence`). Sie zeigt die gelisteten Medien nach Blöcken
+> und sortiert per Ziehen um; zurück geht es über `order --apply`
+> (`order.apply_reorder`), siehe
+> [Rezept 5b](rezepte.md#5b-aus-tausend-bildern-auswählen-lassen).
 
 Die Abfolge des Films kommt heute aus `chronological(manifest)` — Fotos in der
 Reihenfolge ihrer Aufnahmezeit. Für eine Reisedokumentation ist das richtig.

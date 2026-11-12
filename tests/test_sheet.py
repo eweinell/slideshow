@@ -504,6 +504,339 @@ def test_der_bogen_bietet_das_speichern_der_aenderungen_an(bogen):
 
 
 # --------------------------------------------------------------------------
+# Ansicht "Reihenfolge" — ansehen und umsortieren
+# --------------------------------------------------------------------------
+
+def _folge_bogen(manifest: Manifest, text: str, **kw) -> str:
+    """Bogen mit beiden Ansichten, so wie ``cmd_sheet`` ihn baut."""
+    from slideshow.order import order_fingerprint
+    from slideshow.sheet import folge_bloecke
+
+    olist = OrderList.model_validate(_yaml(text))
+    sel = selection_from_order(manifest, olist, text)
+    thumbs = {m.id: Path("cache/thumbs") / f"{m.id}.jpg"
+              for m in sheet_media(sel, manifest)}
+    return dump_sheet_html(sel, thumbs, manifest, base=Path("."),
+                           folge=folge_bloecke(olist, manifest),
+                           stand=order_fingerprint(olist), **kw)
+
+
+def _folge_ids(html: str) -> list[str]:
+    teil = html.split('<main id="folge"', 1)[1].split("</main>", 1)[0]
+    return re.findall(r'<figure class="folge[^"]*"[^>]*data-id="([^"]+)"', teil)
+
+
+def _gelistet(text: str) -> list[tuple[str, list[str]]]:
+    olist = OrderList.model_validate(_yaml(text))
+    return [(g.name, list(g.items)) for g in olist.blocks]
+
+
+def _ausgabe(bloecke: list[tuple[str, list[str]]], *, stand: str | None,
+             raus: set[str] = frozenset()) -> str:
+    """Was ``folgezeilen()`` im Browser erzeugt — hier in Python nachgebaut."""
+    zeilen = ["# Kontaktbogen: neue Reihenfolge — 1 verschoben, 0 herein, 0 hinaus.",
+              "# Einspielen: slideshow order --apply auswahl.txt",
+              "# reihenfolge"]
+    if stand is not None:
+        zeilen.append(f"# stand: {stand}")
+    for name, ids in bloecke:
+        zeilen.append(f"# block: {name}")
+        zeilen += [f"      #  raus: {i}" if i in raus else f"      - {i}" for i in ids]
+    return "\n".join(zeilen) + "\n"
+
+
+@pytest.fixture
+def auswahl(bestand):
+    """Eine ``order.yaml`` aus ``select`` mit mehreren Tagesbloecken."""
+    sel = select_media(bestand, count=20, seed=4711)
+    return dump_selection_yaml(sel, bestand)
+
+
+def _umsortieren(bestand, text, bloecke, *, raus=frozenset(), stand="passend"):
+    from slideshow.order import apply_reorder, order_fingerprint
+    from slideshow.sheet import parse_reorder
+
+    olist = OrderList.model_validate(_yaml(text))
+    if stand == "passend":
+        stand = order_fingerprint(olist)
+    folge = parse_reorder(_ausgabe(bloecke, stand=stand, raus=raus))
+    assert folge is not None and not folge.unklar
+    return apply_reorder(text, bestand, olist, folge.bloecke, stand=folge.stand)
+
+
+def test_die_reihenfolge_zeigt_nur_die_gelisteten_in_dateireihenfolge(bestand, auswahl):
+    """Keine Geschwister, keine ausgelassenen Trauben — und die Abfolge ist die
+    der Datei, nicht die der Uhr."""
+    html = _folge_bogen(bestand, auswahl)
+    soll = [mid for _n, ids in _gelistet(auswahl) for mid in ids]
+    assert _folge_ids(html) == soll
+
+
+def test_die_reihenfolge_ist_nach_den_bloecken_der_datei_gegliedert(bestand, auswahl):
+    html = _folge_bogen(bestand, auswahl)
+    namen = re.findall(r'<section class="block" data-name="([^"]*)"', html)
+    assert namen == [n for n, _ids in _gelistet(auswahl)]
+
+
+def test_eine_thematisch_umsortierte_datei_erscheint_so_wie_sie_dasteht(bestand, auswahl):
+    """Der Kern der Ansicht: sie zeigt den Film, nicht die Aufnahmezeit."""
+    bloecke = _gelistet(auswahl)
+    name, ids = bloecke[0]
+    umgedreht = auswahl
+    for a, b in zip(ids, reversed(ids)):
+        umgedreht = umgedreht.replace(f"- {a} ", f"- @{b} ", 1)
+    umgedreht = umgedreht.replace("- @", "- ")
+    html = _folge_bogen(bestand, umgedreht)
+    assert _folge_ids(html)[:len(ids)] == list(reversed(ids))
+
+
+def test_der_bogen_geht_auf_wunsch_in_der_reihenfolge_auf(bestand, auswahl):
+    assert '<body data-ansicht="auswahl">' in _folge_bogen(bestand, auswahl)
+    assert '<body data-ansicht="folge">' in _folge_bogen(bestand, auswahl,
+                                                          ansicht="folge")
+
+
+def test_ohne_bloecke_gibt_es_keinen_umschalter(bogen):
+    """Ein Bogen ohne ``folge`` ist der alte — kein toter Knopf."""
+    assert 'id="folge"' not in bogen["html"]
+    assert "ansicht('folge')" not in bogen["html"]
+
+
+def test_der_bogen_mit_beiden_ansichten_bleibt_gueltig_und_ohne_netz(bestand, auswahl):
+    html = _folge_bogen(bestand, auswahl)
+    for muster in ("http:", "https:", "//", "cdn", "<script src", "<link "):
+        assert muster not in html, f"externer Verweis: {muster!r}"
+    for verboten in ("fetch(", "XMLHttpRequest", "localStorage", "<form",
+                     "sessionStorage", "navigator.sendBeacon"):
+        assert verboten not in html, verboten
+    assert all('loading="lazy"' in b for b in re.findall(r"<img [^>]*>", html))
+
+
+def test_der_bogen_traegt_die_pruefsumme_der_datei(bestand, auswahl):
+    from slideshow.order import order_fingerprint
+    html = _folge_bogen(bestand, auswahl)
+    stand = order_fingerprint(OrderList.model_validate(_yaml(auswahl)))
+    assert f'data-stand="{stand}"' in html
+
+
+def test_clips_sind_in_der_reihenfolge_mit_dauer_gekennzeichnet(bestand, auswahl):
+    from slideshow.models import ClipInfo
+
+    erstes = _gelistet(auswahl)[0][1][0]
+    media = [m if m.id != erstes else m.model_copy(update={
+        "kind": "clip", "image": None,
+        "clip": ClipInfo(duration=4.24, width=3840, height=2160)})
+        for m in bestand.media]
+    html = _folge_bogen(Manifest(media=media), auswahl)
+    teil = html.split('<main id="folge"', 1)[1]
+    kachel = re.search(rf'<figure class="([^"]*)"[^>]*data-id="{erstes}".*?</figure>',
+                       teil).group(0)
+    assert 'class="folge clip"' in kachel
+    assert "Clip 4,2 s" in kachel
+
+
+# -- das Rueckweg-Format ------------------------------------------------------
+
+def test_eine_tauschliste_ist_keine_reihenfolge():
+    """Sonst schriebe ``--apply`` aus drei Tauschen eine Folge aus drei Bildern."""
+    from slideshow.sheet import parse_reorder
+    assert parse_reorder("      - img_0007\n      #  raus: img_0005\n") is None
+
+
+def test_die_reihenfolge_wird_zerlegt():
+    from slideshow.sheet import parse_reorder
+    folge = parse_reorder("﻿# Kopf\r\n# reihenfolge\r\n# stand: 0a1b2c\r\n"
+                          "# block: tag-1\r\n      - img_0002\r\n"
+                          "      #  raus: img_0001\r\n# block: tag-2\r\n"
+                          "      - img_0003\r\n")
+    assert folge.stand == "0a1b2c"
+    assert folge.bloecke == [("tag-1", [("img_0002", False), ("img_0001", True)]),
+                             ("tag-2", [("img_0003", False)])]
+    assert folge.unklar == []
+
+
+def test_ein_eintrag_vor_dem_ersten_block_wird_nicht_geraten():
+    from slideshow.sheet import parse_reorder
+    folge = parse_reorder("# reihenfolge\n      - img_0002\n# block: a\n")
+    assert [z for _nr, z in folge.unklar] == ["- img_0002"]
+
+
+# -- Einspielen ---------------------------------------------------------------
+
+def test_nur_die_bewegte_zeile_wandert(bestand, auswahl):
+    """Das letzte Bild eines Blocks nach vorn gezogen: eine Zeile (samt ihren
+    ``statt:``-Zeilen) wandert, alles andere bleibt stehen. Mit der naheliegenden
+    Platz-fuer-Platz-Fuellung rutschte jeder Eintrag des Blocks um eins, und die
+    Kommentare dazwischen stuenden neben fremden Bildern — an ``london-2026``
+    gemessen: 20 geaenderte Zeilen fuer drei Handgriffe."""
+    import difflib
+    bloecke = _gelistet(auswahl)
+    bi = max(range(len(bloecke)), key=lambda i: len(bloecke[i][1]))
+    name, ids = bloecke[bi]
+    neu_ids = [ids[-1]] + ids[:-1]
+    neu, _m = _umsortieren(bestand, auswahl,
+                           bloecke[:bi] + [(name, neu_ids)] + bloecke[bi + 1:])
+    assert _gelistet(neu)[bi] == (name, neu_ids)
+    alt_z, neu_z = auswahl.splitlines(), neu.splitlines()
+    sm = difflib.SequenceMatcher(a=alt_z, b=neu_z, autojunk=False)
+    weg = sum(i2 - i1 for op, i1, i2, _j1, _j2 in sm.get_opcodes() if op != "equal")
+    dazu = sum(j2 - j1 for op, _i1, _i2, j1, j2 in sm.get_opcodes() if op != "equal")
+    nr = next(i for i, z in enumerate(alt_z) if re.match(rf"\s*- {ids[-1]}\b", z))
+    from slideshow.order import _gepaeck
+    groesse = _gepaeck(alt_z, nr) - nr
+    assert (weg, dazu) == (groesse, groesse), (weg, dazu, groesse)
+
+
+def test_ein_tausch_im_block_erfindet_und_verliert_keine_zeile(bestand, auswahl):
+    """Alles ausser der bewegten Zeile — ausgelassene Trauben, Kopf,
+    Kommentare — bleibt Zeichen fuer Zeichen stehen."""
+    bloecke = _gelistet(auswahl)
+    name, ids = bloecke[0]
+    neu_ids = [ids[1], ids[0]] + ids[2:]
+    neu, meldungen = _umsortieren(bestand, auswahl,
+                                  [(name, neu_ids)] + bloecke[1:])
+    assert _gelistet(neu)[0] == (name, neu_ids)
+    assert _gelistet(neu)[1:] == bloecke[1:]
+    assert sorted(neu.splitlines()) == sorted(auswahl.splitlines()), \
+        "eine Umsortierung erfindet und verliert keine Zeile"
+    assert any("1 Medien an neuer Stelle" in m for m in meldungen), meldungen
+
+
+def test_die_alternativen_wandern_mit_ihrem_bild(bestand):
+    """Die ``statt:``-Zeilen beschreiben *dieses* Bild. Blieben sie stehen,
+    stuenden die Geschwister unter einem fremden."""
+    sel = select_media(bestand, count=20, seed=4711)
+    text = dump_selection_yaml(sel, bestand)
+    bloecke = _gelistet(text)
+    bi, mit = next((bi, mid) for bi, (_n, ids) in enumerate(bloecke)
+                   for mid in ids if sel.alternativen.get(mid))
+    name, ids = bloecke[bi]
+    neu_ids = [mit] + [i for i in ids if i != mit] if ids[0] != mit \
+        else [i for i in ids if i != mit] + [mit]
+    neu, _m = _umsortieren(bestand, text,
+                           bloecke[:bi] + [(name, neu_ids)] + bloecke[bi + 1:])
+    zeilen = neu.splitlines()
+    nr = next(i for i, z in enumerate(zeilen) if re.match(rf"\s*- {mit}\b", z))
+    geschwister = sel.alternativen[mit][0].id
+    assert "statt:" in zeilen[nr + 1] and geschwister in zeilen[nr + 1]
+
+
+def test_ein_bild_wandert_in_einen_anderen_block(bestand, auswahl):
+    bloecke = _gelistet(auswahl)
+    (n0, a), (n1, b) = bloecke[0], bloecke[1]
+    wandert = a[-1]
+    neu, meldungen = _umsortieren(bestand, auswahl,
+                                  [(n0, a[:-1]), (n1, [wandert] + b)] + bloecke[2:])
+    assert _gelistet(neu)[:2] == [(n0, a[:-1]), (n1, [wandert] + b)]
+    assert any("1 Medien an neuer Stelle" in m for m in meldungen), \
+        "der Blockwechsel zaehlt als Verschiebung, auch ohne Positionswechsel"
+
+
+def test_ein_leergezogener_block_wird_zur_leeren_liste(bestand, auswahl):
+    """``items:`` ohne Eintrag darunter waere YAML-null und brache das Laden."""
+    bloecke = _gelistet(auswahl)
+    (n0, a), (n1, b) = bloecke[0], bloecke[1]
+    neu, _m = _umsortieren(bestand, auswahl, [(n0, []), (n1, a + b)] + bloecke[2:])
+    assert _gelistet(neu)[:2] == [(n0, []), (n1, a + b)]
+    assert re.search(rf"- name: {n0}\n\s+items: \[\]", neu)
+
+
+def test_ein_leerer_block_laesst_sich_fuellen(bestand, auswahl):
+    """``technisch-ausgeschlossen`` steht mit ``items: []`` in der Datei —
+    hinein gezogen werden muss trotzdem gehen, sonst ist die Liste kaputt."""
+    bloecke = _gelistet(auswahl)
+    leer = next(i for i, (_n, ids) in enumerate(bloecke) if not ids)
+    (n0, a) = bloecke[0]
+    neu_bloecke = [list(x) for x in bloecke]
+    neu_bloecke[0] = [n0, a[1:]]
+    neu_bloecke[leer] = [bloecke[leer][0], [a[0]]]
+    neu, _m = _umsortieren(bestand, auswahl, [tuple(x) for x in neu_bloecke])
+    assert _gelistet(neu)[leer] == (bloecke[leer][0], [a[0]])
+
+
+def test_hinausgenommenes_wird_auskommentiert(bestand, auswahl):
+    from slideshow.order import mentioned_ids
+    bloecke = _gelistet(auswahl)
+    weg = bloecke[0][1][0]
+    neu, meldungen = _umsortieren(bestand, auswahl, bloecke, raus={weg})
+    assert weg not in [i for _n, ids in _gelistet(neu) for i in ids]
+    assert weg in mentioned_ids(neu)
+    assert any("auskommentiert" in m for m in meldungen)
+
+
+def test_hereingenommenes_steht_wo_der_bogen_es_hinsetzt(bestand, auswahl):
+    """In der Reihenfolge steht ein angeklicktes Geschwister dort, wohin es
+    gezogen wurde — nicht dort, wo die Uhr es hinstellen wuerde."""
+    bloecke = _gelistet(auswahl)
+    gelistet = {i for _n, ids in bloecke for i in ids}
+    neu_id = next(m.id for m in bestand.media if m.id not in gelistet)
+    n0, a = bloecke[-1] if bloecke[-1][1] else bloecke[0]
+    ziel = [(n, ([neu_id] + ids if n == n0 else ids)) for n, ids in bloecke]
+    neu, meldungen = _umsortieren(bestand, auswahl, ziel)
+    assert dict(_gelistet(neu))[n0][0] == neu_id
+    assert any("hereingenommen" in m for m in meldungen)
+
+
+def test_eine_inzwischen_geaenderte_datei_wird_nicht_ueberschrieben(bestand, auswahl):
+    """Die Liste ist eine vollstaendige Folge — von Hand verschobene Zeilen
+    gingen sonst kommentarlos verloren."""
+    from slideshow.errors import SchemaError
+    with pytest.raises(SchemaError, match="nachdem der Kontaktbogen erzeugt"):
+        _umsortieren(bestand, auswahl, _gelistet(auswahl), stand="000000000000")
+
+
+def test_ein_fehlendes_medium_bricht_ab(bestand, auswahl):
+    from slideshow.errors import SchemaError
+    bloecke = _gelistet(auswahl)
+    n0, a = bloecke[0]
+    with pytest.raises(SchemaError, match="fehlen in der Liste"):
+        _umsortieren(bestand, auswahl, [(n0, a[1:])] + bloecke[1:], stand=None)
+
+
+def test_andere_bloecke_brechen_ab(bestand, auswahl):
+    from slideshow.errors import SchemaError
+    bloecke = _gelistet(auswahl)
+    with pytest.raises(SchemaError, match="passen nicht"):
+        _umsortieren(bestand, auswahl, [("erfunden", bloecke[0][1])] + bloecke[1:],
+                     stand=None)
+
+
+def test_flow_stil_laesst_sich_nicht_umsortieren(bestand):
+    from slideshow.errors import SchemaError
+    ids = [m.id for m in bestand.media[:3]]
+    text = f"version: 1\nrest: drop\norder: [{', '.join(ids)}]\n"
+    with pytest.raises(SchemaError, match="Flow-Stil|einen Eintrag je Zeile"):
+        _umsortieren(bestand, text, [("", list(reversed(ids)))])
+
+
+def test_die_flache_form_laesst_sich_umsortieren(bestand):
+    ids = [m.id for m in bestand.media[:4]]
+    text = ("version: 1\nrest: drop\norder:\n"
+            + "".join(f"  - {i}   # Kommentar {i}\n" for i in ids))
+    neu, _m = _umsortieren(bestand, text, [("", [ids[2], ids[0], ids[1], ids[3]])])
+    assert _gelistet(neu) == [("", [ids[2], ids[0], ids[1], ids[3]])]
+    assert f"- {ids[2]}   # Kommentar {ids[2]}" in neu, "der Kommentar reist mit"
+
+
+def test_der_rundlauf_reihenfolge_bis_bogen_schliesst_sich(bestand, auswahl):
+    """Umsortieren, einspielen, Bogen neu: die Ansicht zeigt die neue Folge,
+    und die Pruefsumme passt zur neuen Datei."""
+    from slideshow.order import order_fingerprint
+    bloecke = _gelistet(auswahl)
+    n0, a = bloecke[0]
+    neu, _m = _umsortieren(bestand, auswahl, [(n0, list(reversed(a)))] + bloecke[1:])
+    html = _folge_bogen(bestand, neu)
+    assert _folge_ids(html)[:len(a)] == list(reversed(a))
+    stand = order_fingerprint(OrderList.model_validate(_yaml(neu)))
+    assert f'data-stand="{stand}"' in html
+    # Dieselbe Liste noch einmal: die Datei steht schon so da.
+    zweit, meldungen = _umsortieren(bestand, neu,
+                                    [(n0, list(reversed(a)))] + bloecke[1:])
+    assert zweit == neu
+    assert any("nichts zu tun" in m for m in meldungen)
+
+
+# --------------------------------------------------------------------------
 # Thumbnails
 # --------------------------------------------------------------------------
 

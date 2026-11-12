@@ -16,7 +16,11 @@ gewaehlt ist. Siehe den Docstring dort — das ist die eigentliche Denkarbeit.
 verhindern soll. Eingebettete EXIF-Vorschau zuerst, ffmpeg nur, wo keine liegt.
 
 **HTML** (:func:`dump_sheet_html`). Eine Datei, kein Server, kein Framework,
-kein Netzzugriff. Sie muss in fuenf Jahren noch aufgehen.
+kein Netzzugriff. Sie muss in fuenf Jahren noch aufgehen. Zwei Ansichten:
+"Auswahl" (nach Tagen und Trauben, zum Tauschen) und "Reihenfolge" (nur das
+Gelistete, nach Bloecken der ``order.yaml``, zum Umsortieren per Ziehen —
+:func:`folge_bloecke`, Rueckweg ueber :func:`parse_reorder` und
+:func:`slideshow.order.apply_reorder`).
 
 **Der Bogen schreibt nichts** (Entscheidung 7 des Briefings). Ein Klick
 markiert einen Tausch, ein Knopf legt die fertigen YAML-Zeilen in die
@@ -501,6 +505,10 @@ class Kachel:
     #: Grund eines harten Ausschlusses, als Badge.
     grund: str = ""
     zeit: str = ""
+    #: Aufnahmezeitpunkt. Der Bogen braucht ihn im Browser: ein hereingenommenes
+    #: Bild wird in der Ansicht "Reihenfolge" dort eingeordnet, wo
+    #: :func:`slideshow.order.apply_changes` es hinschreiben wird.
+    ts: float | None = None
 
 
 @dataclass
@@ -531,8 +539,9 @@ def _uhr(ts: float | None) -> str:
 
 def _kachel(m: MediaItem, sel: Selection, offsets: dict[str, float], *,
             gewaehlt: bool) -> Kachel:
+    ts = effective_capture_time(m, offsets)
     return Kachel(m=m, gewaehlt=gewaehlt, grund=sel.gruende.get(m.id, ""),
-                  zeit=_uhr(effective_capture_time(m, offsets)))
+                  zeit=_uhr(ts), ts=ts)
 
 
 def build_sections(sel: Selection, manifest: Manifest, *,
@@ -597,7 +606,7 @@ def build_sections(sel: Selection, manifest: Manifest, *,
                 continue
             ts = effective_capture_time(m, offsets)
             g = Gruppe(art="hart", zeit=_uhr(ts))
-            g.kacheln.append(Kachel(m=m, grund=grund, zeit=_uhr(ts)))
+            g.kacheln.append(Kachel(m=m, grund=grund, zeit=_uhr(ts), ts=ts))
             verbraucht.add(mid)
             eintraege.append((ts if ts is not None else 0.0, g))
 
@@ -630,6 +639,45 @@ def build_sections(sel: Selection, manifest: Manifest, *,
     return abschnitte
 
 
+@dataclass
+class FolgeBlock:
+    """Ein Block der ``order.yaml`` in der Ansicht "Reihenfolge"."""
+
+    name: str
+    medien: list[MediaItem] = field(default_factory=list)
+    #: "Tag 2" oder "Tag 2 bis Tag 4" — woher das Material des Blocks stammt.
+    spanne: str = ""
+
+
+def folge_bloecke(olist: OrderList, manifest: Manifest) -> list[FolgeBlock]:
+    """Die gelisteten Medien in Filmreihenfolge, gegliedert nach Bloecken.
+
+    Hier wird — anders als in :func:`build_sections` — **nicht** nach
+    Kalendertag gegliedert, sondern nach den Bloecken der Datei. Die Ansicht
+    beantwortet eine andere Frage: nicht "welches Bild aus dieser Traube?",
+    sondern "in welcher Abfolge laeuft der Film?". Und die Bloecke sind die
+    Einheit, an der ``chapters.yaml`` ihre Folien verankert.
+
+    Leere Bloecke bleiben drin: sie sind Ablageflaeche beim Ziehen, und ein
+    Block, der im Bogen fehlt, liesse sich nicht wieder fuellen.
+    """
+    by_id = {m.id: m for m in manifest.media}
+    offsets = manifest.clock_offsets
+    tag_eins = first_day(chronological(manifest), offsets)
+    out: list[FolgeBlock] = []
+    for g in olist.blocks:
+        medien = [by_id[i] for i in g.items if i in by_id]
+        zeiten = sorted(t for t in (effective_capture_time(m, offsets) for m in medien)
+                        if t is not None)
+        spanne = ""
+        if zeiten:
+            erster = day_label(zeiten[0], tag_eins)
+            letzter = day_label(zeiten[-1], tag_eins)
+            spanne = erster if erster == letzter else f"{erster} bis {letzter}"
+        out.append(FolgeBlock(name=g.name, medien=medien, spanne=spanne))
+    return out
+
+
 # --------------------------------------------------------------------------
 # HTML
 #
@@ -641,10 +689,12 @@ def build_sections(sel: Selection, manifest: Manifest, *,
 
 _CSS = """
 :root { --bg:#fbfaf8; --fg:#1d1c1a; --matt:#6d6a66; --linie:#ded9d2;
-        --gut:#1f7a4d; --raus:#b03636; --drin:#2f6f9f; --karte:#fff; }
+        --gut:#1f7a4d; --raus:#b03636; --drin:#2f6f9f; --karte:#fff;
+        --zug:#b86e0b; }
 @media (prefers-color-scheme: dark) {
   :root { --bg:#17181a; --fg:#eceae7; --matt:#9a9691; --linie:#33353a;
-          --gut:#4ec98a; --raus:#e8776f; --drin:#6fb0dd; --karte:#1f2124; }
+          --gut:#4ec98a; --raus:#e8776f; --drin:#6fb0dd; --karte:#1f2124;
+          --zug:#f0a43a; }
 }
 * { box-sizing: border-box; }
 body { margin:0; padding:0 0 5rem; background:var(--bg); color:var(--fg);
@@ -713,43 +763,348 @@ button:hover { border-color:var(--matt); }
           border:1px solid var(--linie); border-radius:7px; padding:.8rem 1rem;
           white-space:pre; font-family:Consolas, monospace; font-size:.78rem;
           display:none; }
+footer { flex-wrap:wrap; }
+.ansicht { display:inline-flex; }
+.ansicht button { border-radius:0; }
+.ansicht button:first-child { border-radius:5px 0 0 5px; }
+.ansicht button:last-child { border-radius:0 5px 5px 0; border-left:0; }
+.ansicht button[aria-pressed="true"] { background:var(--drin); color:#fff;
+                                       border-color:var(--drin); }
+/* Zwei Ansichten in einer Datei, umgeschaltet ueber ein Attribut am body.
+   Beide stehen vollstaendig im DOM: die Markierungen gelten fuer beide, und
+   die Thumbnails sind dieselben Dateien — der Browser laedt sie einmal. */
+body[data-ansicht="folge"] #auswahl, body[data-ansicht="folge"] .balken,
+body:not([data-ansicht="folge"]) #folge,
+body:not([data-ansicht="folge"]) .nur-folge { display:none; }
+#folge { counter-reset:nr; }
+#folge .hinweis-folge { color:var(--matt); font-size:.85rem;
+                        padding:.9rem 1.5rem 0; margin:0; }
+.folge-reihe { display:flex; flex-wrap:wrap; gap:.6rem; padding:.7rem 0;
+               min-height:4rem; align-items:flex-start; }
+.folge-reihe:empty { border:1px dashed var(--linie); border-radius:7px; }
+.folge-reihe:empty::after { content:"leer — hierher ziehen"; color:var(--matt);
+                            font-size:.75rem; margin:auto; }
+figure.folge { width:var(--folge); position:relative; cursor:grab; }
+figure.folge img { filter:none; }
+/* Die Laufnummer ueber CSS-Zaehler: sie folgt jedem Verschieben von selbst,
+   und ein hinausgenommenes Bild zaehlt nicht mit — die Nummer ist die
+   Position im Film, nicht in der Datei. */
+figure.folge:not(.raus) { counter-increment:nr; }
+figure.folge::before { content:counter(nr); position:absolute; left:4px; top:4px;
+                       z-index:1; background:rgba(0,0,0,.62); color:#fff;
+                       font-size:.68rem; padding:0 .35em; border-radius:3px; }
+figure.folge.raus::before { content:"—"; }
+figure.folge .dauer { position:absolute; right:4px; top:4px; z-index:1;
+                      background:rgba(0,0,0,.62); color:#fff; font-size:.68rem;
+                      padding:0 .35em; border-radius:3px; }
+figure.folge.clip img { border-bottom:4px dotted var(--matt); }
+figure.folge.verschoben img { outline:3px solid var(--zug); outline-offset:1px; }
+figure.folge.zieht { opacity:.35; }
+figure.folge .sprung { display:none; color:var(--zug); font-weight:600; }
+figure.folge.zurueck .sprung { display:inline; }
+.nur-folge input { vertical-align:middle; }
 """
 
 # Vanilla, ohne Abhaengigkeit und ohne Aufbaulauf. Der Bogen schreibt nichts —
 # er markiert und legt Text in die Zwischenablage (Entscheidung 7).
 _JS = """
 var marken = Object.create(null);
+/* Die Ansicht "Reihenfolge" — fehlt, wenn der Bogen ohne order.yaml-Bloecke
+   erzeugt wurde. Jede Funktion, die sie anfasst, prueft das. */
+var folge = document.getElementById('folge');
+/* Wurde in der Reihenfolge gezogen? Dann ist die Ausgabe die vollstaendige
+   Folge statt einer Tauschliste — siehe zeilen(). */
+var bewegt = false;
+var verschiebungen = 0;
+var zettelAus = false;
 
-function malen(el) {
-  var m = marken[el.dataset.id];
-  el.classList.toggle('rein', m === 'rein');
-  el.classList.toggle('raus', m === 'raus');
+/* Selektor ueber JSON.stringify statt von Hand gequotet: so steht im Quelltext
+   kein Attributmuster, das wie eine echte Kachel aussieht. */
+function kachel(id) { return 'figure[data-id=' + JSON.stringify(id) + ']'; }
+
+function alle(id) {
+  return document.querySelectorAll(kachel(id));
 }
 
-function setzen(el, wert) {
-  if (wert) { marken[el.dataset.id] = wert; } else { delete marken[el.dataset.id]; }
-  malen(el);
+/* Eine Markierung gilt fuer das Medium, nicht fuer die Kachel: dasselbe Bild
+   steht in beiden Ansichten, und hinaus ist hinaus, egal wo geklickt. */
+function malen(id) {
+  var m = marken[id];
+  alle(id).forEach(function (el) {
+    el.classList.toggle('rein', m === 'rein');
+    el.classList.toggle('raus', m === 'raus');
+  });
+}
+
+function setzen(id, wert) {
+  if (wert) { marken[id] = wert; } else { delete marken[id]; }
+  spiegeln(id, wert);
+  /* Erst malen, dann pruefen: pruefen() liest die Klassen, die malen() setzt. */
+  malen(id);
+  pruefen();
+}
+
+function zeit(el) {
+  var t = parseFloat(el.dataset.ts);
+  return isNaN(t) ? Infinity : t;
+}
+
+/* Ein hereingenommenes Bild erscheint auch in der Reihenfolge — sonst zeigte
+   sie nicht den Film, der nach dem Einspielen entsteht. */
+function spiegeln(id, wert) {
+  if (!folge) { return; }
+  var da = folge.querySelector(kachel(id));
+  if (wert === 'rein' && !da) {
+    var quelle = document.querySelector('#auswahl ' + kachel(id));
+    if (!quelle) { return; }
+    var neu = quelle.cloneNode(true);
+    neu.className = 'folge neu';
+    neu.draggable = true;
+    var img = neu.querySelector('img');
+    if (img) { img.draggable = false; }
+    einordnen(neu);
+  } else if (wert !== 'rein' && da && da.classList.contains('neu')) {
+    da.parentNode.removeChild(da);
+  }
+}
+
+/* Das gewaehlte Bild der Traube, aus der ein hereingenommenes stammt — in der
+   Reihenfolge, oder null (ausgelassene Traube, Bild ohne Traube). */
+function chefVon(id) {
+  var quelle = document.querySelector('#auswahl ' + kachel(id));
+  var gross = quelle ? quelle.parentNode.querySelector('figure.gross[data-id]') : null;
+  if (!gross) { return null; }
+  var el = folge.querySelector(kachel(gross.dataset.id));
+  return el && !el.classList.contains('neu') ? el : null;
+}
+
+/* Wo ein Eintrag im Sinne der Datei steht: hinter welchem gelisteten
+   Vorgaenger und in welchem Block. Hinausgenommenes, andere Kopien und
+   `ausser` zaehlen nicht — die stehen nach dem Einspielen nicht mehr da. */
+function lage(el, ausser) {
+  var els = Array.prototype.slice.call(folge.querySelectorAll('figure.folge'));
+  var p = '';
+  for (var j = els.indexOf(el) - 1; j >= 0; j--) {
+    var e = els[j];
+    if (e !== ausser && !e.classList.contains('neu') && !e.classList.contains('raus')) {
+      p = e.dataset.id;
+      break;
+    }
+  }
+  return p + '|' + el.closest('.block').dataset.name;
+}
+
+/* Ein Tausch nimmt den Platz des Bildes ein, das er ersetzt: das Geschwister
+   kommt hinter seinen Traubenchef. Nur ohne Chef gilt die Zeitregel aus
+   order.apply_changes (vor den ersten gelisteten Eintrag mit spaeterer
+   Aufnahmezeit). Die Zeitregel allein setzte das Geschwister nach einer
+   Umsortierung irgendwohin — vor das erste spaetere Bild, und das kann ein
+   nach vorn gezogenes vom Tagesende sein.
+   Weicht der Platz am Chef von dem ab, den die Zeitregel ergaebe, gilt das als
+   Bewegung: dann gibt der Bogen die ganze Folge aus, und `--apply` schreibt
+   genau das, was hier zu sehen ist. */
+function einordnen(neu) {
+  zeitlich(neu);
+  var chef = chefVon(neu.dataset.id);
+  if (!chef) { return; }
+  var vorher = lage(neu, chef);
+  chef.parentNode.insertBefore(neu, chef.nextSibling);
+  if (lage(neu, chef) !== vorher) { bewegt = true; }
+}
+
+function zeitlich(neu) {
+  var t = zeit(neu), letzter = null, ziel = null;
+  folge.querySelectorAll('figure.folge').forEach(function (el) {
+    if (ziel || el.classList.contains('neu') || el.classList.contains('raus')) {
+      return;
+    }
+    if (zeit(el) > t) { ziel = el; } else { letzter = el; }
+  });
+  if (ziel) {
+    ziel.parentNode.insertBefore(neu, ziel);
+  } else if (letzter) {
+    letzter.parentNode.insertBefore(neu, letzter.nextSibling);
+  } else {
+    var reihen = folge.querySelectorAll('.folge-reihe');
+    if (reihen.length) { reihen[reihen.length - 1].appendChild(neu); }
+  }
 }
 
 document.addEventListener('click', function (ev) {
   var el = ev.target.closest ? ev.target.closest('figure[data-id]') : null;
   if (!el) { return; }
-  var alt = marken[el.dataset.id];
+  var id = el.dataset.id;
+  var alt = marken[id];
+  if (el.classList.contains('folge')) {
+    /* In der Reihenfolge steht nur Gewaehltes: ein Klick nimmt hinaus, ein
+       zweiter zurueck. Ein hereingenommenes Bild verschwindet wieder. */
+    setzen(id, alt ? null : 'raus');
+    zaehlen();
+    return;
+  }
   var gross = el.classList.contains('gross');
-  setzen(el, alt ? null : (gross ? 'raus' : 'rein'));
+  setzen(id, alt ? null : (gross ? 'raus' : 'rein'));
   /* Ein Tausch hat zwei Seiten: wer ein Geschwister hereinholt, will das
      gewaehlte Bild derselben Traube hinaus. Automatisch mitmarkiert, aber
      einzeln wieder abwaehlbar. */
   if (!alt && !gross) {
     var chef = el.parentNode.querySelector('figure.gross[data-id]');
-    if (chef && !marken[chef.dataset.id]) { setzen(chef, 'raus'); }
+    if (chef && !marken[chef.dataset.id]) { setzen(chef.dataset.id, 'raus'); }
   }
   zaehlen();
 });
 
+/* -- Ziehen ------------------------------------------------------------ */
+
+var gezogen = null;
+
+function vorSetzen(ref, eltern) {
+  if (ref === gezogen || gezogen.nextSibling === ref && gezogen.parentNode === eltern) {
+    return;
+  }
+  eltern.insertBefore(gezogen, ref);
+  bewegt = true;
+}
+
+if (folge) {
+  folge.addEventListener('dragstart', function (ev) {
+    var el = ev.target.closest ? ev.target.closest('figure.folge') : null;
+    if (!el) { return; }
+    gezogen = el;
+    el.classList.add('zieht');
+    ev.dataTransfer.effectAllowed = 'move';
+    try { ev.dataTransfer.setData('text/plain', el.dataset.id); } catch (e) { }
+  });
+  folge.addEventListener('dragend', function () {
+    if (gezogen) { gezogen.classList.remove('zieht'); }
+    gezogen = null;
+    pruefen();
+    zaehlen();
+  });
+  /* Verschoben wird schon waehrend des Ziehens, nicht erst beim Loslassen:
+     man sieht die Luecke, in die das Bild faellt. Linke Kachelhaelfte heisst
+     davor, rechte dahinter. Nach dem Zug liegt das gezogene Bild unter dem
+     Zeiger und wird ignoriert — deshalb springt nichts hin und her. */
+  folge.addEventListener('dragover', function (ev) {
+    if (!gezogen) { return; }
+    ev.preventDefault();
+    ev.dataTransfer.dropEffect = 'move';
+    var ziel = ev.target.closest('figure.folge');
+    if (ziel === gezogen) { return; }
+    if (ziel) {
+      var r = ziel.getBoundingClientRect();
+      var davor = ev.clientX < r.left + r.width / 2;
+      vorSetzen(davor ? ziel : ziel.nextSibling, ziel.parentNode);
+      return;
+    }
+    /* Freie Flaeche einer Reihe: ein leerer Block nimmt auf, ein voller nur
+       hinter seiner letzten Kachel — sonst landete jedes Bild, das man ueber
+       eine Zeilenluecke zieht, am Blockende. */
+    var reihe = ev.target.closest('.folge-reihe');
+    if (!reihe) { return; }
+    var letzte = reihe.lastElementChild;
+    if (!letzte) { vorSetzen(null, reihe); return; }
+    var lr = letzte.getBoundingClientRect();
+    if (ev.clientY > lr.bottom || (ev.clientY >= lr.top && ev.clientX > lr.right)) {
+      vorSetzen(null, reihe);
+    }
+  });
+  folge.addEventListener('drop', function (ev) { ev.preventDefault(); });
+}
+
+/* Laengste aufsteigende Teilfolge: was nicht darin liegt, ist die kleinste
+   Menge an Bildern, die bewegt werden musste. Ein Bild nach vorn gezogen ist
+   so "1 verschoben", nicht jedes Bild dazwischen. */
+function lis(a) {
+  var enden = [], wo = [], vor = [], drin = a.map(function () { return false; });
+  a.forEach(function (x, i) {
+    var lo = 0, hi = enden.length;
+    while (lo < hi) { var mi = (lo + hi) >> 1; if (enden[mi] < x) { lo = mi + 1; } else { hi = mi; } }
+    enden[lo] = x; wo[lo] = i; vor[i] = lo ? wo[lo - 1] : -1;
+  });
+  var i = wo.length ? wo[wo.length - 1] : -1;
+  while (i >= 0) { drin[i] = true; i = vor[i]; }
+  return drin;
+}
+
+function pruefen() {
+  if (!folge) { return; }
+  var els = Array.prototype.slice.call(folge.querySelectorAll('figure.folge'));
+  var alt = els.filter(function (el) {
+    return !el.classList.contains('neu') && !el.classList.contains('raus');
+  });
+  /* Ein Blockwechsel ist immer eine Bewegung; die Teilfolge wird nur ueber
+     die gerechnet, die ihren Block behalten — genau wie in
+     order.apply_reorder, damit Bogen und Bericht dieselbe Zahl nennen. */
+  var gleich = alt.filter(function (el) {
+    return el.closest('.block').dataset.name === el.dataset.ub;
+  });
+  var ruhig = lis(gleich.map(function (el) { return +el.dataset.ur; }));
+  var steht = new Set();
+  gleich.forEach(function (el, k) { if (ruhig[k]) { steht.add(el); } });
+  verschiebungen = 0;
+  els.forEach(function (el) { el.classList.remove('verschoben'); });
+  alt.forEach(function (el) {
+    if (!steht.has(el)) {
+      el.classList.add('verschoben');
+      verschiebungen++;
+    }
+  });
+  /* Zeitsprung rueckwaerts gegenueber dem Vorgaenger im Film. Kein Fehler —
+     ein thematischer Film springt —, aber genau die Stelle, an der man
+     hinsieht, ob der Sprung gewollt ist. */
+  var vorher = null;
+  els.forEach(function (el) {
+    if (el.classList.contains('raus')) { el.classList.remove('zurueck'); return; }
+    var t = zeit(el);
+    el.classList.toggle('zurueck', vorher !== null && isFinite(t) && t < vorher);
+    if (isFinite(t)) { vorher = t; }
+  });
+  folge.querySelectorAll('.block').forEach(function (b) {
+    var n = b.querySelectorAll('figure.folge:not(.raus)').length;
+    var feld = b.querySelector('.anzahl');
+    if (feld) { feld.textContent = n; }
+  });
+}
+
+function zuruecksetzen() {
+  if (!folge) { return; }
+  var reihen = Object.create(null);
+  folge.querySelectorAll('.block').forEach(function (b) {
+    reihen[b.dataset.name] = b.querySelector('.folge-reihe');
+  });
+  var els = Array.prototype.slice.call(folge.querySelectorAll('figure.folge'));
+  var neu = els.filter(function (el) { return el.classList.contains('neu'); });
+  els.filter(function (el) { return !el.classList.contains('neu'); })
+    .sort(function (a, b) { return a.dataset.ur - b.dataset.ur; })
+    .forEach(function (el) { reihen[el.dataset.ub].appendChild(el); });
+  /* Vor dem Wiedereinordnen, nicht danach: einordnen() darf `bewegt` wieder
+     setzen, wenn ein Tausch am Chef anders steht als nach der Zeitregel. */
+  bewegt = false;
+  neu.sort(function (a, b) { return zeit(a) - zeit(b); })
+    .forEach(function (el) { el.parentNode.removeChild(el); einordnen(el); });
+  pruefen();
+  zaehlen();
+}
+
+function groesse(px) {
+  if (folge) { folge.style.setProperty('--folge', px + 'px'); }
+}
+
+function ansicht(name) {
+  document.body.dataset.ansicht = name;
+  document.querySelectorAll('.ansicht button').forEach(function (b) {
+    b.setAttribute('aria-pressed', b.dataset.ansicht === name ? 'true' : 'false');
+  });
+  try { location.replace('#ansicht=' + name); } catch (e) { }
+}
+
+/* -- Ausgabe ----------------------------------------------------------- */
+
 function zeilen() {
+  if (folge && bewegt) { return folgezeilen(); }
   var rein = [], raus = [], out = [];
-  document.querySelectorAll('figure[data-id]').forEach(function (el) {
+  document.querySelectorAll('#auswahl figure[data-id]').forEach(function (el) {
     var m = marken[el.dataset.id];
     if (m === 'rein') { rein.push(el.dataset.id); }
     if (m === 'raus') { raus.push(el.dataset.id); }
@@ -765,14 +1120,55 @@ function zeilen() {
   return out.join('\\n');
 }
 
+/* Nach einem Zug genuegt eine Tauschliste nicht mehr: ausgegeben wird die
+   ganze Folge, Block fuer Block. `stand` ist die Pruefsumme der order.yaml,
+   aus der der Bogen entstand — `order --apply` weigert sich, eine inzwischen
+   geaenderte Datei damit zu ueberschreiben. */
+function folgezeilen() {
+  var n = Object.keys(marken).length;
+  if (!verschiebungen && !n) { return ''; }
+  var rein = 0, raus = 0, koerper = [];
+  folge.querySelectorAll('.block').forEach(function (b) {
+    koerper.push('# block: ' + b.dataset.name);
+    b.querySelectorAll('figure.folge').forEach(function (el) {
+      var id = el.dataset.id;
+      if (marken[id] === 'raus') { koerper.push('      #  raus: ' + id); raus++; }
+      else { koerper.push('      - ' + id); if (marken[id] === 'rein') { rein++; } }
+    });
+  });
+  return ['# Kontaktbogen: neue Reihenfolge — ' + verschiebungen + ' verschoben, '
+          + rein + ' herein, ' + raus + ' hinaus.',
+          '# Einspielen: slideshow order --apply auswahl.txt',
+          '# reihenfolge',
+          '# stand: ' + folge.dataset.stand].concat(koerper).join('\\n');
+}
+
 function zaehlen() {
   var n = Object.keys(marken).length;
+  var teile = [];
+  if (n) { teile.push(n + ' markiert'); }
+  if (verschiebungen) { teile.push(verschiebungen + ' verschoben'); }
   document.getElementById('stand').textContent =
-    n ? n + ' markiert' : 'nichts markiert';
+    teile.length ? teile.join(', ') : 'nichts markiert';
   var z = document.getElementById('zettel');
-  z.textContent = zeilen();
-  z.style.display = n ? 'block' : 'none';
+  var text = zeilen();
+  z.textContent = text;
+  z.style.display = text && !zettelAus ? 'block' : 'none';
 }
+
+/* Der Zettel liegt ueber den Kacheln. Beim Sortieren steht dort die ganze
+   Folge, und er verdeckt genau die Ecke, in die man ziehen will. */
+function zettel() {
+  zettelAus = !zettelAus;
+  zaehlen();
+}
+
+(function () {
+  var m = /ansicht=(\\w+)/.exec(location.hash || '');
+  if (m && folge) { ansicht(m[1]); }
+  else { ansicht(document.body.dataset.ansicht || 'auswahl'); }
+  pruefen();
+})();
 
 function kopieren() {
   var text = zeilen();
@@ -873,6 +1269,64 @@ def parse_changes(text: str) -> tuple[list[str], list[str], list[tuple[int, str]
     return (rein, raus, unklar)
 
 
+#: ``# reihenfolge`` — kennzeichnet die Ausgabe der Ansicht "Reihenfolge".
+_FOLGE = re.compile(r"^\s*#\s*reihenfolge\s*$")
+#: ``# stand: 3fa2…`` — :func:`slideshow.order.order_fingerprint` beim Erzeugen.
+_STAND = re.compile(r"^\s*#\s*stand:\s*([0-9a-f]+)\s*$")
+#: ``# block: tag-2`` — Beginn eines Blocks; in der flachen Form leer.
+_BLOCK = re.compile(r"^\s*#\s*block:\s*(\S*)\s*$")
+
+
+@dataclass
+class Umsortierung:
+    """Die zerlegte Ausgabe der Ansicht "Reihenfolge"."""
+
+    #: Pruefsumme der ``order.yaml``, aus der der Bogen entstand.
+    stand: str | None = None
+    #: Je Block: Name und Eintraege in Filmreihenfolge, (ID, hinaus?).
+    bloecke: list[tuple[str, list[tuple[str, bool]]]] = field(default_factory=list)
+    unklar: list[tuple[int, str]] = field(default_factory=list)
+
+
+def parse_reorder(text: str) -> Umsortierung | None:
+    """Zerlegt eine vollstaendige Reihenfolge aus dem Bogen — oder ``None``,
+    wenn der Text eine gewoehnliche Tauschliste ist (:func:`parse_changes`).
+
+    Unterschieden wird an der Zeile ``# reihenfolge``, nicht am Aufbau: eine
+    Tauschliste mit lauter ``- id``-Zeilen saehe sonst aus wie ein einziger
+    Block, und ``--apply`` schriebe aus drei Tauschen eine Folge aus drei
+    Bildern.
+    """
+    zeilen = text.lstrip(_BOM).splitlines()
+    if not any(_FOLGE.match(z) for z in zeilen):
+        return None
+    out = Umsortierung()
+    for nr, zeile in enumerate(zeilen, start=1):
+        if not zeile.strip() or _FOLGE.match(zeile):
+            continue
+        m = _STAND.match(zeile)
+        if m:
+            out.stand = m.group(1)
+            continue
+        m = _BLOCK.match(zeile)
+        if m:
+            out.bloecke.append((m.group(1), []))
+            continue
+        m = _RAUS.match(zeile) or _REIN.match(zeile)
+        if m:
+            if not out.bloecke:
+                # Ein Eintrag vor dem ersten Block gehoert nirgends hin — und
+                # einfach den ersten Block zu nehmen hiesse raten.
+                out.unklar.append((nr, zeile.strip()))
+                continue
+            out.bloecke[-1][1].append((m.group(1), m.re is _RAUS))
+            continue
+        if zeile.lstrip().startswith("#"):
+            continue
+        out.unklar.append((nr, zeile.strip()))
+    return out
+
+
 def _e(text: str) -> str:
     return html.escape(str(text), quote=True)
 
@@ -916,8 +1370,67 @@ def _kachel_html(k: Kachel, thumbs: dict[str, Path], base: Path | None) -> str:
     # Beim gewaehlten Bild traegt die Kennung die Farbe mit. Die Kachel selbst
     # ist beim Scrollen oft halb aus dem Bild; die Zeile darunter nicht.
     kennung = f"<strong>{_e(k.m.id)}</strong>" if k.gewaehlt else _e(k.m.id)
-    return (f"<figure{klasse} data-id=\"{_e(k.m.id)}\">{bild}"
+    ts = f' data-ts="{k.ts:.3f}"' if k.ts is not None else ""
+    return (f"<figure{klasse} data-id=\"{_e(k.m.id)}\"{ts}>{bild}"
             f'<figcaption>{kennung}<br>{_e(k.zeit)}{zusatz}</figcaption></figure>')
+
+
+def _clipdauer(m: MediaItem) -> str:
+    info = m.clip
+    dauer = (info.effective_duration or info.duration) if info else 0.0
+    return f"{dauer:.1f} s".replace(".", ",")
+
+
+def _folge_html(bloecke: list[FolgeBlock], thumbs: dict[str, Path],
+                base: Path | None, manifest: Manifest, *, stand: str) -> str:
+    """Die Ansicht "Reihenfolge": nur die gelisteten Medien, in Filmreihenfolge.
+
+    Jede Kachel traegt ihren Ausgangsplatz (``data-ur``, ``data-ub``) mit. Das
+    Skript braucht ihn, um zu zeigen, *was* bewegt wurde, und um auf Knopfdruck
+    zum Stand der Datei zurueckzukehren — ohne dass der Bogen etwas speichert.
+    """
+    offsets = manifest.clock_offsets
+    tag_eins = first_day(chronological(manifest), offsets)
+    teile: list[str] = []
+    ur = 0
+    for b in bloecke:
+        kacheln: list[str] = []
+        for m in b.medien:
+            ts = effective_capture_time(m, offsets)
+            pfad = thumbs.get(m.id)
+            bild = (f'<img loading="lazy" decoding="async" draggable="false" alt="" '
+                    f'src="{_e(_rel(pfad, base))}">' if pfad is not None
+                    else '<div class="leer">kein Thumbnail</div>')
+            klasse = "folge clip" if m.kind == "clip" else "folge"
+            dauer = (f'<span class="dauer">Clip {_e(_clipdauer(m))}</span>'
+                     if m.kind == "clip" else "")
+            wann = (f"{day_label(ts, tag_eins)} · {_uhr(ts)}" if ts is not None
+                    else "ohne Zeit")
+            if m.kind != "clip" and m.image is not None and m.image.portrait:
+                wann += " · hoch"
+            daten = (f'data-id="{_e(m.id)}" data-ur="{ur}" data-ub="{_e(b.name)}"'
+                     + (f' data-ts="{ts:.3f}"' if ts is not None else ""))
+            kacheln.append(
+                f'<figure class="{klasse}" draggable="true" {daten}>{bild}{dauer}'
+                f"<figcaption><strong>{_e(m.id)}</strong><br>{_e(wann)}"
+                f' <span class="sprung" title="frueher aufgenommen als das Bild '
+                f'davor">↶</span></figcaption></figure>')
+            ur += 1
+        titel = b.name or "Reihenfolge"
+        info = f'<b class="anzahl">{len(b.medien)}</b> Medien'
+        if b.spanne:
+            info += f" · {_e(b.spanne)}"
+        teile.append(f'<section class="block" data-name="{_e(b.name)}">'
+                     f"<h2>{_e(titel)}<span>{info}</span></h2>"
+                     f'<div class="reihe folge-reihe">{"".join(kacheln)}</div>'
+                     f"</section>")
+    hinweis = ('<p class="hinweis-folge">Nur die gelisteten Medien, in der '
+               "Reihenfolge des Films und nach den Bloecken der order.yaml. "
+               "Ziehen verschiebt, ein Klick nimmt hinaus. Orange umrandet ist, "
+               "was bewegt wurde; ↶ markiert einen Zeitsprung zurueck. Bloecke "
+               "bleiben, wie sie sind — Kapitel haengen an ihren Namen.</p>")
+    return (f'<main id="folge" data-stand="{_e(stand)}">{hinweis}'
+            f'{"".join(teile)}</main>')
 
 
 def _kopf_html(sel: Selection, quelle: str, gezeigt: int) -> str:
@@ -962,14 +1475,32 @@ def _balken_html(sel: Selection) -> str:
     return f'<div class="balken">{"".join(zeilen)}</div>'
 
 
+#: Die beiden Ansichten des Bogens; der Wert landet als ``data-ansicht`` am body.
+ANSICHTEN = ("auswahl", "folge")
+
+
 def dump_sheet_html(sel: Selection, thumbs: dict[str, Path], manifest: Manifest, *,
                     base: Path | None = None, nur_auswahl: bool = False,
-                    thumb: int = THUMB_SIZE, quelle: str = "order.yaml") -> str:
+                    thumb: int = THUMB_SIZE, quelle: str = "order.yaml",
+                    folge: list[FolgeBlock] | None = None, stand: str = "",
+                    ansicht: str = "auswahl") -> str:
     """Baut den Kontaktbogen als eine einzige, in sich geschlossene HTML-Datei.
 
     ``base`` ist das Verzeichnis, in dem die Datei landet — die Verweise auf
     ``cache/thumbs/`` werden relativ dazu gebildet.
+
+    Mit ``folge`` (aus :func:`folge_bloecke`) bekommt der Bogen eine zweite
+    Ansicht, "Reihenfolge", umschaltbar unten links; ``ansicht`` bestimmt, mit
+    welcher er aufgeht. **Eine Datei mit zwei Ansichten statt zweier Dateien**:
+    wer in der Reihenfolge ein Bild hinausnimmt, will in der Auswahl sein
+    Geschwister sehen, und Markierungen, die in zwei Fenstern leben, laufen
+    auseinander. ``stand`` ist :func:`slideshow.order.order_fingerprint` der
+    Datei, aus der der Bogen entsteht.
     """
+    if ansicht not in ANSICHTEN:
+        raise ValueError(f"unbekannte Ansicht {ansicht!r}")
+    if folge is None:
+        ansicht = "auswahl"
     abschnitte = build_sections(sel, manifest, nur_auswahl=nur_auswahl)
     teile: list[str] = []
     gezeigt = 0
@@ -988,16 +1519,37 @@ def dump_sheet_html(sel: Selection, thumbs: dict[str, Path], manifest: Manifest,
 
     gross = int(round(thumb * 0.85))
     klein = int(round(thumb * 0.42))
-    stil = (f":root {{ --gross:{gross}px; --klein:{klein}px; }}" + _CSS)
+    mittel = int(round(thumb * 0.5))
+    stil = (f":root {{ --gross:{gross}px; --klein:{klein}px; --folge:{mittel}px; }}"
+            + _CSS)
+
+    umschalter = ""
+    folge_html = ""
+    if folge is not None:
+        folge_html = _folge_html(folge, thumbs, base, manifest, stand=stand) + "\n"
+        umschalter = (
+            '<span class="ansicht">'
+            '<button type="button" data-ansicht="auswahl" '
+            "onclick=\"ansicht('auswahl')\">Auswahl</button>"
+            '<button type="button" data-ansicht="folge" '
+            "onclick=\"ansicht('folge')\">Reihenfolge</button></span>"
+            '<span class="nur-folge"><label>Kacheln '
+            f'<input type="range" min="80" max="{thumb}" value="{mittel}" '
+            'oninput="groesse(this.value)"></label></span>'
+            '<button type="button" class="nur-folge" onclick="zuruecksetzen()">'
+            "Reihenfolge zuruecksetzen</button>")
     return (
         "<!DOCTYPE html>\n"
         '<html lang="de">\n<head>\n<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         "<title>Kontaktbogen</title>\n"
-        f"<style>{stil}</style>\n</head>\n<body>\n"
+        f"<style>{stil}</style>\n</head>\n"
+        f'<body data-ansicht="{ansicht}">\n'
         + _kopf_html(sel, quelle, gezeigt) + "\n"
-        + "\n".join(teile)
-        + "\n<footer><span id=\"stand\">nichts markiert</span>"
+        + '<main id="auswahl">' + "\n".join(teile) + "</main>\n"
+        + folge_html
+        + "<footer>" + umschalter + '<span id="stand">nichts markiert</span>'
+          '<button type="button" onclick="zettel()">Zettel</button>'
           '<button type="button" onclick="herunterladen()">Aenderungen '
           "speichern</button>"
           '<button type="button" onclick="kopieren()">Zeilen kopieren</button>'

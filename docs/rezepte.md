@@ -389,6 +389,7 @@ Technische Ausschlüsse tragen ihren Grund als rotes Schild (`zu klein:
 
 ```bash
 slideshow sheet --selected           # nur die Auswahl, ohne die Alternativen
+slideshow sheet --sequence           # mit der Ansicht „Reihenfolge“ öffnen
 slideshow sheet --thumb 480          # größere Kacheln
 slideshow sheet --order alt.yaml     # eine andere Auswahl ansehen
 slideshow sheet --refresh-thumbs     # Vorschaubilder neu bauen
@@ -416,6 +417,41 @@ Der Vorgang ist wiederholbar: dieselbe Liste zweimal eingespielt ändert beim
 zweiten Mal nichts, und was schon drinsteht oder gar nicht drin war, meldet
 sich, statt den Lauf abzubrechen. Danach `slideshow sheet` noch einmal, und der
 Bogen zeigt den neuen Stand.
+
+**Die Reihenfolge beurteilen und umsortieren.** Unten links schaltet der Bogen
+zwischen zwei Ansichten um. **Auswahl** ist das oben Beschriebene: nach
+Kalendertagen, mit allen Alternativen. **Reihenfolge** zeigt nur, was in
+`order.yaml` gelistet ist, in der Abfolge des Films und gegliedert nach den
+Blöcken der Datei. Jede Kachel trägt ihre Laufnummer, Clips ihre Dauer und
+einen gepunkteten Rand. Ein ↶ hinter der Uhrzeit markiert einen Zeitsprung
+zurück gegenüber dem Bild davor. Das ist kein Fehler, aber genau die Stelle, an
+der man hinsieht, ob der Sprung gewollt ist.
+
+```bash
+slideshow sheet --sequence             # öffnet gleich in der Reihenfolge
+slideshow sheet --sequence --selected  # dazu nur die Thumbnails der Auswahl
+```
+
+- **Ziehen verschiebt**, auch in einen anderen Block; ein leerer Block nimmt
+  auf. Orange umrandet ist, was bewegt wurde, und zwar nur das: ein Bild nach
+  vorn gezogen heißt „1 verschoben“, nicht jedes Bild dazwischen.
+- **Ein Klick nimmt hinaus**, in beiden Ansichten zugleich. Ein in der Auswahl
+  hereingenommenes Geschwister erscheint in der Reihenfolge grün, direkt hinter
+  dem Bild, das es ersetzt.
+- **„Reihenfolge zurücksetzen“** stellt die Folge der Datei wieder her, der
+  Schieber stellt die Kachelgröße ein (klein für weite Wege), „Zettel“ blendet
+  die Ausgabe aus, wenn sie beim Ziehen im Weg ist.
+- **Blöcke bleiben, wie sie sind.** Umbenennen, neu anlegen und umstellen geht
+  weiter in der Datei: an den Namen hängen die Kapitel (`group:`).
+
+Eingespielt wird mit demselben Kommando, `slideshow order --apply auswahl.txt`.
+Nach einem Zug gibt der Bogen statt der Tauschliste die **ganze Folge** aus,
+samt einer Prüfsumme der `order.yaml`, aus der er entstand. Wurde die Datei
+seither von Hand geändert, bricht `--apply` ab, statt diese Änderungen mit
+einer älteren Folge zu überschreiben: dann erst den Bogen neu erzeugen. In der
+Datei wandern nur die bewegten Zeilen, die `statt:`-Zeilen mit ihrem Bild.
+Kommentare, Abwahl und ausgelassene Trauben bleiben stehen. Umsortieren lässt
+sich nur die Blockform mit einem Eintrag je Zeile, nicht `order: [a, b, c]`.
 
 **Worauf achten.**
 
