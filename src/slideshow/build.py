@@ -407,6 +407,26 @@ def insert_titles(intents: list[Intent], chapters: list[Chapter],
             continue
         treffer = next((p for p, m in enumerate(verwendet) if m.id == kap.before), None)
         if treffer is None:
+            # Der haeufigere Fall ist nicht die falsche ID, sondern ein Bild,
+            # das erst nach `preprocess` von Hand in order.yaml kam — die
+            # Meldung muss dann auf den fehlenden Lauf zeigen, nicht aufs Manifest.
+            ohne = next((m for m in media if m.id == kap.before and not m.cache_path), None)
+            if ohne is not None:
+                raise SchemaError(
+                    f"Kapitel {kap.title!r} verweist auf die Medien-ID {kap.before!r}. "
+                    f"Sie steht im Manifest, hat aber noch kein Zwischenprodukt — "
+                    f"`slideshow preprocess` erneut laufen lassen (es folgt order.yaml).",
+                    path="chapters")
+            # `media` ist die aufgeloeste Folge, nicht das Manifest: ein Bild,
+            # das `rest: drop` weggelassen hat, steht dort nicht. Es gibt die
+            # ID trotzdem — "gibt es nicht" schickte den Leser auf Tippfehlersuche.
+            if manifest is not None and any(m.id == kap.before for m in manifest.media):
+                raise SchemaError(
+                    f"Kapitel {kap.title!r} verweist auf die Medien-ID {kap.before!r}. "
+                    f"Sie steht im Manifest, aber nicht im Film — order.yaml listet "
+                    f"sie nicht (oder nur als Kommentar). Entweder dort eintragen "
+                    f"oder das Kapitel an ein gelistetes Bild haengen (`group:` "
+                    f"ueberlebt solche Aenderungen).", path="chapters")
             raise SchemaError(
                 f"Kapitel {kap.title!r} verweist auf die Medien-ID {kap.before!r}, "
                 f"die es nicht gibt (oder die kein Zwischenprodukt hat). "

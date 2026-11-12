@@ -690,6 +690,48 @@ def test_ein_clip_taugt_nicht_als_hintergrund():
     assert "ist ein Clip" in str(exc.value)
 
 
+def test_ein_anker_ohne_zwischenprodukt_verweist_auf_preprocess():
+    """Der haeufige Fall: das Bild kam nach ``preprocess`` in die order.yaml.
+    Die Meldung muss auf den fehlenden Lauf zeigen, nicht auf eine falsche ID."""
+    from slideshow.build import insert_titles
+    from slideshow.planner import Intent
+
+    media = [MediaItem(id="img_001", path="src/img_001.jpg", kind="image",
+                       cache_path="cache/img_001.jpg"),
+             MediaItem(id="img_002", path="src/img_002.jpg", kind="image")]
+    intents = [Intent(kind="still", src="cache/img_001.jpg", index=0)]
+    with pytest.raises(SchemaError) as exc:
+        insert_titles(intents, [Chapter(before="img_002", title="Malmoe")],
+                      media, Defaults(), (1280, 720))
+    assert "slideshow preprocess" in str(exc.value)
+    assert "Malmoe" in str(exc.value)
+
+    # Eine wirklich unbekannte ID bekommt weiter die alte Meldung.
+    with pytest.raises(SchemaError) as exc:
+        insert_titles(intents, [Chapter(before="img_999", title="Malmoe")],
+                      media, Defaults(), (1280, 720))
+    assert "die es nicht gibt" in str(exc.value)
+
+
+def test_ein_anker_ausserhalb_der_reihenfolge_wird_als_solcher_gemeldet():
+    """``rest: drop`` hat das Bild weggelassen: es steht im Manifest, aber nicht
+    in der aufgeloesten Folge. "Gibt es nicht" schickte auf Tippfehlersuche."""
+    from slideshow.build import insert_titles
+    from slideshow.planner import Intent
+
+    gelistet = MediaItem(id="img_001", path="src/img_001.jpg", kind="image",
+                         cache_path="cache/img_001.jpg")
+    weggelassen = MediaItem(id="img_002", path="src/img_002.jpg", kind="image",
+                            cache_path="cache/img_002.jpg")
+    intents = [Intent(kind="still", src="cache/img_001.jpg", index=0)]
+    with pytest.raises(SchemaError) as exc:
+        insert_titles(intents, [Chapter(before="img_002", title="Malmoe")],
+                      [gelistet], Defaults(), (1280, 720),
+                      manifest=Manifest(media=[gelistet, weggelassen]))
+    assert "nicht im Film" in str(exc.value)
+    assert "order.yaml" in str(exc.value)
+
+
 def test_ein_unbekannter_hintergrund_nennt_das_kapitel():
     """Sonst kaeme die Meldung erst aus ``_validate_sources`` — mit einem
     Segmentindex, den man in ``chapters.yaml`` nicht wiederfindet."""
