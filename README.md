@@ -291,7 +291,8 @@ unverändert, nur eben mit der bisherigen Kamerafahrt.
 
 ## Bildanalyse und Datenschutz
 
-`slideshow analyze` schickt die vorverarbeiteten Bilder an die Claude-API und
+`slideshow analyze` schickt die vorverarbeiteten Bilder des Films (die Auswahl
+aus `order.yaml`, mit `--all` alle) an die Claude-API und
 fragt, **was darauf zu sehen ist**: Szene, Bildachse, Zielpunkt, was nicht
 angeschnitten werden darf. Aus diesen Fakten rechnet `build` die Kamerafahrt —
 gefragt wird nie nach der Bewegung selbst, denn eine gelieferte Bounding-Box

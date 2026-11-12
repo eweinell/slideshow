@@ -181,6 +181,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="ueber Amazon Bedrock statt die Erstanbieter-API; ohne "
                          "Angabe eu-central-1. Die Bilder verlassen die Region "
                          "nicht, kosten dafuer 10 %% Aufpreis")
+    an.add_argument("--order", default=None, metavar="order.yaml",
+                    help="nur die dort genannten Bilder analysieren (Default: "
+                         "order.yaml im Projekt, falls vorhanden) — bezahlt wird "
+                         "nur, was in den Film kommt")
+    an.add_argument("--all", action="store_true",
+                    help="alle vorverarbeiteten Bilder analysieren, auch was die "
+                         "Auswahl auslaesst")
     an.add_argument("--batch", action="store_true",
                     help="ueber die Message-Batches-API — halber Preis, aber die "
                          "Auftraege liegen dort 29 Tage")
@@ -1014,13 +1021,25 @@ def cmd_analyze(args, project: Project) -> int:
     modell = args.model or v.DEFAULT_MODEL
     bedrock = args.bedrock
 
-    # Analysiert wird, was auch im Film landet: ``preprocess`` normalisiert seit
-    # der Auswahl nur noch die gewaehlten Medien, und das ist hier ein Geschenk
-    # — es werden 187 Bilder analysiert und nicht 1240.
+    # Analysiert wird, was im Film landet — nach derselben Regel wie bei
+    # `preprocess` (`_auswahl`), und nicht mittelbar ueber "hat ein Cache-Bild".
+    # Der Umweg traf meist dasselbe, aber nicht immer: ein Bild, das nach
+    # `preprocess` aus order.yaml genommen wurde, behaelt seinen Cache-Pfad und
+    # wurde trotzdem bezahlt; und nach `preprocess --all` gingen alle 1348
+    # Bilder von kenia-2026 hinaus statt der 447 im Film.
+    only = None if args.all else _auswahl(project, args.order, manifest)
     pfade: dict[str, Path] = {}
     fehlend: list[str] = []
+    ohne_cache: list[str] = []
+    draussen = 0
     for m in manifest.media:
-        if m.kind != "image" or not m.cache_path:
+        if m.kind != "image":
+            continue
+        if only is not None and m.id not in only:
+            draussen += bool(m.cache_path)
+            continue
+        if not m.cache_path:
+            ohne_cache.append(m.id)
             continue
         datei = project.abs(m.cache_path)
         if datei.exists():
@@ -1033,6 +1052,19 @@ def cmd_analyze(args, project: Project) -> int:
             "zuerst laufen lassen — analysiert wird das normalisierte "
             "Cache-Bild, damit die Koordinaten ohne Umrechnung fuer die "
             "Kamerafahrt gelten.")
+    if draussen:
+        con.print(f"[dim]{draussen} vorverarbeitete Bilder stehen nicht in der "
+                  f"Auswahl und bleiben aussen vor (`--all` nimmt sie mit).[/dim]")
+    if ohne_cache:
+        # Im Film, aber nie vorverarbeitet — meist nach `preprocess` in
+        # order.yaml aufgenommen. Ohne Analyse laufen sie ueber die heutige
+        # Rotation; das soll man vor dem Bezahlen wissen, nicht nach dem Render.
+        con.print(f"[yellow]{len(ohne_cache)} Bilder im Film haben noch kein "
+                  f"Cache-Bild und werden nicht analysiert — `slideshow "
+                  f"preprocess` erneut laufen lassen: "
+                  f"{', '.join(ohne_cache[:8])}"
+                  + (f" (+{len(ohne_cache) - 8} weitere)" if len(ohne_cache) > 8
+                     else "") + "[/yellow]")
     if fehlend:
         con.print(f"[yellow]{len(fehlend)} Cache-Bilder aus dem Manifest fehlen "
                   f"auf der Platte und werden uebersprungen.[/yellow]")
@@ -1043,7 +1075,21 @@ def cmd_analyze(args, project: Project) -> int:
                                       prompt=v.PROMPT_VERSION)
 
     if args.count_tokens:
-        n, je = v.tokens_zaehlen(pfade, modell=modell)
+        # Die Zaehlung ist kostenlos, aber die Bilder gehen trotzdem an die API
+        # — dieselbe Rueckfrage wie beim Analysieren (E6), und `--dry-run`
+        # sendet auch hier nichts.
+        proben = min(v.ZAEHL_PROBEN, len(pfade))
+        if not _datenschutz_bestaetigt(con, modell=modell, anzahl=proben,
+                                       bedrock=None, schaetzung=None,
+                                       ja=args.yes or args.dry_run,
+                                       kosten="die Zaehlung ist kostenlos"):
+            con.print("Abgebrochen — nichts gesendet.")
+            return 0
+        if args.dry_run:
+            con.print(f"[dim]--dry-run: {proben} Zaehlanfragen an {modell} "
+                      f"unterblieben.[/dim]")
+            return 0
+        n, je = v.tokens_zaehlen(pfade, modell=modell, proben=proben)
         con.print(f"{n} Bilder nachgemessen: [bold]{je} Eingabetokens je "
                   f"Anfrage[/bold] (Annahme in der Rechnung: "
                   f"{v.TOKENS_BILD + v.TOKENS_TEXT + v.TOKENS_PRAEFIX}).")
@@ -1121,18 +1167,23 @@ def cmd_analyze(args, project: Project) -> int:
 
 
 def _datenschutz_bestaetigt(con, *, modell: str, anzahl: int, bedrock: str | None,
-                            schaetzung: float | None, ja: bool) -> bool:
+                            schaetzung: float | None, ja: bool,
+                            kosten: str | None = None) -> bool:
     """Die einmalige Rueckfrage vor dem ersten Senden (Entscheidung E6).
 
     Kein stiller Schritt in einer anderen Phase: dass private Urlaubsfotos mit
     erkennbaren Personen an einen externen Dienst gehen, muss dastehen, bevor
     es passiert. Und es muss die **richtige** Tabelle sein — auf Bedrock gelten
     andere Zusagen als bei Anthropic, im Guten wie im Ungewissen.
+
+    ``kosten`` ersetzt die Schaetzung durch einen eigenen Text — fuer die
+    Tokenzaehlung, die nichts kostet und trotzdem Bilder verschickt.
     """
     ziel = f"Amazon Bedrock ({bedrock})" if bedrock else "die Claude-API"
+    if kosten is None and schaetzung is not None:
+        kosten = f"geschaetzt {schaetzung:.2f} USD"
     con.print(f"\n[bold]{anzahl} Bilder gehen an {ziel}[/bold], Modell {modell}"
-              + (f", geschaetzt {schaetzung:.2f} USD." if schaetzung is not None
-                 else "."))
+              + (f", {kosten}." if kosten else "."))
     for zeile in (v_datenschutz(bedrock)):
         con.print(f"  • {zeile}")
     if ja:

@@ -300,6 +300,136 @@ def test_bedrock_mit_batch_oder_tokenzaehlung_bricht_ab_bevor_etwas_gesendet_wir
     assert schalter in str(exc.value)
 
 
+def _zaehlprojekt(tmp_path: Path, anzahl: int, *, ohne_cache: int = 0):
+    """Ein Projekt mit ``anzahl`` Cache-Bildern — Bildpunkte braucht es nicht,
+    die Anfragen selbst werden ersetzt. ``ohne_cache`` weitere Bilder sind
+    erfasst, aber nie vorverarbeitet."""
+    from slideshow.models import ImageInfo, Manifest, MediaItem
+    from slideshow.paths import Project
+
+    (tmp_path / "cache").mkdir()
+    media = []
+    for i in range(anzahl + ohne_cache):
+        cache = ""
+        if i < anzahl:
+            (tmp_path / "cache" / f"img_{i}.jpg").write_bytes(b"jpeg %d" % i)
+            cache = f"cache/img_{i}.jpg"
+        media.append(MediaItem(id=f"img_{i}", path=f"src/img_{i}.jpg", kind="image",
+                               cache_path=cache,
+                               image=ImageInfo(width=6000, height=4000)))
+    project = Project.open(tmp_path)
+    Manifest(media=media).save(project.manifest)
+    return project
+
+
+@pytest.mark.parametrize("schalter, antwort, gesendet", [
+    (["--count-tokens"], "n", False),
+    (["--count-tokens", "--dry-run"], None, False),
+    (["--count-tokens", "--yes"], None, True),
+])
+def test_die_tokenzaehlung_fragt_vor_dem_senden(schalter, antwort, gesendet,
+                                                tmp_path: Path, monkeypatch, capsys):
+    """Die Zaehlung kostet nichts, verschickt aber Fotos — dieselbe Rueckfrage
+    wie beim Analysieren (E6). Und ``--dry-run`` sendet auch hier nichts."""
+    import builtins
+
+    from slideshow import cli
+
+    project = _zaehlprojekt(tmp_path, 7)
+    aufrufe: list[int] = []
+
+    def zaehlen(pfade, *, modell, proben):
+        aufrufe.append(proben)
+        return (proben, 2900)
+
+    monkeypatch.setattr(vision, "tokens_zaehlen", zaehlen)
+    monkeypatch.setattr(builtins, "input", lambda _p="": antwort or "")
+    globale = ["--dry-run"] if "--dry-run" in schalter else []
+    lokale = [s for s in schalter if s != "--dry-run"]
+    args = cli.build_parser().parse_args(
+        ["--project", str(tmp_path), *globale, "analyze", *lokale])
+    assert cli.cmd_analyze(args, project) == 0
+
+    ausgabe = capsys.readouterr().out
+    assert "Bilder gehen an" in ausgabe, "der Hinweis steht vor dem Senden"
+    assert "kostenlos" in ausgabe
+    assert aufrufe == ([vision.ZAEHL_PROBEN] if gesendet else [])
+
+
+def _analyze_mit_attrappe(tmp_path: Path, monkeypatch, *argumente: str) -> list[str]:
+    """``analyze --yes`` mit ersetzter Analyse; liefert, was gefragt worden waere."""
+    from slideshow import cli
+    from slideshow.paths import Project
+
+    gefragt: list[str] = []
+
+    def analysiere(pfade, *, vorhanden, modell, **_kw):
+        gefragt.extend(pfade)
+        return VisionDoc(model=modell, prompt=vision.PROMPT_VERSION), vision.Bericht()
+
+    monkeypatch.setattr(vision, "analysiere", analysiere)
+    args = cli.build_parser().parse_args(
+        ["--project", str(tmp_path), "analyze", "--yes", *argumente])
+    assert cli.cmd_analyze(args, Project.open(tmp_path)) == 0
+    return sorted(gefragt)
+
+
+_AUSWAHL = "version: 1\nrest: drop\norder:\n  - img_0\n  - img_2\n"
+
+
+def test_analyze_folgt_der_auswahl_in_order_yaml(tmp_path: Path, monkeypatch, capsys):
+    """Bezahlt wird nur, was in den Film kommt — auch wenn mehr Bilder ein
+    Cache-Bild haben, etwa nach ``preprocess --all`` oder nach einer Abwahl."""
+    _zaehlprojekt(tmp_path, 4)
+    (tmp_path / "order.yaml").write_text(_AUSWAHL, encoding="utf-8")
+    assert _analyze_mit_attrappe(tmp_path, monkeypatch) == [
+        "cache/img_0.jpg", "cache/img_2.jpg"]
+    assert "2 vorverarbeitete Bilder stehen nicht in der Auswahl" in \
+        capsys.readouterr().out
+
+
+def test_analyze_all_nimmt_alle_vorverarbeiteten(tmp_path: Path, monkeypatch):
+    _zaehlprojekt(tmp_path, 4)
+    (tmp_path / "order.yaml").write_text(_AUSWAHL, encoding="utf-8")
+    assert len(_analyze_mit_attrappe(tmp_path, monkeypatch, "--all")) == 4
+
+
+def test_ohne_order_yaml_wird_alles_vorverarbeitete_analysiert(tmp_path: Path,
+                                                               monkeypatch):
+    _zaehlprojekt(tmp_path, 3)
+    assert len(_analyze_mit_attrappe(tmp_path, monkeypatch)) == 3
+
+
+def test_ein_bild_im_film_ohne_cache_bild_wird_gemeldet(tmp_path: Path, monkeypatch,
+                                                         capsys):
+    """Meist nach ``preprocess`` in die Auswahl genommen. Ohne Analyse laeuft es
+    ueber die heutige Rotation — das soll vor dem Bezahlen dastehen."""
+    _zaehlprojekt(tmp_path, 2, ohne_cache=1)
+    (tmp_path / "order.yaml").write_text(
+        "version: 1\nrest: drop\norder:\n  - img_0\n  - img_2\n", encoding="utf-8")
+    assert _analyze_mit_attrappe(tmp_path, monkeypatch) == ["cache/img_0.jpg"]
+    ausgabe = capsys.readouterr().out
+    assert "noch kein Cache-Bild" in ausgabe and "img_2" in ausgabe
+
+
+def test_eintraege_ausserhalb_des_laufs_bleiben_in_der_datei(tmp_path: Path):
+    """Ein Bild, das kurz aus dem Film genommen wird, behaelt seinen Eintrag —
+    sonst ginge eine Handkorrektur verloren, und das Zurueckholen kostete eine
+    neue Anfrage. Nach einem Modellwechsel dagegen waere er veraltet."""
+    bild = tmp_path / "a.jpg"
+    bild.write_bytes(b"a")
+    alt = VisionDoc(model="claude-opus-5-5", prompt=vision.PROMPT_VERSION, images={
+        "cache/a.jpg": VisionEntry(hash=vision.hash_file(bild), scene="group"),
+        "cache/weg.jpg": VisionEntry(scene="architecture", note="von Hand korrigiert")})
+    doc, bericht = vision.analysiere({"cache/a.jpg": bild}, vorhanden=alt,
+                                     modell="claude-opus-5-5")
+    assert not bericht.gefragt
+    assert doc.images["cache/weg.jpg"].note == "von Hand korrigiert"
+
+    doc, _ = vision.analysiere({}, vorhanden=alt, modell="claude-haiku-5-5")
+    assert "cache/weg.jpg" not in doc.images
+
+
 def test_der_regionale_bedrock_endpunkt_kostet_zehn_prozent_mehr():
     """Wer Bedrock wegen der Datenresidenz nimmt, zahlt die 10 % — sie *sind*
     die Datenresidenz."""

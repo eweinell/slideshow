@@ -641,9 +641,13 @@ ohne erkennbaren Grund still. Vier Zahlen korrigieren, und der nächste
   Kommando und keine Zeile in `preprocess`; der erste Lauf fragt nach. Was
   dabei zugesagt wird und was nicht, steht in der
   [README](../README.md#bildanalyse-und-datenschutz).
-- **Erst auswählen, dann analysieren.** Nach `select` normalisiert
-  `preprocess` nur noch die gewählten Bilder, und `analyze` sieht genau die —
-  187 statt 1240.
+- **Erst auswählen, dann analysieren.** `analyze` folgt wie `preprocess` der
+  `order.yaml`: analysiert und bezahlt wird nur, was im Film steht — in
+  `kenia-2026` 447 von 1348 Bildern. `--all` nimmt alle vorverarbeiteten
+  Bilder, `--order` eine andere Auswahl. Ein Bild im Film ohne Cache-Bild
+  (nach `preprocess` aufgenommen) wird gemeldet statt still übergangen.
+  Einträge abgewählter Bilder bleiben in `vision.yaml` stehen, samt
+  Handkorrektur.
 - **Ein Modell- oder Prompt-Wechsel analysiert alles neu** und ändert damit
   jede Bewegung. Jede geänderte Bewegung ändert einen Segment-Hash, und der
   nächste `render` baut diese Segmente neu. `analyze` warnt davor, bevor es
@@ -654,9 +658,10 @@ ohne erkennbaren Grund still. Vier Zahlen korrigieren, und der nächste
 - **`--no-vision`** baut ohne die Datei weiter, ohne sie zu löschen.
 
 ```bash
-slideshow analyze --count-tokens       # vorher nachmessen, was ein Bild kostet
-slideshow analyze --model claude-sonnet-5   # günstiger, für Prompt-Runden
-slideshow analyze --bedrock eu-central-1    # die Bilder bleiben in der EU
+slideshow analyze --count-tokens       # vorher nachmessen, was ein Bild kostet (fragt vorher)
+slideshow analyze --batch              # halber Preis, Aufträge liegen 29 Tage bei Anthropic
+slideshow analyze --model claude-sonnet-5-5 # günstiger, für Prompt-Runden
+slideshow analyze --bedrock eu-central-1    # die Bilder bleiben in der EU (nicht mit --batch)
 slideshow build --variety 1            # reine Passung statt Abwechslung
 ```
 

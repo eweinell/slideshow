@@ -597,7 +597,7 @@ def analysiere(pfade: dict[str, Path], *, vorhanden: VisionDoc | None = None,
                                         prompt=PROMPT_VERSION)
     eintraege: dict[str, VisionEntry] = dict(behalten)
     if not zu_fragen:
-        return (_doc(eintraege, pfade, modell), bericht)
+        return (_doc(eintraege, pfade, modell, vorhanden), bericht)
 
     client = client_bauen(bedrock_region=bedrock_region)
     voller_name = modellname(modell, bedrock=bool(bedrock_region))
@@ -648,7 +648,7 @@ def analysiere(pfade: dict[str, Path], *, vorhanden: VisionDoc | None = None,
                 if fortschritt is not None:
                     fortschritt(bericht.analysiert, len(zu_fragen), rel)
 
-    return (_doc(eintraege, pfade, modell), bericht)
+    return (_doc(eintraege, pfade, modell, vorhanden), bericht)
 
 
 def analysiere_batch(pfade: dict[str, Path], *, vorhanden: VisionDoc | None = None,
@@ -673,7 +673,7 @@ def analysiere_batch(pfade: dict[str, Path], *, vorhanden: VisionDoc | None = No
                                         prompt=PROMPT_VERSION)
     eintraege: dict[str, VisionEntry] = dict(behalten)
     if not zu_fragen:
-        return (_doc(eintraege, pfade, modell), bericht)
+        return (_doc(eintraege, pfade, modell, vorhanden), bericht)
 
     client = client_bauen()
     # ``custom_id`` traegt den Index, nicht den Pfad: die IDs sind in Laenge und
@@ -719,11 +719,17 @@ def analysiere_batch(pfade: dict[str, Path], *, vorhanden: VisionDoc | None = No
         eintraege[rel] = eintrag
         bericht.uebernommen += 1
 
-    return (_doc(eintraege, pfade, modell), bericht)
+    return (_doc(eintraege, pfade, modell, vorhanden), bericht)
+
+
+#: Wie viele Bilder ``analyze --count-tokens`` nachmisst. Eine Konstante, weil
+#: der Datenschutzhinweis vorher dieselbe Zahl nennen muss, die dann gesendet
+#: wird.
+ZAEHL_PROBEN = 5
 
 
 def tokens_zaehlen(pfade: dict[str, Path], *, modell: str = DEFAULT_MODEL,
-                   proben: int = 5) -> tuple[int, int]:
+                   proben: int = ZAEHL_PROBEN) -> tuple[int, int]:
     """Vorab nachmessen, was ein Bild wirklich kostet (A6).
 
     Die Formel aus Abschnitt 9 (``w * h / 750``) ist eine Naeherung, und die
@@ -744,16 +750,28 @@ def tokens_zaehlen(pfade: dict[str, Path], *, modell: str = DEFAULT_MODEL,
 
 
 def _doc(eintraege: dict[str, VisionEntry], pfade: dict[str, Path],
-         modell: str) -> VisionDoc:
+         modell: str, vorhanden: VisionDoc | None = None) -> VisionDoc:
     """Die Datei in der Reihenfolge der Bilder aufbauen.
 
     Nicht in der Reihenfolge, in der die Antworten eintrafen: die haengt am
     Zufall der Parallelitaet, und eine Datei, die bei jedem Lauf anders
     sortiert ist, laesst sich nicht mehr diffen.
+
+    Eintraege aus ``vorhanden`` fuer Bilder, die dieser Lauf gar nicht ansieht,
+    bleiben hinten stehen — solange Modell und Prompt-Version gleich sind.
+    ``analyze`` folgt der Auswahl in ``order.yaml``; ein Bild, das kurz aus dem
+    Film genommen wird, verloere sonst seinen Eintrag samt Handkorrektur und
+    kostete beim Zurueckholen eine neue Anfrage. Nach einem Modellwechsel
+    waeren sie veraltet und gehoerten nicht in eine Datei mit neuem ``model``.
     """
     geordnet = {rel: eintraege[rel] for rel in pfade if rel in eintraege}
     for rel, e in eintraege.items():
         geordnet.setdefault(rel, e)
+    if (vorhanden is not None and vorhanden.model == modell
+            and vorhanden.prompt == PROMPT_VERSION):
+        for rel, e in vorhanden.images.items():
+            if rel not in pfade:
+                geordnet.setdefault(rel, e)
     return VisionDoc(version=1, model=modell, prompt=PROMPT_VERSION,
                      images=geordnet)
 
