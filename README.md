@@ -159,7 +159,10 @@ dazu: [`docs/rezepte.md`](docs/rezepte.md).
 ## Zweitfassungen: herunterskalieren, fürs Netz konvertieren
 
 Der Master aus `render` ist die Archiv- und Fernsehfassung: 4K, HEVC, BT.709 SDR,
-`hvc1`-getaggt und mit `-movflags +faststart` geschrieben. Kleinere Fassungen —
+`hvc1`-getaggt und mit `-movflags +faststart` geschrieben. Ein Mangel reist
+dabei mit: der Master trägt nur `colorspace` und `color_range`, **Transfer und
+Primärfarben stehen auf `unknown`** (siehe [Die Farbtags](#zwei-dinge-die-man-nachmessen-muss)).
+Jede Zweitfassung muss sie deshalb selbst setzen. Kleinere Fassungen —
 FHD fürs Netz, eine Datei zum Verschicken — entstehen **nicht** durch einen
 zweiten Render, sondern durch einen einzelnen ffmpeg-Lauf über den fertigen
 Master. Ein Render mit anderem `size:` würde den kompletten Segment-Cache
@@ -170,12 +173,18 @@ noch einmal 45–90 Minuten kosten.
 
 ```bash
 ffmpeg -hwaccel cuda -hwaccel_output_format cuda -i out/master.mp4 \
-  -vf "scale_cuda=1920:1080:interp_algo=lanczos:format=p010le" \
+  -vf "scale_cuda=1920:1080:interp_algo=lanczos:format=p010le,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv" \
   -c:v hevc_nvenc -preset p7 -tune hq -rc vbr -cq 24 -b:v 0 \
   -maxrate 25M -bufsize 50M -multipass fullres -rc-lookahead 32 \
   -spatial-aq 1 -aq-strength 8 -temporal-aq 1 -bf 3 -b_ref_mode middle \
-  -g 120 -tag:v hvc1 -c:a copy -movflags +faststart out/master_fhd.mp4
+  -g 100 -tag:v hvc1 -c:a copy -movflags +faststart out/master_fhd.mp4
 ```
+
+`-g 100` gilt für 50 fps — die Projekte hier laufen mit 50, nicht 60 (siehe
+unten). `setparams` funktioniert auch auf CUDA-Frames hinter `scale_cuda`;
+ohne es kommt die Datei mit `color_transfer=unknown` heraus, gemessen an
+ffmpeg 9.0.2. Die `-bf 3` sind hier anders als im Master unbedenklich: es gibt
+keinen Concat mehr, an dessen Segmentgrenzen B-Frames stören könnten.
 
 Der Gewinn steckt in `-hwaccel_output_format cuda`, nicht in den
 Encoder-Schaltern: damit bleiben die Frames durchgehend im VRAM — NVDEC
@@ -187,9 +196,12 @@ Drei Werte darf man nicht aus einem Beispiel abschreiben:
 
 - **`interp_algo=lanczos`.** Die Vorgabe von `scale_cuda` ist `nearest` — bei
   4K → FHD sichtbar matschig. Der Software-Scaler entspricht `flags=lanczos`.
-- **`-g` ist das Doppelte der Projekt-`fps`**, für die üblichen 60 fps also 120.
-  Das sind zwei Sekunden Keyframe-Abstand; NVENCs Vorgabe von 250 Frames macht
-  das Scrubben im Browser grob.
+- **`-g` ist das Doppelte der Projekt-`fps`**: bei 50 fps 100, bei 60 fps 120.
+  Das sind zwei Sekunden Keyframe-Abstand. Die Vorgabe von NVENC *und* x264 ist
+  250 Frames — bei 50 fps fünf Sekunden, und das Scrubben im Browser wird grob.
+  Die `fps` stehen in `edit.yaml`.
+- **Die Farbtags gehören über `setparams` gesetzt**, nicht über `-color_trc`
+  als Ausgabeoption — die landet unter ffmpeg 8/9 nicht in der Datei.
 - **`-tag:v hvc1` und `-movflags +faststart` überleben das Transcodieren
   nicht** und müssen erneut gesetzt werden. Ohne `hvc1` spielt HEVC-in-MP4 auf
   Apple-Geräten nicht, ohne faststart lädt der Browser die ganze Datei, bevor er
@@ -232,19 +244,77 @@ Die `codecs`-Strings hängen an Level und Bittiefe und gehören aus den *fertige
 Dateien abgelesen, nicht abgeschrieben — sonst überspringt ein Browser eine
 Quelle, die er eigentlich könnte.
 
+### Derselbe Weg auf der CPU: x264 und SVT-AV1
+
+Ohne NVIDIA-GPU, oder wenn bei Web-Bitraten die Qualität zählt (siehe den
+Vorbehalt unten), dieselben zwei Web-Dateien in Software:
+
+```bash
+# Rückfallquelle: H.264 High, 8 Bit, Level 4.2
+ffmpeg -i out/master.mp4 \
+  -vf "scale=1920:1080:flags=lanczos,format=yuv420p,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv" \
+  -c:v libx264 -preset slow -crf 22 -profile:v high -level:v 4.2 \
+  -maxrate 12M -bufsize 24M -g 100 -keyint_min 100 -sc_threshold 0 \
+  -c:a copy -movflags +faststart out/fhd_h264.mp4
+
+# Erste Quelle: AV1, 10 Bit
+ffmpeg -i out/master.mp4 \
+  -vf "scale=1920:1080:flags=lanczos,format=yuv420p10le,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv" \
+  -c:v libsvtav1 -preset 5 -crf 32 -g 100 \
+  -c:a copy -movflags +faststart out/fhd_av1.mp4
+```
+
+Drei Schalter dabei sind nicht Geschmack:
+
+- **`-level:v 4.2`.** Ohne die Angabe wählt x264 bei `-preset slow` wegen der
+  zusätzlichen Referenzbilder Level 5.0. Das ist für 1080p unnötig und schließt
+  ältere Geräte aus. Mit der Angabe begrenzt x264 die Referenzen selbst.
+- **`-keyint_min 100 -sc_threshold 0`** zusätzlich zu `-g`. Sonst setzt x264
+  bei jedem Szenenwechsel einen Keyframe, und der Abstand ist nicht mehr fest.
+- **`format=yuv420p` vor dem Encoder.** Hier rechnet swscale von 10 auf 8 Bit
+  herunter, und zwar mit Dithering. Das Banding-Problem von `scale_cuda` (unten)
+  gibt es auf diesem Weg nicht.
+
+Zur Einordnung, gemessen an einem 12-s-Ausschnitt aus `kenia-2026` (4K-Master
+dort 31 Mbit/s):
+
+| Fassung | Bitrate |
+|---|---|
+| `hevc_nvenc -cq 24`, FHD, 10 Bit (Kommando oben) | 6,6 Mbit/s |
+| `libx264 -crf 22`, FHD, 8 Bit | 4,9 Mbit/s |
+| `av1_nvenc -cq 30`, FHD, 10 Bit | 5,1 Mbit/s |
+| `libsvtav1 -crf 32`, FHD, 10 Bit | 2,7 Mbit/s |
+
+Ein Ausschnitt ist keine Filmbilanz, die Verhältnisse stimmen aber. Zum
+Vergleich, was ohne diese Schalter herauskam (`kenia-2026`, ganzer Film): x264
+mit `-crf 18` und dem Vorgabe-Keyframeabstand ergab 12,2 Mbit/s und Keyframes
+alle 5 s. Eine AV1-Datei in **4K**
+(16 Mbit/s) ist dagegen weder Web-Fassung noch Fernsehfassung: für das Netz zu
+groß, und für den Fernseher bleibt HEVC die sichere Wahl, die es als Master
+schon gibt.
+
 ### Zwei Dinge, die man nachmessen muss
 
-**Die Farbtags.** Sie stammen hier aus dem Master und werden über Decoder →
-Filter → Encoder durchgereicht, das übliche `setparams` ist also vermutlich
-entbehrlich. Verlassen sollte man sich nicht darauf — ffmpeg 8 übernimmt
-`-color_trc`/`-color_primaries` als *Ausgabe*optionen nicht mehr in die Datei
-([`docs/briefing-hlg-ffmpeg8.md`](docs/briefing-hlg-ffmpeg8.md)), und der Fehler
-ist still:
+**Die Farbtags.** Durchreichen hilft nicht, denn im Master fehlen sie schon:
+`color_transfer` und `color_primaries` stehen dort auf `unknown`
+([`docs/pruefbericht-ffmpeg9.md`](docs/pruefbericht-ffmpeg9.md)). ffmpeg 8 und 9
+übernehmen `-color_trc`/`-color_primaries` als *Ausgabe*optionen nicht mehr in
+die Datei ([`docs/briefing-hlg-ffmpeg8.md`](docs/briefing-hlg-ffmpeg8.md)).
+Deshalb steht in allen Kommandos oben `setparams`. Ohne das Filter kommt die
+Zweitfassung genauso ungetaggt heraus, und der Fehler ist still:
 
 ```bash
 ffprobe -v error -select_streams v:0 -of default=nw=1 \
   -show_entries stream=width,height,pix_fmt,profile,level,codec_tag_string,color_primaries,color_transfer,color_space \
   out/master_fhd.mp4
+```
+
+Den Keyframe-Abstand zeigt dasselbe Werkzeug. Zwischen zwei Keyframes sollten
+genau zwei Sekunden liegen:
+
+```bash
+ffprobe -v error -select_streams v:0 -read_intervals "%+20" \
+  -show_entries packet=pts_time,flags -of csv=p=0 out/fhd_h264.mp4 | grep K
 ```
 
 **Das Dithering beim Weg von 10 auf 8 Bit.** `scale_cuda:format=yuv420p`
