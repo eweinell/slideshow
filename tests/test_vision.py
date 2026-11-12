@@ -264,7 +264,9 @@ def test_der_kostenbericht_trifft_die_rechnung_aus_abschnitt_neun():
     for _ in range(99):
         mit_cache.dazu(_Usage(826, 250, lies=1200))
     assert mit_cache.kosten("claude-opus-5") == pytest.approx(1.10, abs=0.02)
-    assert mit_cache.kosten("claude-sonnet-5") == pytest.approx(0.66, abs=0.02)
+    # Sonnet 5 kostet seit September 2026 regulaer 2/10 (Briefing, Nachtrag
+    # 12.11.2026) — die 0,66 der Tabelle galten dem nie eingefuehrten 3/15.
+    assert mit_cache.kosten("claude-sonnet-5") == pytest.approx(0.44, abs=0.02)
 
     # Haiku 4.5 bekommt bewusst ein **anderes** Profil: sein
     # Cache-Mindestpraefix liegt bei 4096 Tokens, unsere 1200 cachen dort gar
@@ -302,6 +304,37 @@ def test_die_schaetzung_zahlt_den_praefix_genau_einmal():
     hundert = vision.kosten_schaetzung(100, "claude-opus-5")
     assert hundert == pytest.approx(1.10, abs=0.05)
     assert hundert < eins * 100
+
+
+def test_haiku_5_5_hat_einen_preis():
+    """Gerechnet von Hand nach der Preisliste vom 12.11.2026: 500 Bilder,
+    817 Eingabetokens je Bild, 1200 Praefix (einmal geschrieben, 499-mal
+    gelesen), 250 Ausgabe."""
+    erwartet = (500 * 817 * 0.10 + 1200 * 0.125 + 1200 * 499 * 0.01
+                + 500 * 250 * 0.50) / 1e6
+    assert vision.kosten_schaetzung(500, "claude-haiku-5-5") == pytest.approx(erwartet)
+    assert erwartet == pytest.approx(0.109, abs=0.001)
+
+
+def test_der_cache_lesepreis_haengt_am_modell():
+    """Opus 5.5 liest den Cache zu 0,05x, Opus 5 zu 0,1x — ein gemeinsamer
+    Faktor rechnete den Praefix auf Opus 5.5 doppelt so teuer."""
+    v = vision.Verbrauch(cache_gelesen=1_000_000)
+    assert v.kosten("claude-opus-5-5") == pytest.approx(0.20)
+    assert v.kosten("claude-opus-5") == pytest.approx(0.50)
+
+
+def test_ein_batch_lauf_kostet_die_haelfte():
+    voll = vision.kosten_schaetzung(100, "claude-haiku-5-5")
+    assert vision.kosten_schaetzung(100, "claude-haiku-5-5", batch=True) == \
+        pytest.approx(voll / 2)
+
+
+def test_bildtokens_folgen_den_28er_feldern():
+    """Werte aus der Tabelle der Vision-Doku."""
+    assert vision.bildtokens(1000, 1000) == 1296
+    assert vision.bildtokens(1092, 1092) == 1521
+    assert vision.TOKENS_BILD == 37 * 21
 
 
 # --------------------------------------------------------------------------

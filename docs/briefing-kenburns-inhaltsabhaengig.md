@@ -604,6 +604,26 @@ Sonnet 5 liegt bis 31.08.2026 auf einem Einführungspreis von 2/10 — dann
 etwa ein Drittel günstiger als oben. Für die Planung ist der Regelpreis
 angesetzt.
 
+> **Nachtrag 12.11.2026 — Preise und Tokenformel sind überholt.** Drei
+> Änderungen, `vision.PREISE` ist nachgezogen:
+>
+> - **Sonnet 5 bleibt bei 2/10.** Der Einführungspreis ist der Regelpreis
+>   geworden, die Erhöhung auf 3/15 findet nicht statt: 0,44 $ je 100 Bilder
+>   statt 0,66 $.
+> - **Neue Modelle**, je 100 Bilder synchron und sparsam: Haiku 5.5
+>   (0,10/0,50, Cache ab 512 Tokens) **0,022 $**, Sonnet 5.5 (2/10) 0,43 $,
+>   Opus 5.5 (4/20) 0,86 $. Opus 5.5 und Sonnet 5.5 lesen den Cache zu
+>   **0,05×**, nicht 0,1× — der Lesepreis steht deshalb je Modell in der
+>   Tabelle.
+> - **Bildtokens** zählen jetzt je 28×28-Feld: `⌈B/28⌉ × ⌈H/28⌉`, für
+>   1024×576 also 777 statt 786. An den Summen ändert das nichts Sichtbares.
+>
+> Bei Haiku 5.5 ist die Ausgabe der größte Posten (60–85 %), und das Modell
+> denkt immer mit — die 250 Ausgabetokens sind dort eine Annahme, die der
+> Testlauf `scripts/vision_vergleich.py` nachmisst. Ob Haiku 5.5 die
+> Schutzboxen genau genug setzt, ist offen; das ist die eigentliche Frage,
+> nicht der Preis.
+
 ### Erstanbieter-API oder Bedrock? Preise für europäische Regionen
 
 Claude läuft auch auf Amazon Bedrock, und für ein Projekt, das private
@@ -814,6 +834,13 @@ Bei 1,10 USD je 100 Bilder ist Kosten kein Argument. **Empfehlung:
 Prompt-Iteration) und Haiku 4.5 (Rauchtest). Wichtig: das Modell steht in
 `vision.yaml` und geht in den Analyse-Cache-Key ein — ein Wechsel ist eine
 bewusste Entscheidung mit Renderkosten (Abschnitt 8).
+
+> **Nachtrag 12.11.2026:** Vorgabe ist jetzt `claude-opus-5-5` (0,86 $ je 100
+> Bilder). Grundsatz: gemessen und voreingestellt wird die **aktuelle**
+> Modellgeneration; die Zahlen oben sind historisch. Ob Haiku 5.5 oder
+> Sonnet 5.5 die Vorgabe ablösen können, misst `scripts/vision_vergleich.py`
+> gegen Opus 5.5 als Referenz. Da noch keine `vision.yaml` existiert, kostet
+> der Wechsel keinen Neurender.
 
 ### E6 — Datenschutz
 

@@ -1052,7 +1052,8 @@ def cmd_analyze(args, project: Project) -> int:
                   f"ihre Nachbarblenden neu.[/yellow]")
 
     schaetzung = v.kosten_schaetzung(len(offen), modell,
-                                     bedrock_regional=bool(bedrock))
+                                     bedrock_regional=bool(bedrock),
+                                     batch=args.batch)
     if not _datenschutz_bestaetigt(con, modell=modell, anzahl=len(offen),
                                    bedrock=bedrock, schaetzung=schaetzung,
                                    ja=args.yes or args.dry_run):
@@ -1084,7 +1085,8 @@ def cmd_analyze(args, project: Project) -> int:
         for w in bericht.warnungen[12:]:
             log.warning("analyze: %s", w)
 
-    ist = bericht.verbrauch.kosten(modell, bedrock_regional=bool(bedrock))
+    ist = bericht.verbrauch.kosten(modell, bedrock_regional=bool(bedrock),
+                                   batch=args.batch)
     con.print(f"\nBildanalyse: {out}  ({len(doc.images)} Bilder, "
               f"{bericht.uebernommen} neu"
               + (f", {bericht.ausgefallen} ausgefallen" if bericht.ausgefallen else "")

@@ -42,6 +42,7 @@ import concurrent.futures as _fut
 import io
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -60,9 +61,11 @@ VISION_NAME = "vision.yaml"
 #: Renderlauf, weil sich jede Bewegung aendern kann (Abschnitt 8).
 PROMPT_VERSION = 1
 
-#: Kosten sind kein Argument (rund ein Dollar je 100 Bilder), Genauigkeit
-#: schon: aus diesen Antworten kommen **Koordinaten**.
-DEFAULT_MODEL = "claude-opus-5"
+#: Kosten sind kein Argument (rund 0,86 $ je 100 Bilder), Genauigkeit
+#: schon: aus diesen Antworten kommen **Koordinaten**. Vorgabe ist das Opus der
+#: **aktuellen** Generation — aeltere Modelle stehen in :data:`PREISE` nur noch,
+#: damit ein ``--model`` dafuer einen Preis findet.
+DEFAULT_MODEL = "claude-opus-5-5"
 
 #: Groesse des Analysebildes. Eine Genauigkeits-, keine Kostenentscheidung:
 #: der bildunabhaengige Teil der Rechnung (Ausgabetokens, gecachter Praefix)
@@ -77,20 +80,36 @@ JPEG_QUALITAET = 80
 #: Liste hier und nicht als Kommentar.
 OHNE_EFFORT = ("claude-haiku-4-5", "claude-3-", "claude-sonnet-4-5")
 
-#: Listenpreise in USD je Million Tokens (Eingabe, Ausgabe). Fuer Sonnet 5 ist
-#: bewusst der **Regelpreis** angesetzt und nicht der Einfuehrungspreis: eine
-#: datumsabhaengige Zahl im Code rottet, und der Bericht soll nicht besser
-#: aussehen, als die naechste Rechnung ausfaellt.
+#: Listenpreise in USD je Million Tokens: (Eingabe, Ausgabe, Cache-Lesen).
+#: Stand 12.11.2026, https://platform.claude.com/docs/en/about-claude/pricing.
+#:
+#: Der Cache-Lesepreis steht je Modell da und nicht als Faktor: er ist seit
+#: der 5.5-Generation kein einheitliches 0,1x mehr (Opus 5.5 und Sonnet 5.5
+#: lesen zu 0,05x, Fable 5.1 zu 0,025x). Ein gemeinsamer Faktor rechnete dort
+#: den Praefix doppelt so teuer, wie er ist. Das Cache-*Schreiben* dagegen ist
+#: ueberall 1,25x Eingabe (5-Minuten-TTL).
+#:
+#: Haiku 5.5 hat ab 100 000 Tokens je Anfrage einen hoeheren Preis; eine
+#: Bildanfrage hier hat rund 2000 — die Stufe ist deshalb nicht abgebildet.
 PREISE = {
-    "claude-fable-5": (10.0, 50.0),
-    "claude-opus-5": (5.0, 25.0),
-    "claude-opus-4-8": (5.0, 25.0),
-    "claude-opus-4-7": (5.0, 25.0),
-    "claude-sonnet-5": (3.0, 15.0),
-    "claude-haiku-4-5": (1.0, 5.0),
+    "claude-fable-5-2": (8.0, 40.0, 0.20),
+    "claude-fable-5-1": (10.0, 50.0, 0.25),
+    "claude-fable-5": (10.0, 50.0, 1.00),
+    "claude-opus-5-5": (4.0, 20.0, 0.20),
+    "claude-opus-5": (5.0, 25.0, 0.50),
+    "claude-opus-4-8": (5.0, 25.0, 0.50),
+    "claude-opus-4-7": (5.0, 25.0, 0.50),
+    "claude-sonnet-5-5": (2.0, 10.0, 0.10),
+    # Der Einfuehrungspreis von Sonnet 5 ist seit September 2026 der Regelpreis;
+    # die angekuendigte Erhoehung auf 3/15 findet nicht statt.
+    "claude-sonnet-5": (2.0, 10.0, 0.20),
+    "claude-haiku-5-5": (0.10, 0.50, 0.01),
+    "claude-haiku-4-5": (1.0, 5.0, 0.10),
 }
-#: Cache-Schreiben kostet 1,25x Eingabe, Cache-Lesen 0,1x.
-CACHE_SCHREIBEN, CACHE_LESEN = 1.25, 0.1
+#: Cache-Schreiben kostet 1,25x Eingabe — bei allen Modellen der Tabelle.
+CACHE_SCHREIBEN = 1.25
+#: Batch-API: halber Preis auf alles, auch auf Cache-Lesen und -Schreiben.
+BATCH_RABATT = 0.5
 #: Aufpreis eines regionalen Bedrock-Endpunkts. Wer Bedrock wegen der
 #: Datenresidenz nimmt, zahlt diese 10 % — sie *sind* die Datenresidenz.
 BEDROCK_EU_AUFSCHLAG = 1.10
@@ -362,35 +381,58 @@ class Verbrauch:
             getattr(usage, "cache_creation_input_tokens", 0) or 0)
         self.cache_gelesen += int(getattr(usage, "cache_read_input_tokens", 0) or 0)
 
-    def kosten(self, modell: str, *, bedrock_regional: bool = False) -> float | None:
+    def kosten(self, modell: str, *, bedrock_regional: bool = False,
+               batch: bool = False) -> float | None:
         """Ist-Kosten in USD, oder ``None`` bei unbekanntem Modell.
 
         ``None`` und nicht 0,0: eine Null im Bericht liest sich wie "hat nichts
         gekostet", und das waere eine Falschaussage ueber ein Modell, dessen
         Preis dieses Werkzeug schlicht nicht kennt.
+
+        ``batch`` halbiert alles — ohne den Schalter meldete ein Batch-Lauf
+        das Doppelte dessen, was er kostet.
         """
         preis = PREISE.get(modell.split("anthropic.")[-1])
         if preis is None:
             return None
-        ein, aus = preis
-        usd = ((self.eingabe
-                + self.cache_geschrieben * CACHE_SCHREIBEN
-                + self.cache_gelesen * CACHE_LESEN) * ein
+        ein, aus, lesen = preis
+        usd = ((self.eingabe + self.cache_geschrieben * CACHE_SCHREIBEN) * ein
+               + self.cache_gelesen * lesen
                + self.ausgabe * aus) / 1_000_000
+        if batch:
+            usd *= BATCH_RABATT
         return usd * (BEDROCK_EU_AUFSCHLAG if bedrock_regional else 1.0)
 
 
 #: Tokenprofil eines Requests aus Abschnitt 9 — Grundlage der *Schaetzung*
 #: vor dem Lauf. Die Ist-Zahlen kommen hinterher aus ``usage``; weicht beides
 #: um mehr als ein Viertel voneinander ab, stimmt eine der Annahmen nicht.
-TOKENS_BILD = 786          # (1024 * 576) / 750
+def bildtokens(breite: int, hoehe: int) -> int:
+    """Visuelle Tokens eines Bildes: eines je 28x28-Pixel-Feld.
+
+    Die alte Faustformel ``Breite x Hoehe / 750`` ist abgeloest
+    (https://platform.claude.com/docs/en/build-with-claude/vision, "Resolution
+    and token cost"). Fuer 1024x576 liegen beide nah beieinander (777 gegen
+    786); auseinander laufen sie bei Kanten knapp ueber einem Vielfachen von
+    28. Herunterskaliert wird erst ab 2576 px Langkante (Claude 4.7 und neuer)
+    bzw. 1568 px — das Analysebild liegt darunter.
+    """
+    return math.ceil(breite / 28) * math.ceil(hoehe / 28)
+
+
+TOKENS_BILD = bildtokens(*ANALYSE_GROESSE)
 TOKENS_TEXT = 40
 TOKENS_PRAEFIX = 1200      # Systemprompt, gecacht
-TOKENS_AUSGABE = 250       # sparsam, mit `effort: low`
+#: Sparsam, mit `effort: low`. Auf Modellen, die immer mitdenken (Haiku 5.5,
+#: Opus 5.5), kommen die Denk-Tokens dazu und werden als Ausgabe berechnet —
+#: wie viele, zeigt erst ein Lauf. Bei Haiku 5.5 ist die Ausgabe der groesste
+#: Posten der Rechnung, nicht das Bild.
+TOKENS_AUSGABE = 250
 
 
 def kosten_schaetzung(anzahl: int, modell: str, *,
-                      bedrock_regional: bool = False) -> float | None:
+                      bedrock_regional: bool = False,
+                      batch: bool = False) -> float | None:
     """Was der Lauf voraussichtlich kostet — vor dem ersten Request.
 
     Genau ein Request zahlt den Praefix voll (er schreibt den Cache), alle
@@ -404,7 +446,7 @@ def kosten_schaetzung(anzahl: int, modell: str, *,
         cache_geschrieben=TOKENS_PRAEFIX,
         cache_gelesen=TOKENS_PRAEFIX * (anzahl - 1),
         requests=anzahl)
-    return v.kosten(modell, bedrock_regional=bedrock_regional)
+    return v.kosten(modell, bedrock_regional=bedrock_regional, batch=batch)
 
 
 @dataclass

@@ -674,7 +674,7 @@ gelieferte Bewegung wäre nicht prüfbar, eine gelieferte Bounding-Box ist es.
 
 ```yaml
 version: 1
-model: claude-opus-5
+model: claude-opus-5-5
 prompt: 1
 images:
   cache/img_0042.jpg:
