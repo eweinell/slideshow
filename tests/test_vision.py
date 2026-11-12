@@ -279,6 +279,27 @@ def test_der_kostenbericht_trifft_die_rechnung_aus_abschnitt_neun():
     assert ohne_cache.kosten("claude-haiku-4-5") == pytest.approx(0.33, abs=0.02)
 
 
+@pytest.mark.parametrize("schalter", ["--batch", "--count-tokens"])
+def test_bedrock_mit_batch_oder_tokenzaehlung_bricht_ab_bevor_etwas_gesendet_wird(
+        schalter, tmp_path: Path, monkeypatch):
+    """Beide Pfade sprechen nur die Erstanbieter-API. Mit ``--bedrock`` zusammen
+    gingen die Fotos still an Anthropic statt in die gewaehlte Region — genau
+    das, was ``--bedrock`` verhindern soll."""
+    from slideshow import cli
+    from slideshow.errors import SlideshowError
+    from slideshow.paths import Project
+
+    def kein_client(**_kw):
+        raise AssertionError("es wurde ein Client gebaut")
+
+    monkeypatch.setattr(vision, "client_bauen", kein_client)
+    args = cli.build_parser().parse_args(
+        ["--project", str(tmp_path), "analyze", "--bedrock", schalter, "--yes"])
+    with pytest.raises(SlideshowError, match="Nichts gesendet") as exc:
+        cli.cmd_analyze(args, Project.open(tmp_path))
+    assert schalter in str(exc.value)
+
+
 def test_der_regionale_bedrock_endpunkt_kostet_zehn_prozent_mehr():
     """Wer Bedrock wegen der Datenresidenz nimmt, zahlt die 10 % — sie *sind*
     die Datenresidenz."""

@@ -25,7 +25,9 @@ librosa = ["librosa>=0.11", "numba>=0.62"]
 aubio = ["aubio"]
 # Nur fuer `slideshow analyze`. Bewusst optional: `build` und `render` laufen
 # ohne das SDK, und die Testsuite laeuft ohne Netzzugriff (Abnahmekriterium A5).
-vision = ["anthropic>=0.60"]
+# Ab 2.0 sendet das SDK die API-Version 2026-10-21; ueber Bedrock gehen damit
+# nur noch Modelle ab Claude 4.7 (siehe docs/briefing-kenburns-inhaltsabhaengig.md).
+vision = ["anthropic>=2.8"]
 dev = ["pytest"]
 
 [project.scripts]

@@ -970,6 +970,14 @@ Preisvorteil ist real und irrelevant: er spart zwei Dollar.
 > Bestätigung beim ersten Lauf (E6) muss dann die **andere** Zusagentabelle
 > zeigen, nicht die von Anthropic.
 
+> **Nachtrag 12.11.2026 — SDK 2.x.** Seit `anthropic` 2.0 sendet das SDK die
+> API-Version `2026-10-21`, auch über `AnthropicBedrockMantle`. Bedrock nimmt
+> sie nur für **Claude 4.7 und neuer** an: `analyze --bedrock` mit Haiku 4.5
+> oder Opus 4.6 schlägt seither fehl, auf der Erstanbieter-API laufen sie
+> weiter. Die Vorgabe (Opus 5.5) und die übrige aktuelle Generation sind nicht
+> betroffen. Bewusst so entschieden, statt das ganze Projekt auf der alten
+> API-Version zu halten.
+
 ---
 
 ## 11. Abnahmekriterien

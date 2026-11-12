@@ -995,6 +995,20 @@ def cmd_analyze(args, project: Project) -> int:
     from . import vision as v
     from .models import Manifest
 
+    # Vor allem anderen: `--batch` und `--count-tokens` bauen ihren Client ohne
+    # Region und sprechen damit immer die Erstanbieter-API (Bedrock hat keine
+    # Batch-API). Wer `--bedrock` waehlt, will die Fotos aber gerade nicht dort
+    # haben — die Kombination schickte sie still an den falschen Ort, und der
+    # Datenschutzhinweis davor zeigte sogar die Bedrock-Zusagen.
+    if args.bedrock and (args.batch or args.count_tokens):
+        schalter = "--batch" if args.batch else "--count-tokens"
+        raise SlideshowError(
+            f"`{schalter}` laeuft nur ueber die Erstanbieter-API, nicht ueber "
+            f"Bedrock — mit `--bedrock` zusammen gingen die Bilder an Anthropic "
+            f"statt in die gewaehlte Region. Entweder `--bedrock` ohne "
+            f"`{schalter}` (synchron, voller Preis), oder `{schalter}` ohne "
+            f"`--bedrock`. Nichts gesendet.")
+
     con = console()
     manifest = Manifest.load(Path(args.manifest) if args.manifest else project.manifest)
     modell = args.model or v.DEFAULT_MODEL
