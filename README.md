@@ -15,6 +15,7 @@ slideshow sheet                               # → contact.html ← die Auswahl
 slideshow analyze                             # → vision.yaml ← optional, Kamera aufs Motiv
 slideshow build                               # → edit.yaml
 slideshow render edit.yaml -o out/master.mp4
+slideshow export-jpg                          # → out/bilder/ ← optional, die Fotos zum Durchblättern
 ```
 
 Diese Reihenfolge muss man sich nicht merken: jeder Schritt schließt mit dem
@@ -122,7 +123,7 @@ overrides.yaml  Feinschliff je Medium, Eingabe für build — optional
 vision.yaml     was auf den Bildern ist (analyze) — optional, vor dem Bauen ansehen
 edit.yaml       die Edit-List (build)
 cache/          normalisierte Bilder, Clip-Intermediates, Segment-Cache
-out/            master.mp4, timeline.json, project.kdenlive
+out/            master.mp4, timeline.json, project.kdenlive, bilder/
 logs/           ein Logfile je Subkommando, mit den exakten ffmpeg-Aufrufen
 ```
 
@@ -155,6 +156,57 @@ Eingabedateien `chapters.yaml` (Titelfolien), `order.yaml` (Reihenfolge und
 Auswahl) und `overrides.yaml` (Feinschliff je Medium). Sie alle überleben, was
 `build` mit `edit.yaml` tut: es schreibt sie bei jedem Lauf neu. Fertige Abläufe
 dazu: [`docs/rezepte.md`](docs/rezepte.md).
+
+## Bildersammlung: die Fotos des Films als JPEG
+
+Neben dem Film gibt es einen zweiten Ausgabeweg: die Standbilder aus
+`edit.yaml` als einzelne JPEGs, in Filmreihenfolge, zum Durchblättern im
+Bildbetrachter, auf dem Fernseher oder Tablet.
+
+```bash
+slideshow export-jpg                 # → out/bilder/0001_DSC06273.jpg …
+slideshow export-jpg --titles        # mit den Titelfolien als Kapiteltrennern
+slideshow export-jpg --no-gps        # ohne Aufnahmeort, zum Weitergeben
+```
+
+| Frage | Antwort |
+|---|---|
+| **Welche Bilder?** | Genau die Standbilder aus `edit.yaml` — nicht aus `order.yaml`, denn nur die Edit-List weiß, was wirklich im Film steht. Clips bleiben draußen. Ein Bild, das der Film zweimal zeigt, steht nur einmal darin (beim ersten Vorkommen). |
+| **Reihenfolge?** | Steht im Dateinamen: laufende Nummer plus Name des Originals, mindestens dreistellig, damit auch die alphabetische Sortierung stimmt. |
+| **Größe?** | Langkante des Films (bei 4K also 3840 px), Seitenverhältnis der **Aufnahme**: 3:2 quer wird 3840 × 2560, hochkant 2560 × 3840. Kleinere Originale werden nicht vergrößert. `--long-edge` stellt anders ein. |
+| **Quelle?** | Das **Original**, nicht `cache/`. Das Zwischenprodukt ist auf 16:9 beschnitten bzw. ein Hochformat-Komposit mit unscharfem Rand. Aufrichten und Farbraum laufen über denselben Code wie `preprocess`. |
+| **Format?** | JPEG, Qualität 92 (`--quality`), 4:4:4, sRGB mit eingebettetem Profil. HDR-Gain-Maps (Ultra HDR, iPhone-HEIC) gehen dabei verloren. |
+
+**Metadaten** kopiert exiftool aus dem Original — Kamera, Objektiv,
+Belichtung, Aufnahmezeit, Künstler, Copyright, Bewertung, Stichwörter, GPS.
+Korrigiert wird, was nach dem Umrechnen falsch wäre:
+
+- `Orientation` steht auf 1, denn die Drehung ist eingebrannt. Ein
+  stehengebliebenes Tag drehte ein zweites Mal.
+- `ExifImageWidth/Height` nennen die neuen Maße, `ColorSpace` sagt sRGB. Bei
+  AdobeRGB-Originalen stünde sonst „Uncalibrated“ neben einem sRGB-Bild.
+- Die **Aufnahmezeit wird um den Uhren-Offset der Kamera korrigiert**
+  (`probe --clock-offset`) — in EXIF und XMP. Das ist dieselbe Zeit, nach der
+  die Slideshow sortiert.
+
+Entfernt werden die eingebetteten Vorschaubilder (sie zeigen die alte
+Ausrichtung), die Herstellerdaten (MakerNotes), der Bearbeitungsverlauf aus
+Lightroom/RawTherapee, Gesichtsregionen (sie beziehen sich auf die ungedrehte
+Aufnahme) sowie die Seriennummern von Gehäuse und Objektiv.
+
+> **Viele Betrachter sortieren nach Aufnahmedatum, nicht nach Namen** —
+> Windows Fotos, viele Fernseher, Google Fotos. Bei einer Reihenfolge, die
+> nicht chronologisch ist (`order.yaml` mit thematischen Blöcken), mischt
+> das die Bilder wieder nach der Zeit. Im Betrachter „nach Name“ wählen; das
+> Datum zu verbiegen, damit es passt, wäre eine falsche Angabe im Bild.
+
+Ein zweiter Lauf ist ein Abgleich, kein Neuexport: der Inhaltsschlüssel einer
+Datei hängt am Original und an den Parametern, **nicht an der Position**.
+Rückt ein Bild nach einem Umsortieren weiter, wird es umbenannt statt neu
+kodiert; ein herausgenommenes Bild verschwindet aus dem Ordner. Welche Dateien
+das Werkzeug geschrieben hat, merkt sich `.slideshow-bilder.json` im
+Ausgabeordner — nur diese werden je umbenannt oder gelöscht. Liegt eine fremde
+Datei unter einem Zielnamen, bricht der Export ab, statt sie zu überschreiben.
 
 ## Zweitfassungen: herunterskalieren, fürs Netz konvertieren
 

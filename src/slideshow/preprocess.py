@@ -110,14 +110,44 @@ def process_image(src: Path, dst: Path, *, portrait_mode: str = "blur",
     3. Auf die Normalform skalieren (Lanczos).
     4. Als JPEG q=95 bzw. 16-Bit-PNG ablegen.
     """
-    from PIL import Image, ImageCms, ImageOps, ImageFilter
+    from PIL import Image, ImageFilter
 
     tw, th = size or (LONG_EDGE, int(round(LONG_EDGE * 9 / 16)))
+
+    im = load_upright_srgb(src)
+    orig_aspect = im.width / im.height if im.height else 1.0
+
+    portrait = orig_aspect < 1.0
+    if portrait and portrait_mode != "crop":
+        out = _portrait_composite(im, tw, th, mode=portrait_mode,
+                                  Image=Image, ImageFilter=ImageFilter)
+    else:
+        out = _cover_crop(im, tw, th, Image=Image)
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if fmt == "png16":
+        # 16 Bit nuetzt nur dem scale16-Renderpfad; zoompan rechnet in 8 Bit.
+        out.convert("RGB").save(dst, format="PNG", compress_level=4)
+    else:
+        out.save(dst, format="JPEG", quality=quality, subsampling=0,
+                 optimize=True, progressive=False)
+    return {"width": out.width, "height": out.height, "portrait": portrait}
+
+
+def load_upright_srgb(src: Path):
+    """Ein Foto aufrecht und in sRGB, als geladenes RGB-Bild.
+
+    Die ersten beiden Schritte von :func:`process_image`, herausgeloest, weil
+    die Bildersammlung (:mod:`slideshow.stills`) sie genauso braucht — nur ohne
+    den Beschnitt auf die Normalform. Zwei Kopien liefen frueher oder spaeter
+    auseinander, und dann laege ein Bild im Film aufrecht und in der Sammlung
+    quer.
+    """
+    from PIL import Image, ImageCms, ImageOps
 
     with Image.open(src) as im:
         # 1. Orientation einbrennen. exif_transpose entfernt das Tag dabei.
         im = ImageOps.exif_transpose(im)
-        orig_aspect = im.width / im.height if im.height else 1.0
 
         # 2. ICC -> sRGB. Handys liefern haeufig Display-P3, Kameras oft
         #    AdobeRGB — beides muss nach sRGB.
@@ -130,25 +160,11 @@ def process_image(src: Path, dst: Path, *, portrait_mode: str = "blur",
                     im, src_prof, ImageCms.createProfile("sRGB"), outputMode="RGB")
             except Exception as exc:                # noqa: BLE001
                 log.warning("%s: ICC-Konvertierung fehlgeschlagen (%s), Profil wird "
-                            "als sRGB interpretiert", src.name, exc)
+                            "als sRGB interpretiert", Path(src).name, exc)
         if im.mode != "RGB":
             im = im.convert("RGB")
-
-        portrait = orig_aspect < 1.0
-        if portrait and portrait_mode != "crop":
-            out = _portrait_composite(im, tw, th, mode=portrait_mode,
-                                      Image=Image, ImageFilter=ImageFilter)
-        else:
-            out = _cover_crop(im, tw, th, Image=Image)
-
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if fmt == "png16":
-            # 16 Bit nuetzt nur dem scale16-Renderpfad; zoompan rechnet in 8 Bit.
-            out.convert("RGB").save(dst, format="PNG", compress_level=4)
-        else:
-            out.save(dst, format="JPEG", quality=quality, subsampling=0,
-                     optimize=True, progressive=False)
-        return {"width": out.width, "height": out.height, "portrait": portrait}
+        im.load()
+        return im
 
 
 def _cover_crop(im, tw: int, th: int, *, Image):

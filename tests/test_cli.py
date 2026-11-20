@@ -121,6 +121,9 @@ def test_ganze_kette(tmp_path, quelle):
     assert _run("--project", proj, "export-mlt") == 0
     assert (tmp_path / "proj" / "out" / "project.kdenlive").exists()
 
+    assert _run("--project", proj, "export-jpg") == 0
+    assert len(list((tmp_path / "proj" / "out" / "bilder").glob("*.jpg"))) == 5
+
     # Jedes Subkommando schreibt ein Logfile nach logs/ (Abschnitt 2).
     logs = list((tmp_path / "proj" / "logs").glob("*.log"))
     assert {p.name.split("-")[0] for p in logs} >= {

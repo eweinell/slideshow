@@ -407,6 +407,29 @@ def build_parser() -> argparse.ArgumentParser:
                     help="in Kdenlive korrigierte Zeiten in die Edit-List zurueckfuehren")
     _intermediate_arg(mx)
 
+    ej = sub.add_parser(
+        "export-jpg", help="Bildersammlung: die Standbilder des Films als JPEG",
+        description="Schreibt die Standbilder aus edit.yaml in Filmreihenfolge nach "
+                    "out/bilder/ — aus den Originalen, im Seitenverhaeltnis der "
+                    "Aufnahme, auf die Langkante des Films skaliert. Die Reihenfolge "
+                    "steht im Dateinamen. Clips bleiben draussen, doppelt gezeigte "
+                    "Bilder stehen einmal darin.")
+    ej.add_argument("edit", nargs="?", default=None, metavar="edit.yaml")
+    ej.add_argument("-o", "--output", default=None, metavar="out/bilder",
+                    help="Ausgabeordner (Default: out/bilder im Projekt)")
+    ej.add_argument("--manifest", default=None)
+    ej.add_argument("--long-edge", type=int, default=None, metavar="PX",
+                    help="Langkante in Pixeln (Default: die Langkante von size in "
+                         "edit.yaml, bei 4K also 3840). Kleinere Originale bleiben, "
+                         "wie sie sind.")
+    ej.add_argument("--quality", type=int, default=None, metavar="Q",
+                    help="JPEG-Qualitaet 1-100 (Default: 92)")
+    ej.add_argument("--no-gps", dest="no_gps", action="store_true",
+                    help="GPS-Koordinaten nicht aus den Originalen uebernehmen")
+    ej.add_argument("--titles", action="store_true",
+                    help="Titel- und Zwischenfolien als Kapiteltrenner aufnehmen")
+    ej.add_argument("--jobs", type=int, default=None)
+
     cl = sub.add_parser(
         "clean", help="Cache aufraeumen: was edit.yaml nicht referenziert",
         description="Loescht aus cache/, was die aktuelle edit.yaml nicht "
@@ -1978,6 +2001,56 @@ def cmd_export_mlt(args, project: Project) -> int:
     return 0
 
 
+def cmd_export_jpg(args, project: Project) -> int:
+    from .models import EditList, Manifest
+    from .stills import QUALITY, export_stills, sammlung
+
+    epath = Path(args.edit) if args.edit else project.edit
+    edit = EditList.load(epath)
+    mpath = Path(args.manifest) if args.manifest else project.manifest
+    # Ohne Manifest keine Originale — und die Zwischenprodukte haben das
+    # Format des Films, nicht das der Aufnahme.
+    manifest = Manifest.load(mpath)
+
+    langkante = args.long_edge or max(edit.size)
+    quality = args.quality if args.quality is not None else QUALITY
+    if langkante < 16:
+        raise UsageError(f"--long-edge {langkante} ist zu klein.")
+    if not 1 <= quality <= 100:
+        raise UsageError(f"--quality muss zwischen 1 und 100 liegen, nicht {quality}.")
+
+    dry = DryRun(enabled=args.dry_run)
+    if args.titles:
+        _titelassets(project, edit, manifest, dry=dry)
+    eintraege, hinweise = sammlung(project, edit, manifest, titles=args.titles)
+    from rich.markup import escape
+    for h in hinweise:
+        console().print(f"  [yellow]WARN[/] {escape(h)}")
+    if not eintraege:
+        raise SlideshowError(f"{epath.name} enthaelt keine exportierbaren Standbilder.")
+
+    ordner = Path(args.output) if args.output else (project.out / "bilder")
+    stats = export_stills(project, eintraege, ordner, langkante=langkante,
+                          quality=quality, gps=not args.no_gps, jobs=args.jobs, dry=dry)
+    if args.dry_run:
+        _print_commands(dry.as_text())
+        return 0
+
+    console().print(f"Bildersammlung: {len(eintraege)} Dateien in {ordner} "
+                    f"(Langkante {langkante} px)")
+    console().print(f"  {stats.neu} neu, {stats.umbenannt} umbenannt, "
+                    f"{stats.unveraendert} unveraendert, {stats.geloescht} entfernt")
+    for h in stats.hinweise:
+        console().print(f"  [yellow]{escape(h)}[/]")
+    # exiftool schreibt "[minor]" in seine Meldungen — Rich hielte das fuer
+    # einen Stil und verschluckte es.
+    for f in stats.fehler[:10]:
+        console().print(f"  [red]FEHLER[/] {escape(f)}")
+    if len(stats.fehler) > 10:
+        console().print(f"  [dim]... {len(stats.fehler) - 10} weitere[/dim]")
+    return 2 if stats.fehler else 0
+
+
 def cmd_clean(args, project: Project) -> int:
     from rich.table import Table
     from .clean import ARTEN, apply_clean, plan_clean
@@ -2054,7 +2127,8 @@ _COMMANDS = {
     "preprocess": cmd_preprocess, "beats": cmd_beats, "chapters": cmd_chapters,
     "order": cmd_order, "select": cmd_select, "sheet": cmd_sheet,
     "analyze": cmd_analyze, "build": cmd_build, "overrides": cmd_overrides,
-    "render": cmd_render, "export-mlt": cmd_export_mlt, "clean": cmd_clean,
+    "render": cmd_render, "export-mlt": cmd_export_mlt, "export-jpg": cmd_export_jpg,
+    "clean": cmd_clean,
     "selftest": cmd_selftest,
 }
 
